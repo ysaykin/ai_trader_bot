@@ -1,0 +1,22 @@
+services:
+  lumibot-bot:
+    build: .
+    container_name: lumibot-bot
+    restart: "no"
+    env_file: .env
+    volumes:
+      - ./strategies:/app/strategies    # edit locally, restart to pick up
+      - ./logs:/app/logs                # persist trade logs
+
+  lumibot-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: lumibot-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    env_file: .env
+    volumes:
+      - ./dashboard:/app/dashboard      # live code reload for dashboard
+      - ./logs:/app/logs:ro             # read-only access to trading logs
