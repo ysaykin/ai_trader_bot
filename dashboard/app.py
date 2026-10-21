@@ -196,8 +196,8 @@ st.caption("Real-Time Execution & Analytics for XSP 0DTE Iron Condor")
 if not client:
     st.warning(
         "⚠️ **Alpaca API credentials missing or invalid.**\n\n"
-        "Please edit `/Users/yevgeniysaykin/Documents/Projects/lumibot/.env` and provide "
-        "`ALPACA_API_KEY` and `ALPACA_API_SECRET`, then restart or click **Refresh Data**."
+        "Please edit `.env` and provide `ALPACA_API_KEY` and `ALPACA_API_SECRET`, "
+        "then restart or click **Refresh Data**."
     )
 
 # -------------------------------------------------------------

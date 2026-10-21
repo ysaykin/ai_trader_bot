@@ -116,6 +116,20 @@ class SPXIronCondor(Strategy):
             self._manage_position()
             return
 
+        # --- COOLDOWN CHECK: Prevent duplicate entry on transient network blips ---
+        # If we just checked positions and got an empty result, wait before re-entering
+        if hasattr(self, '_position_open_cooldown') and self._position_open_cooldown:
+            import time
+            now_ts = self.get_datetime().timestamp()
+            cooldown_until = getattr(self, '_position_open_cooldown_until', 0)
+            if now_ts < cooldown_until:
+                remaining = cooldown_until - now_ts
+                logger.debug(
+                    "Cooldown active: %.0fs remaining. Skipping entry check.",
+                    remaining,
+                )
+                return
+
         # --- ENTRY: Only enter during the configured window ---
         if not self._is_entry_window(now):
             return
@@ -184,12 +198,15 @@ class SPXIronCondor(Strategy):
 
             # Estimate entry credit from mid-prices
             self._entry_credit = self._estimate_credit(
-                long_put, short_put, short_call, long_call
+                long_put, short_put, short_call, long_call, quantity=qty
             )
             logger.info("Iron Condor submitted. Estimated credit: $%.2f", self._entry_credit)
 
         except Exception as e:
             logger.error("Failed to submit iron condor: %s", e)
+            # Set cooldown to prevent duplicate entry on transient network blip
+            self._position_open_cooldown = True
+            self._position_open_cooldown_until = self.get_datetime().timestamp() + 5.0  # 5 second cooldown
 
     # ------------------------------------------------------------------ #
     # Position management
@@ -198,7 +215,28 @@ class SPXIronCondor(Strategy):
     def _manage_position(self):
         """Check profit target and stop loss on the open iron condor."""
         if not self._entry_credit or self._entry_credit <= 0:
-            return
+            # Zero credit on first tick: retry with exponential backoff
+            if not hasattr(self, '_retry_count'):
+                self._retry_count = 0
+            self._retry_count += 1
+            if self._retry_count <= 5:
+                import time
+                backoff = min(2 ** self._retry_count, 30)  # exponential backoff, max 30s
+                logger.warning(
+                    "Zero credit on tick %d (attempt %d/%d). "
+                    "Retrying in %.0fs...",
+                    self.on_trading_iteration_count,
+                    self._retry_count,
+                    5,
+                    backoff,
+                )
+                time.sleep(backoff)
+                return  # Retry on next iteration
+            else:
+                logger.error("Max retries (5) exceeded for credit estimation. Aborting position.")
+                self._position_open = False
+                self._entry_credit = 0.0
+                return
 
         # Get current value of the position
         positions = self.get_positions()
@@ -207,6 +245,7 @@ class SPXIronCondor(Strategy):
             logger.info("Position expired or closed. Resetting.")
             self._position_open = False
             self._entry_credit = 0.0
+            self._retry_count = 0
             return
 
         # Calculate current P&L from option positions
@@ -220,6 +259,7 @@ class SPXIronCondor(Strategy):
         if not option_positions:
             self._position_open = False
             self._entry_credit = 0.0
+            self._retry_count = 0
             return
 
         for pos in option_positions:
@@ -404,10 +444,20 @@ class SPXIronCondor(Strategy):
             right=right,
         )
 
-    def _estimate_credit(self, long_put, short_put, short_call, long_call) -> float:
+    def _estimate_credit(self, long_put, short_put, short_call, long_call, quantity: int = 1) -> float:
         """
         Estimate the net credit received from the iron condor.
         Credit = (short_put_price - long_put_price) + (short_call_price - long_call_price)
+        
+        Args:
+            long_put: The long put option asset.
+            short_put: The short put option asset.
+            short_call: The short call option asset.
+            long_call: The long call option asset.
+            quantity: Number of contracts (default 1).
+        
+        Returns:
+            Net credit per contract, scaled by quantity.
         """
         try:
             lp = self.get_last_price(long_put) or 0
@@ -416,7 +466,7 @@ class SPXIronCondor(Strategy):
             lc = self.get_last_price(long_call) or 0
 
             credit = (float(sp) - float(lp)) + (float(sc) - float(lc))
-            return max(credit, 0)
+            return max(credit, 0) * quantity  # Scale by quantity for P&L consistency
         except Exception:
             return 0.0
 

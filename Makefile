@@ -11,7 +11,8 @@ up:
 # Start only dashboard and open in browser
 ui:
 	docker compose up -d lumibot-dashboard
-	open http://localhost:8501
+	@echo "Dashboard running at http://localhost:8501"
+	@command -v xdg-open > /dev/null 2>&1 && xdg-open http://localhost:8501 || (command -v start > /dev/null 2>&1 && start http://localhost:8501) || echo "Please open http://localhost:8501 manually"
 
 # Open browser to dashboard
 open:
