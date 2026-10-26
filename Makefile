@@ -12,11 +12,12 @@ up:
 ui:
 	docker compose up -d lumibot-dashboard
 	@echo "Dashboard running at http://localhost:8501"
-	@command -v xdg-open > /dev/null 2>&1 && xdg-open http://localhost:8501 || (command -v start > /dev/null 2>&1 && start http://localhost:8501) || echo "Please open http://localhost:8501 manually"
+	@command -v open > /dev/null 2>&1 && open http://localhost:8501 || command -v xdg-open > /dev/null 2>&1 && xdg-open http://localhost:8501 || echo "Please open http://localhost:8501 manually"
 
 # Open browser to dashboard
 open:
-	open http://localhost:8501
+	@echo "Dashboard running at http://localhost:8501"
+	@command -v open > /dev/null 2>&1 && open http://localhost:8501 || command -v xdg-open > /dev/null 2>&1 && xdg-open http://localhost:8501 || echo "Please open http://localhost:8501 manually"
 
 # Stop everything
 down:

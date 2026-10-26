@@ -1,0 +1,22 @@
+version: 1
+workspace_mode: shared_with_leases
+workers:
+  codex:
+    mode: command
+    command: codex
+    args: ["exec", "--sandbox", "workspace-write", "-"]
+    packet_directory: ".scrum/outbox/codex"
+    result_directory: ".scrum/inbox/codex"
+  antigravity:
+    mode: packet
+    command: null
+    args: []
+    packet_directory: ".scrum/outbox/antigravity"
+    result_directory: ".scrum/inbox/antigravity"
+policy:
+  allow_parallel_read_only: true
+  require_write_lease: true
+  lease_minutes: 60
+  checkpoint_minutes: 15
+  codex_threshold: 7
+  tie_goes_to: codex

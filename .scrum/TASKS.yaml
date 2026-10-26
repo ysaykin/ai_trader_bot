@@ -1,0 +1,106 @@
+version: 1
+tasks:
+  # --- Foundation & Risk Guardrails (Completed) ---
+  - id: user-features-catalog
+    title: "Establish and maintain single-source-of-truth user features catalog"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - USER_FEATURES.md
+      - dashboard/USER_FEATURES.md
+  - id: risk-single-trade-sliding-scale
+    title: "Implement sliding scale single-trade risk cap (30% down to 5%) and $5k global limit"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/iron_condor.py
+      - .env
+      - .env.example
+  - id: ui-trading-cockpit-redesign
+    title: "Redo trading overview dashboard with real-time status, risk dials, and A/B comparison"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - dashboard/app.py
+      - dashboard/broker_client.py
+      - dashboard/payoff_chart.py
+  - id: config-credentials-gui
+    title: "Broker credentials & strategy configuration GUI with live connection testing"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - dashboard/config_manager.py
+      - dashboard/app.py
+  - id: trade-analytics-persistence
+    title: "Trade event persistence & A/B performance reporting"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - trade_logger.py
+      - dashboard/trade_logger.py
+      - logs/trades.jsonl
+
+  # --- Pillar 1: Strategy Pipeline (20-Variant Incubator & Shared Market Data Hub) ---
+  - id: strategy-pipeline-20-incubator
+    title: "Build 20-variant Iron Condor incubator grid with per-strategy position isolation and shared MarketDataHub cache"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/market_data_hub.py
+      - strategies/incubator.py
+      - strategies/iron_condor.py
+      - main.py
+
+  # --- Pillar 2: Trading & Evaluation Pipeline (Dynamic Actions & Counterfactual Regret) ---
+  - id: trading-evaluation-pipeline
+    title: "Support dynamic position actions (ADD, TRIM, DYNAMIC_PT, FLATTEN) and counterfactual strategy evaluation (MFE/MAE, Sortino, Regret)"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/iron_condor.py
+      - ml/evaluator.py
+
+  # --- Pillar 3: Logging Pipeline (5-Minute State-Action-Reward Trajectories) ---
+  - id: trajectory-logging-pipeline
+    title: "Implement 5-minute intraday trajectory logger (market regime + 20-grid signals) and EOD hindsight-optimal relabeler"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - trade_logger.py
+      - ml/features.py
+      - logs/trajectories.jsonl
+
+  # --- Pillar 4: Learning Pipeline (Multi-Head Neural Policy Network) ---
+  - id: neural-policy-network
+    title: "Build Multi-Head Neural Policy Network (Regime Encoder + Scale-In/Out, Dynamic Profit Target, and Strategy Selector heads)"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - ml/policy_net.py
+      - tests/test_policy_net.py
+
+  # --- Pillar 5: Self-Improving Bot Loop (Continual Learning & Shadow Promotion Gate) ---
+  - id: self-improving-continual-learner
+    title: "Implement daily post-market continual learning pipeline with Purged Walk-Forward CV and Champion/Challenger shadow promotion gate"
+    status: planned
+    owner: antigravity
+    deliverables:
+      - ml/continual_learner.py
+      - ml/models/
+      - dashboard/app.py
+
+  # --- Follow-Up Tasks & Edge-Case Defects ---
+  - id: neural-policy-training-and-live-adapter
+    title: "Implement offline trajectory trainer and live feature-sequence inference adapter for MultiHeadPolicyNetwork"
+    status: pending
+    owner: antigravity
+    deliverables:
+      - ml/train.py
+      - ml/inference.py
+
+  - id: fix-local-lumibot-namespace-shadowing
+    title: "Remove or relocate legacy untracked ./lumibot/ directory so local non-Docker Python invocations do not shadow upstream lumibot package"
+    status: pending
+    owner: antigravity
+    deliverables:
+      - pyproject.toml

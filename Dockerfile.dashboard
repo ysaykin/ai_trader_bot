@@ -11,6 +11,8 @@ COPY requirements-dashboard.txt .
 RUN pip install --no-cache-dir -r requirements-dashboard.txt
 
 COPY dashboard/ dashboard/
+COPY ml/ ml/
+COPY trade_logger.py .
 
 EXPOSE 8501
 

@@ -6,3 +6,9 @@ logs/
 .venv/
 .mypy_cache/
 .pytest_cache/
+.ruff_cache/
+.scrum/
+tests/
+backend/
+ui/
+lumibot/

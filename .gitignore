@@ -1,7 +1,29 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 logs/
 .venv/
 .mypy_cache/
 .pytest_cache/
+.ruff_cache/
+
+# Scrum runtime & worker packet queues
+.scrum/leases/
+.scrum/runtime/
+.scrum/inbox/
+.scrum/outbox/
+
+# Legacy mock-UI prototype & local scratch artifacts
+/lumibot/
+/backend/
+/ui/
+/docker-compose.mock-ui.yml
+/test_dashboard.py
+/dashboard/Dockerfile
+/dashboard/index.html
+/dashboard/package.json
+/dashboard/src/
+/dashboard/vite.config.js
+/uv.lock

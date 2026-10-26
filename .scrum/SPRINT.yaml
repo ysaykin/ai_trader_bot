@@ -1,0 +1,21 @@
+version: 1
+sprint:
+  id: sprint-self-improving-neural-pipeline
+  goal: "Build the 5-pillar Self-Improving Bot pipeline: 20-Strategy Incubator, Counterfactual Trading Evaluator, 5-Min Trajectory Logger, Multi-Head Neural Policy Network, and Champion/Challenger Continual Learning Loop"
+  status: in_progress
+  acceptance:
+    - "Single trade risk constrained to sliding scale: 30% at $5k down to 5% at scale, with hard $5k global ceiling enforced as an immutable wrapper around all neural actions"
+    - "Strategy Pipeline runs up to 20 concurrent Iron Condor variants with isolated position tracking and shared option chain caching"
+    - "Logging Pipeline records 5-minute market regime + 20-strategy state snapshots to logs/trajectories.jsonl and computes EOD hindsight-optimal labels"
+    - "Trading & Evaluation Pipeline supports dynamic Add, Trim (50%), and Dynamic Profit-Target adjustments and evaluates counterfactual regret + MFE/MAE"
+    - "Learning & Self-Improvement Pipeline trains Multi-Head Neural Policy Network and gates model promotion via Champion vs. Challenger shadow scoring"
+  constraints:
+    - "Must run natively in Docker on OrbStack"
+    - "Zero interruption to active broker connectivity and zero API rate-limit exhaustion across 20 strategies"
+    - "Neural network can never bypass RSK-01 ($5k cap) or RSK-02 (sliding scale single-trade limit)"
+  non_goals:
+    - "Replacing Tradier or Alpaca broker engine"
+  risks:
+    - "Option market closed outside 9:30-16:00 ET; historical/synthetic simulation needed for off-market training and validation"
+    - "20 concurrent strategies querying chains independently would hit rate limits without shared MarketDataHub cache"
+  current_task: self-improving-continual-learner

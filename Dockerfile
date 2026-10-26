@@ -14,6 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY main.py .
+COPY trade_logger.py .
 COPY strategies/ strategies/
+COPY ml/ ml/
 
 CMD ["python", "main.py"]
