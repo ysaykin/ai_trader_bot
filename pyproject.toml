@@ -1,14 +1,12 @@
 [project]
-name = "lumibot"
+name = "lumibot-iron-condor"
 version = "1.0.0"
 description = "Lumibot trading bot with Tradier support"
 requires-python = ">=3.12"
 dependencies = [
-    "pandas",
-    "numpy",
+    "lumibot>=4.6,<5",
     "python-dotenv",
     "requests",
-    "tradier-api",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +21,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["strategies", "ml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -24,6 +24,7 @@ services:
     env_file: .env
     volumes:
       - ./dashboard:/app/dashboard
+      - ./strategies:/app/strategies:ro
       - ./ml:/app/ml:ro
       - ./trade_logger.py:/app/trade_logger.py:ro
       - ./logs:/app/logs:ro

@@ -102,6 +102,39 @@ class BrokerSelectionTests(unittest.TestCase):
                 })
                 self.assertFalse(entrypoint._test_brokers.Tradier.call_args.args[0]["PAPER"])
 
+        self.get_broker({
+            "TRADING_BROKER": "tradier",
+            "TRADIER_API_KEY": "test-token",
+            "TRADIER_ACCOUNT": "VA21359019",
+            "TRADIER_PAPER": "false",
+            "TRADIER_IS_PAPER": "true",
+            "TRADIER_SANDBOX": "1",
+        })
+        self.assertFalse(entrypoint._test_brokers.Tradier.call_args.args[0]["PAPER"])
+
+    def test_sandbox_index_requires_external_data_source(self) -> None:
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "XSP",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "DATA_SOURCE"):
+            entrypoint.validate_runtime_configuration()
+        with patch.dict(os.environ, {
+            "TRADIER_ACCESS_TOKEN": "token", "TRADIER_PAPER": "true", "IC_SYMBOL": "SPX",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "DATA_SOURCE"):
+            entrypoint.validate_runtime_configuration()
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "SPY",
+        }, clear=True):
+            entrypoint.validate_runtime_configuration()
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "maybe",
+        }, clear=True), self.assertRaises(RuntimeError):
+            entrypoint.get_broker()
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "SPY",
+            "ML_POLICY_ENABLED": "true", "ML_MODEL_PATH": "/nonexistent/policy.json",
+        }, clear=True), self.assertRaises(FileNotFoundError):
+            entrypoint.validate_runtime_configuration()
+
     def test_incubator_attaches_one_collector_to_all_twenty_strategies(self) -> None:
         variants = [SimpleNamespace(name=f"IC_V{i:02}") for i in range(1, 21)]
         modules = {
@@ -141,25 +174,66 @@ class IronCondorTests(unittest.TestCase):
         self.addCleanup(self.environment.stop)
         self.strategy = iron_condor.SPXIronCondor()
         self.strategy.parameters = dict(iron_condor.SPXIronCondor.parameters)
+        self.strategy.broker = SimpleNamespace(name="Tradier")
         self.strategy.initialize()
         self.strategy.portfolio_value = 100_000.0
         self.strategy.get_datetime = Mock(return_value=datetime(2026, 10, 23, 14, tzinfo=timezone.utc))
-        self.asset = SimpleNamespace(asset_type="option", symbol="XSP")
-        self.position = SimpleNamespace(asset=self.asset, quantity=-1)
-        self.strategy.get_positions = Mock(return_value=[self.position])
+        self.strategy.get_positions = Mock(return_value=[])
         self.strategy.get_orders = Mock(return_value=[])
         self.strategy.get_last_price = Mock(return_value=1.0)
+        self.strategy.get_quote = Mock(return_value={"bid": 0.9, "ask": 1.1})
         self.strategy.create_order = Mock(side_effect=lambda asset, quantity, side: Mock(
             asset=asset, quantity=quantity, side=side, is_active=Mock(return_value=True),
         ))
         self.strategy.submit_order = Mock()
         self.strategy.cancel_order = Mock()
-        self.strategy._position_open = True
+        self.strategy._position_open = False
+
+    def open_filled_position(
+        self,
+        quantity: int = 1,
+        prices: tuple[float, float, float, float] = (0.25, 1.25, 1.25, 0.25),
+        expiration: str = "2026-10-26",
+    ) -> None:
+        assets = [
+            SimpleNamespace(
+                asset_type="option", symbol="XSP", expiration=expiration,
+                strike=strike, right=right,
+            )
+            for strike, right in ((95, "put"), (100, "put"), (110, "call"), (115, "call"))
+        ]
+        signed = (quantity, -quantity, -quantity, quantity)
+        package_id = f"filled-{id(self)}-{quantity}-{len(self.strategy._position_ledger.open_baskets())}"
+        legs = []
+        for index, (asset, signed_quantity) in enumerate(zip(assets, signed), start=1):
+            key = iron_condor.asset_key(asset)
+            self.strategy._asset_registry[key] = asset
+            legs.append(iron_condor.LedgerLeg(f"{package_id}:{index}", key, signed_quantity))
+        self.strategy._position_ledger.record_submission(
+            package_id, self.strategy._strategy_id(), "open", legs
+        )
+        for leg, price in zip(legs, prices):
+            self.strategy._position_ledger.record_fill(
+                leg.order_id, leg.requested_signed_quantity, price
+            )
+        self.strategy._hydrate_from_ledger()
+        self.strategy.get_positions.return_value = [
+            SimpleNamespace(asset=asset, quantity=signed_quantity)
+            for asset, signed_quantity in zip(assets, signed)
+        ]
+        quote_by_strike = dict(zip((95, 100, 110, 115), prices))
+        self.strategy.get_quote.side_effect = lambda asset: {
+            "bid": max(quote_by_strike[asset.strike] - 0.05, 0.0),
+            "ask": quote_by_strike[asset.strike] + 0.05,
+        }
 
     def test_zero_credit_does_not_access_missing_framework_counter(self) -> None:
+        self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(self.strategy._entry_credit, 0.0)
         with patch("time.sleep"):
             self.strategy.on_trading_iteration()
         self.assertTrue(self.strategy._position_open)
+        self.assertEqual(self.strategy._iteration_count, 1)
 
     def test_flat_iteration_and_market_close_both_publish_telemetry(self) -> None:
         collector = Mock()
@@ -172,6 +246,7 @@ class IronCondorTests(unittest.TestCase):
         collector.record.assert_called_with(self.strategy, "HOLD", session_end=True)
 
     def test_telemetry_failure_preserves_position_management(self) -> None:
+        self.open_filled_position()
         self.strategy._trajectory_logger = Mock()
         self.strategy._trajectory_logger.record.side_effect = OSError("disk full")
         self.strategy._manage_position = Mock()
@@ -180,43 +255,48 @@ class IronCondorTests(unittest.TestCase):
         self.assertTrue(self.strategy._position_open)
 
     def test_retry_exhaustion_keeps_contracts_managed_until_closed(self) -> None:
+        self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0))
+        self.assertEqual(self.strategy._entry_credit, 0.0)
         with patch("time.sleep"):
             for _ in range(7):
                 self.strategy.on_trading_iteration()
         self.assertTrue(self.strategy._position_open)
-        self.strategy.submit_order.assert_called_once()
+        self.strategy.submit_order.assert_not_called()
         self.strategy.before_market_closes()
         self.strategy.submit_order.assert_called_once()
-        self.strategy.get_positions.return_value = []
         for order in self.strategy._closing_orders:
             order.is_active.return_value = False
+            self.strategy.on_filled_order(None, order, 1.0, order.quantity, 100)
+        self.strategy.get_positions.return_value = []
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
 
     def test_close_submission_keeps_position_active_and_avoids_duplicates(self) -> None:
-        self.strategy._entry_credit = 1.0
+        self.open_filled_position()
         self.strategy._close_all_options()
         self.assertTrue(self.strategy._position_open)
         self.strategy._close_all_options()
         self.strategy.submit_order.assert_called_once()
 
     def test_missing_quote_cannot_trigger_a_false_profit_target(self) -> None:
-        self.strategy._entry_credit = 1.0
-        self.strategy.get_last_price.return_value = None
+        self.open_filled_position()
+        self.strategy.get_quote.side_effect = None
+        self.strategy.get_quote.return_value = None
         self.strategy._manage_position()
         self.strategy.submit_order.assert_not_called()
         self.assertTrue(self.strategy._position_open)
 
-    def test_missing_credit_is_refreshed_on_next_iteration(self) -> None:
-        self.strategy._entry_orders = [Mock(asset=Mock(), quantity=2) for _ in range(4)]
+    def test_missing_credit_is_not_replaced_with_an_estimate(self) -> None:
+        self.open_filled_position()
+        self.strategy._entry_credit = 0.0
         self.strategy._estimate_credit = Mock(return_value=0.5)
         self.strategy._manage_position()
-        self.assertEqual(self.strategy._entry_credit, 0.5)
-        self.strategy._estimate_credit.assert_called_once_with(
-            *(order.asset for order in self.strategy._entry_orders), quantity=2,
-        )
+        self.assertEqual(self.strategy._entry_credit, 0.0)
+        self.strategy._estimate_credit.assert_not_called()
+        self.assertTrue(self.strategy._position_open)
 
     def test_pending_entry_order_prevents_reset_when_no_positions_visible(self) -> None:
+        self.strategy._position_open = True
         self.strategy.get_positions.return_value = []
         self.strategy.get_orders.return_value = [Mock(is_active=Mock(return_value=True))]
         self.strategy._entry_credit = 1.0
@@ -224,6 +304,7 @@ class IronCondorTests(unittest.TestCase):
         self.assertTrue(self.strategy._position_open)
 
     def test_exit_cancels_pending_entry_even_before_positions_appear(self) -> None:
+        self.strategy._position_open = True
         order = Mock(is_active=Mock(return_value=True))
         self.strategy._entry_orders = [order]
         self.strategy._exit_requested = True
@@ -233,27 +314,42 @@ class IronCondorTests(unittest.TestCase):
         self.assertTrue(self.strategy._position_open)
 
     def test_broker_read_failure_keeps_position_managed(self) -> None:
+        self.strategy._position_open = True
         self.strategy.get_positions.side_effect = RuntimeError("broker unavailable")
         self.strategy._manage_position()
         self.assertTrue(self.strategy._position_open)
         self.strategy.submit_order.assert_not_called()
 
     def test_failed_close_keeps_position_managed_for_safety_hooks(self) -> None:
+        self.open_filled_position()
         self.strategy.submit_order.side_effect = RuntimeError("broker unavailable")
         self.strategy._close_all_options()
         self.assertTrue(self.strategy._position_open)
         self.assertTrue(self.strategy._exit_requested)
 
-    def test_partial_entry_failure_keeps_submitted_contracts_managed(self) -> None:
+    def test_atomic_entry_failure_keeps_submitted_package_managed(self) -> None:
         self.strategy._position_open = False
         self.strategy._is_entry_window = Mock(return_value=True)
         self.strategy._check_allocation = Mock(return_value=True)
         self.strategy._find_expiration = Mock(return_value="2026-10-23")
         self.strategy._find_short_strikes = Mock(return_value=(580, 600))
-        self.strategy.submit_order.side_effect = [None, RuntimeError("submission failed")]
+        self.strategy._make_option = Mock(side_effect=lambda strike, expiry, right: SimpleNamespace(
+            asset_type="option", symbol="XSP", expiration=expiry, strike=strike, right=right,
+        ))
+        self.strategy.get_quote.side_effect = lambda asset: (
+            {"bid": 1.20, "ask": 1.30}
+            if asset.strike in (580, 600)
+            else {"bid": 0.20, "ask": 0.30}
+        )
+        self.strategy.submit_order.side_effect = RuntimeError("submission failed")
         self.strategy.on_trading_iteration()
         self.assertTrue(self.strategy._position_open)
-        self.assertTrue(self.strategy._entry_orders)
+        self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
+        self.assertEqual(len(self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())), 1)
+        submitted = self.strategy.submit_order.call_args.args[0]
+        self.assertEqual(len(submitted), 4)
+        self.assertTrue(self.strategy.submit_order.call_args.kwargs["is_multileg"])
+        self.assertEqual(self.strategy.submit_order.call_args.kwargs["order_type"], "credit")
 
     def test_risk_tiers_and_quantity_scaling(self) -> None:
         self.strategy.get_positions.return_value = []
@@ -270,8 +366,50 @@ class IronCondorTests(unittest.TestCase):
 
     def test_global_cap_blocks_additional_exposure(self) -> None:
         self.strategy.parameters.update(wing_width=2, quantity=1)
-        self.strategy.get_last_price.return_value = 49.0
+        peer_assets = [
+            SimpleNamespace(
+                asset_type="option", symbol="XSP", expiration="2026-10-26",
+                strike=strike, right=right,
+            )
+            for strike, right in ((95, "put"), (100, "put"), (110, "call"), (115, "call"))
+        ]
+        peer_legs = [
+            iron_condor.LedgerLeg(f"peer-{idx}", iron_condor.asset_key(asset), qty)
+            for idx, (asset, qty) in enumerate(zip(peer_assets, (10, -10, -10, 10)), start=1)
+        ]
+        # 5-point wing * 10 contracts * $100 - $100 credit = $4,900 existing defined risk
+        self.strategy._position_ledger.record_submission("peer-pkg", "peer-strategy", "open", peer_legs)
+        for leg, price in zip(peer_legs, (0.20, 0.25, 0.25, 0.20)):
+            self.strategy._position_ledger.record_fill(leg.order_id, leg.requested_signed_quantity, price)
+        self.strategy.get_positions.return_value = [
+            SimpleNamespace(asset=asset, quantity=qty)
+            for asset, qty in zip(peer_assets, (10, -10, -10, 10))
+        ]
         self.assertFalse(self.strategy._check_allocation())
+
+    def test_unmanaged_broker_position_engages_recovery_lock(self) -> None:
+        rogue = SimpleNamespace(
+            asset_type="option", symbol="XSP", expiration="2026-10-26", strike=575.0, right="put"
+        )
+        self.strategy.get_positions.return_value = [SimpleNamespace(asset=rogue, quantity=-1)]
+        self.strategy._is_entry_window = Mock(return_value=True)
+        self.strategy.on_trading_iteration()
+        self.assertTrue(self.strategy._recovery_lock)
+        self.assertFalse(self.strategy._check_allocation())
+        self.strategy.submit_order.assert_not_called()
+
+    def test_confirmed_post_expiration_clears_state_only_after_expiry(self) -> None:
+        self.open_filled_position(expiration="2026-10-23")
+        self.strategy.get_positions.return_value = []
+        # Same day (not past expiration): missing broker visibility retains ledger state
+        self.strategy.get_datetime.return_value = datetime(2026, 10, 23, 19, tzinfo=timezone.utc)
+        self.strategy.on_trading_iteration()
+        self.assertTrue(self.strategy._position_open)
+        # Next calendar day after expiration with confirmed flat broker book: resets cleanly
+        self.strategy.get_datetime.return_value = datetime(2026, 10, 24, 14, tzinfo=timezone.utc)
+        self.strategy.on_trading_iteration()
+        self.assertFalse(self.strategy._position_open)
+        self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
 
 
 class IncubatorAndMarketDataHubTests(unittest.TestCase):
@@ -337,46 +475,110 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(stats["price_hits"], 19)
 
     def test_per_strategy_leg_isolation_prevents_closing_other_variants_positions(self) -> None:
+        ledger = iron_condor.PositionLedger(":memory:")
+        broker = SimpleNamespace(name="Tradier")
         strat_a = iron_condor.SPXIronCondor()
-        strat_a.parameters = dict(iron_condor.SPXIronCondor.parameters)
+        strat_a.name = "Strategy_A"
+        strat_a.parameters = {**iron_condor.SPXIronCondor.parameters, "position_ledger": ledger}
+        strat_a.broker = broker
         strat_a.initialize()
-        strat_a._position_open = True
 
-        leg_a = SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=580.0, right="put")
-        leg_b = SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=570.0, right="put")
-        strat_a._owned_legs = [(leg_a, -1)]
+        strat_b = iron_condor.SPXIronCondor()
+        strat_b.name = "Strategy_B"
+        strat_b.parameters = {**iron_condor.SPXIronCondor.parameters, "position_ledger": ledger}
+        strat_b.broker = broker
+        strat_b.initialize()
 
-        pos_a = SimpleNamespace(asset=leg_a, quantity=-1)
-        pos_b = SimpleNamespace(asset=leg_b, quantity=-2)
-        strat_a.get_positions = Mock(return_value=[pos_a, pos_b])
+        assets_a = [
+            SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=s, right=r)
+            for s, r in ((575.0, "put"), (580.0, "put"), (590.0, "call"), (595.0, "call"))
+        ]
+        assets_b = [
+            SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=s, right=r)
+            for s, r in ((570.0, "put"), (575.0, "put"), (595.0, "call"), (600.0, "call"))
+        ]
+        for label, strat, assets, qty in (
+            ("pkg-a", strat_a, assets_a, 1),
+            ("pkg-b", strat_b, assets_b, 2),
+        ):
+            legs = []
+            for idx, (asset, signed) in enumerate(zip(assets, (qty, -qty, -qty, qty)), start=1):
+                key = iron_condor.asset_key(asset)
+                strat._asset_registry[key] = asset
+                legs.append(iron_condor.LedgerLeg(f"{label}:{idx}", key, signed))
+            ledger.record_submission(label, strat._strategy_id(), "open", legs)
+            for leg, price in zip(legs, (0.20, 1.00, 1.00, 0.20)):
+                ledger.record_fill(leg.order_id, leg.requested_signed_quantity, price)
+            strat._hydrate_from_ledger()
+
+        # Broker reports net positions across both strategies (note 575P and 595C overlap!)
+        strat_a.get_positions = Mock(return_value=[
+            SimpleNamespace(asset=assets_b[0], quantity=2),
+            SimpleNamespace(asset=assets_a[0], quantity=-1),  # +1 (A) + -2 (B) = -1 net!
+            SimpleNamespace(asset=assets_a[1], quantity=-1),
+            SimpleNamespace(asset=assets_a[2], quantity=-1),
+            SimpleNamespace(asset=assets_a[3], quantity=-1),  # +1 (A) + -2 (B) = -1 net!
+            SimpleNamespace(asset=assets_b[3], quantity=2),
+        ])
         strat_a.get_orders = Mock(return_value=[])
+        strat_a.get_quote = Mock(side_effect=lambda asset: (
+            {"bid": 0.95, "ask": 1.05} if asset.strike in (580.0, 590.0) else {"bid": 0.15, "ask": 0.25}
+        ))
         strat_a.create_order = Mock(side_effect=lambda asset, quantity, side: Mock(
             asset=asset, quantity=quantity, side=side, is_active=Mock(return_value=True),
         ))
         strat_a.submit_order = Mock()
 
         strat_a._close_all_options()
-        # Only leg_a should be closed; leg_b belongs to another strategy variant
-        strat_a.create_order.assert_called_once_with(leg_a, 1, "buy")
         strat_a.submit_order.assert_called_once()
+        submitted_orders = strat_a.submit_order.call_args.args[0]
+        self.assertEqual(len(submitted_orders), 4)
+        self.assertTrue(strat_a.submit_order.call_args.kwargs["is_multileg"])
+        self.assertEqual(strat_a.submit_order.call_args.kwargs["order_type"], "debit")
+        submitted_by_strike = {o.asset.strike: (o.quantity, o.side) for o in submitted_orders}
+        self.assertEqual(submitted_by_strike, {
+            575.0: (1, "sell_to_close"),
+            580.0: (1, "buy_to_close"),
+            590.0: (1, "buy_to_close"),
+            595.0: (1, "sell_to_close"),
+        })
+        self.assertEqual(len(ledger.owned_quantities("Strategy_B")), 4)
 
     def test_apply_policy_action_respects_risk_guardrails_and_scales_legs(self) -> None:
         strat = iron_condor.SPXIronCondor()
         strat.parameters = dict(iron_condor.SPXIronCondor.parameters)
         strat.parameters.update(wing_width=2.0, quantity=1, max_position_risk=5000.0, max_allocation=1.0)
+        strat.broker = SimpleNamespace(name="Tradier")
         strat.initialize()
         strat.portfolio_value = 100_000.0
-        strat._position_open = True
-        strat._entry_credit = 0.80
-        legs = [
-            (SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=578.0, right="put"), 1),
-            (SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=580.0, right="put"), -1),
-            (SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=590.0, right="call"), -1),
-            (SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=592.0, right="call"), 1),
+        strat.get_datetime = Mock(return_value=datetime(2026, 10, 26, 15, 0, tzinfo=timezone.utc))
+        assets = [
+            SimpleNamespace(asset_type="option", symbol="XSP", expiration="2026-10-26", strike=s, right=r)
+            for s, r in ((578.0, "put"), (580.0, "put"), (590.0, "call"), (592.0, "call"))
         ]
-        strat._owned_legs = list(legs)
-        strat.get_positions = Mock(return_value=[])
-        strat.get_last_price = Mock(side_effect=lambda asset: 0.50 if asset.strike in (580.0, 590.0) else 0.10)
+        open_legs = []
+        for idx, (asset, signed) in enumerate(zip(assets, (1, -1, -1, 1)), start=1):
+            key = iron_condor.asset_key(asset)
+            strat._asset_registry[key] = asset
+            open_legs.append(iron_condor.LedgerLeg(f"init:{idx}", key, signed))
+        strat._position_ledger.record_submission("init", strat._strategy_id(), "open", open_legs)
+        for leg, price in zip(open_legs, (0.10, 0.50, 0.50, 0.10)):
+            strat._position_ledger.record_fill(leg.order_id, leg.requested_signed_quantity, price)
+        strat._hydrate_from_ledger()
+
+        def sync_broker_positions() -> None:
+            owned = strat._position_ledger.owned_quantities(strat._strategy_id())
+            strat.get_positions.return_value = [
+                SimpleNamespace(asset=strat._asset_registry[k], quantity=q)
+                for k, q in owned.items()
+            ]
+
+        strat.get_positions = Mock()
+        sync_broker_positions()
+        strat.get_orders = Mock(return_value=[])
+        strat.get_quote = Mock(side_effect=lambda asset: (
+            {"bid": 0.45, "ask": 0.55} if asset.strike in (580.0, 590.0) else {"bid": 0.05, "ask": 0.15}
+        ))
         strat.create_order = Mock(side_effect=lambda asset, quantity, side: Mock(
             asset=asset, quantity=quantity, side=side, is_active=Mock(return_value=True),
         ))
@@ -387,18 +589,30 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(res, "ADJUST_PROFIT_TARGET")
         self.assertEqual(strat.parameters["profit_target"], 0.80)
 
-        # 2. ADD_POSITION (+1 contract) succeeds when within $1,500 single-trade and $5,000 global limits
+        # 2. ADD_POSITION (+1 contract) submits an atomic credit package; ownership waits for fills
         res = strat.apply_policy_action("ADD_POSITION")
         self.assertEqual(res, "ADD_POSITION")
+        self.assertEqual(strat.parameters["quantity"], 1)
+        for order in strat._entry_orders:
+            order.is_active.return_value = False
+            price = 0.50 if order.asset.strike in (580.0, 590.0) else 0.10
+            strat.on_filled_order(None, order, price, order.quantity, 100)
+        sync_broker_positions()
         self.assertEqual(strat.parameters["quantity"], 2)
-        self.assertEqual([q for _, q in strat._owned_legs], [2, -2, -2, 2])
+        self.assertEqual(sorted(q for _, q in strat._owned_legs), [-2, -2, 2, 2])
         self.assertAlmostEqual(strat._entry_credit, 1.60)
 
-        # 3. TRIM_POSITION (50% scale-out) reduces quantity from 2 back to 1
+        # 3. TRIM_POSITION (50% scale-out) submits an atomic debit package; ownership updates on fills
         res = strat.apply_policy_action("TRIM_POSITION")
         self.assertEqual(res, "TRIM_POSITION")
+        self.assertEqual(strat.parameters["quantity"], 2)
+        for order in strat._closing_orders:
+            order.is_active.return_value = False
+            price = 0.50 if order.asset.strike in (580.0, 590.0) else 0.10
+            strat.on_filled_order(None, order, price, order.quantity, 100)
+        sync_broker_positions()
         self.assertEqual(strat.parameters["quantity"], 1)
-        self.assertEqual([q for _, q in strat._owned_legs], [1, -1, -1, 1])
+        self.assertEqual(sorted(q for _, q in strat._owned_legs), [-1, -1, 1, 1])
         self.assertAlmostEqual(strat._entry_credit, 0.80)
 
         # 4. ADD_POSITION is blocked when single-trade risk would exceed RSK-02 limit

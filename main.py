@@ -38,6 +38,27 @@ except Exception as e:
 logger = logging.getLogger("main")
 
 
+def _env_bool(*names: str, default: bool = False) -> bool:
+    """Parse the first configured environment boolean in precedence order."""
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None or not raw.strip():
+            continue
+        normalized = raw.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+        raise RuntimeError(f"{name} must be true, false, 1, 0, yes, no, on, or off.")
+    return default
+
+
+def _tradier_paper() -> bool:
+    return _env_bool(
+        "TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX", default=True
+    )
+
+
 def get_broker() -> Broker:
     """Instantiate broker from env vars (Tradier sandbox or Alpaca)."""
     broker_type = os.getenv("TRADING_BROKER", "").strip().lower()
@@ -53,16 +74,12 @@ def get_broker() -> Broker:
                 "Tradier requires TRADIER_ACCESS_TOKEN and TRADIER_ACCOUNT_NUMBER "
                 "(or TRADIER_API_KEY and TRADIER_ACCOUNT)."
             )
-        paper_setting = os.getenv("TRADIER_IS_PAPER", os.getenv("TRADIER_SANDBOX", "true"))
-        paper_setting = paper_setting.strip().lower()
-        if paper_setting not in ("true", "false", "1", "0"):
-            raise RuntimeError("TRADIER_IS_PAPER/TRADIER_SANDBOX must be true, false, 1, or 0.")
         from lumibot.brokers import Tradier
 
         tradier_config = {
             "ACCESS_TOKEN": access_token,
             "ACCOUNT_NUMBER": account_number,
-            "PAPER": paper_setting in ("true", "1"),
+            "PAPER": _tradier_paper(),
         }
         logger.info(
             "Connecting to Tradier (account=%s, paper=%s)...",
@@ -75,7 +92,7 @@ def get_broker() -> Broker:
     api_secret = os.getenv("ALPACA_API_SECRET")
     if api_key and api_secret and api_key != "your_paper_api_key_here":
         from lumibot.brokers import Alpaca
-        paper = os.getenv("ALPACA_PAPER", "true").lower() == "true"
+        paper = _env_bool("ALPACA_PAPER", default=True)
         logger.info("Connecting to Alpaca (paper=%s)...", paper)
         return Alpaca({
             "API_KEY": api_key,
@@ -87,6 +104,41 @@ def get_broker() -> Broker:
         "No valid broker credentials found in .env. Please set "
         "TRADIER_ACCESS_TOKEN/TRADIER_ACCOUNT_NUMBER or ALPACA_API_KEY/ALPACA_API_SECRET."
     )
+
+
+def _configured_sequence_length() -> int | None:
+    raw = os.getenv("ML_SEQUENCE_LENGTH")
+    if raw is None or not raw.strip():
+        return None
+    try:
+        parsed = int(raw.strip())
+    except ValueError as error:
+        raise RuntimeError("ML_SEQUENCE_LENGTH must be a positive integer.") from error
+    if parsed < 1:
+        raise RuntimeError("ML_SEQUENCE_LENGTH must be a positive integer.")
+    return parsed
+
+
+def validate_runtime_configuration() -> None:
+    """Fail before strategy construction when the requested runtime is unsafe."""
+    broker = os.getenv("TRADING_BROKER", "").strip().lower()
+    access_token = os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY")
+    uses_tradier = broker == "tradier" or (not broker and bool(access_token))
+    symbol = os.getenv("IC_SYMBOL", "SPX").strip().upper()
+    data_source = os.getenv("DATA_SOURCE", "").strip().lower()
+    if uses_tradier and _tradier_paper() and symbol in {"SPX", "XSP"}:
+        if not data_source or data_source == "tradier":
+            raise RuntimeError(
+                "Tradier Sandbox does not provide SPX/XSP index market data. "
+                "Set IC_SYMBOL=SPY or configure a non-Tradier DATA_SOURCE."
+            )
+    if _env_bool("ML_POLICY_ENABLED", default=False):
+        from ml.inference import LivePolicyController
+
+        LivePolicyController(
+            Path(os.getenv("ML_MODEL_PATH", "logs/models/policy.json")),
+            expected_sequence_length=_configured_sequence_length(),
+        )
 
 
 def resolve_trading_mode() -> str:
@@ -110,19 +162,30 @@ def build_strategies_for_mode(
     from strategies.iron_condor import SPXIronCondor
     from strategies.incubator import build_ab_strategies, build_incubator_strategies
     from strategies.market_data_hub import get_shared_market_data_hub
+    from strategies.position_ledger import PositionLedger
 
     resolved = mode or resolve_trading_mode()
     hub = get_shared_market_data_hub()
+    ledger = PositionLedger(os.getenv("POSITION_LEDGER_PATH", "logs/position_ledger.sqlite3"))
 
     if resolved == "incubator":
         limit_env = os.getenv("INCUBATOR_STRATEGY_COUNT", "").strip()
         limit = int(limit_env) if limit_env.isdigit() else None
-        strategies = build_incubator_strategies(broker=broker, market_data_hub=hub, budget=budget, limit=limit)
+        strategies = build_incubator_strategies(
+            broker=broker, market_data_hub=hub, budget=budget, limit=limit,
+            position_ledger=ledger,
+        )
     elif resolved == "ab":
-        strategies = build_ab_strategies(broker=broker, market_data_hub=hub, budget=budget)
+        strategies = build_ab_strategies(
+            broker=broker, market_data_hub=hub, budget=budget, position_ledger=ledger
+        )
     else:
         try:
-            strategy = SPXIronCondor(broker=broker, budget=budget)
+            strategy = SPXIronCondor(
+                broker=broker,
+                budget=budget,
+                parameters={**SPXIronCondor.parameters, "position_ledger": ledger},
+            )
         except TypeError:
             strategy = SPXIronCondor()
         if not getattr(strategy, "name", None):
@@ -131,8 +194,18 @@ def build_strategies_for_mode(
             except AttributeError:
                 strategy._name = "SPXIronCondor"
         strategy._market_data_hub = hub
+        strategy._position_ledger = ledger
         strategies = [strategy]
 
+    controller = None
+    if _env_bool("ML_POLICY_ENABLED", default=False):
+        from ml.inference import LivePolicyController
+
+        controller = LivePolicyController(
+            Path(os.getenv("ML_MODEL_PATH", "logs/models/policy.json")),
+            {strategy.name: strategy for strategy in strategies},
+            expected_sequence_length=_configured_sequence_length(),
+        )
     if os.getenv("TRAJECTORY_LOGGING_ENABLED", "true").strip().lower() in ("true", "1", "yes"):
         from trade_logger import TrajectoryLogger
 
@@ -140,6 +213,7 @@ def build_strategies_for_mode(
             collector = TrajectoryLogger(
                 [strategy.name for strategy in strategies],
                 Path(os.getenv("TRAJECTORY_LOG_PATH", "logs/trajectories.jsonl")),
+                completed_snapshot_callback=(controller.on_snapshot if controller else None),
             )
         except OSError as error:
             logger.warning("Could not initialize trajectory logging: %s", error)
@@ -149,9 +223,11 @@ def build_strategies_for_mode(
     return strategies
 
 
-if __name__ == "__main__":
+def run() -> None:
+    """Validate configuration, construct the host strategy, and run the trader."""
     from strategies.incubator import attach_strategies_to_host
 
+    validate_runtime_configuration()
     broker = get_broker()
     mode = resolve_trading_mode()
     strategies = build_strategies_for_mode(broker=broker, mode=mode, budget=100_000)
@@ -167,3 +243,7 @@ if __name__ == "__main__":
         "strategy" if len(strategies) == 1 else "strategies",
     )
     trader.run_all()
+
+
+if __name__ == "__main__":
+    run()

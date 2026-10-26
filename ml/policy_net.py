@@ -11,7 +11,7 @@ import math
 import random
 from dataclasses import dataclass
 from numbers import Real
-from typing import Final, Mapping, Sequence, TypeAlias, cast
+from typing import Any, Final, Mapping, Sequence, TypeAlias, cast
 
 
 Vector: TypeAlias = tuple[float, ...]
@@ -178,8 +178,8 @@ class MultiHeadPolicyNetwork:
         """Return an immutable copy of the trainable network parameters."""
         return dict(self._parameters)
 
-    def load_state_dict(self, parameters: Mapping[str, StateValue]) -> None:
-        """Load trained parameters after validating names, shapes, and values."""
+    def load_state_dict(self, parameters: Mapping[str, Any]) -> None:
+        """Load tuple or JSON-list parameters after strict shape/value checks."""
         expected_names = set(self._PARAMETER_NAMES)
         received_names = set(parameters)
         if received_names != expected_names:
@@ -216,14 +216,24 @@ class MultiHeadPolicyNetwork:
             raise ValueError("sequences must contain at least one sequence")
         batch: list[Matrix] = []
         for batch_index, sequence in enumerate(sequences):
-            if not sequence:
+            if (
+                isinstance(sequence, (str, bytes))
+                or not isinstance(sequence, Sequence)
+                or not sequence
+            ):
                 raise ValueError(f"sequence {batch_index} must contain at least one tick")
             ticks: list[Vector] = []
             for time_index, tick in enumerate(sequence):
+                if isinstance(tick, (str, bytes)) or not isinstance(tick, Sequence):
+                    raise ValueError(f"tick {batch_index}:{time_index} must be numeric")
                 if len(tick) != self.feature_count:
                     raise ValueError(
                         f"tick {batch_index}:{time_index} has {len(tick)} features; "
                         f"expected {self.feature_count}"
+                    )
+                if any(isinstance(value, bool) or not isinstance(value, Real) for value in tick):
+                    raise ValueError(
+                        f"tick {batch_index}:{time_index} contains a non-real value"
                     )
                 values = tuple(float(value) for value in tick)
                 if not all(math.isfinite(value) for value in values):
@@ -313,24 +323,40 @@ class MultiHeadPolicyNetwork:
 
     @staticmethod
     def _validate_parameter(
-        name: str, value: StateValue, expected: StateValue
+        name: str, value: Any, expected: StateValue
     ) -> StateValue:
+        if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+            raise ValueError(f"parameter {name} must be a sequence")
         expected_is_matrix = bool(expected) and isinstance(expected[0], tuple)
-        value_is_matrix = bool(value) and isinstance(value[0], tuple)
+        value_is_matrix = bool(value) and isinstance(value[0], Sequence) and not isinstance(
+            value[0], (str, bytes)
+        )
         if expected_is_matrix != value_is_matrix or len(value) != len(expected):
             raise ValueError(f"parameter {name} has the wrong shape")
 
         if expected_is_matrix:
             expected_matrix = cast(Matrix, expected)
-            value_matrix = cast(Matrix, value)
             expected_columns = len(expected_matrix[0])
-            if any(len(row) != expected_columns for row in value_matrix):
+            if any(
+                isinstance(row, (str, bytes))
+                or not isinstance(row, Sequence)
+                or len(row) != expected_columns
+                for row in value
+            ):
                 raise ValueError(f"parameter {name} has the wrong shape")
+            if any(
+                isinstance(item, bool) or not isinstance(item, Real)
+                for row in value
+                for item in row
+            ):
+                raise ValueError(f"parameter {name} contains a non-real value")
             normalized: StateValue = tuple(
-                tuple(float(item) for item in row) for row in value_matrix
+                tuple(float(item) for item in row) for row in value
             )
         else:
-            normalized = tuple(float(item) for item in cast(Vector, value))
+            if any(isinstance(item, bool) or not isinstance(item, Real) for item in value):
+                raise ValueError(f"parameter {name} contains a non-real value")
+            normalized = tuple(float(item) for item in value)
 
         flattened = (
             (item for row in normalized for item in row)

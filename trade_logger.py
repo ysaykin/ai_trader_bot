@@ -134,7 +134,18 @@ def relabel_session(session: str, log_path: Path = DEFAULT_TRAJECTORY_PATH) -> i
                 for action, scale in multiples.items()
             }
             best = max(scores, key=scores.get)
-            labels[name] = {"action": best, "scores": scores, "future_pnl": gain, "max_adverse_excursion": adverse}
+            opening_credit = finite_number(state.get("entry_credit"))
+            best_future_pnl = max(item["pnl"] for item in path)
+            profit_target = None
+            if opening_credit is not None and opening_credit > 0:
+                profit_target = min(max(best_future_pnl / (opening_credit * 100.0), 0.15), 0.80)
+            labels[name] = {
+                "action": best,
+                "scores": scores,
+                "future_pnl": gain,
+                "max_adverse_excursion": adverse,
+                "profit_target": profit_target,
+            }
         best_strategy = max(labels, key=lambda name: max(labels[name]["scores"].values())) if labels else None
         _append_trajectory(log_path, {
             "schema_version": 1, "event": "HINDSIGHT_LABEL", "session": session,
@@ -156,7 +167,12 @@ class TrajectoryLogger:
     so EOD labels do not confuse going flat with a zero-valued contract basket.
     """
 
-    def __init__(self, strategy_names: list[str], log_path: Path = DEFAULT_TRAJECTORY_PATH) -> None:
+    def __init__(
+        self,
+        strategy_names: list[str],
+        log_path: Path = DEFAULT_TRAJECTORY_PATH,
+        completed_snapshot_callback: Any | None = None,
+    ) -> None:
         if not strategy_names or len(set(strategy_names)) != len(strategy_names):
             raise ValueError("Trajectory strategy names must be nonempty and unique")
         self.names = tuple(strategy_names)
@@ -172,6 +188,7 @@ class TrajectoryLogger:
         self._previous_states: dict[str, dict[str, Any]] = {}
         self._session = ""
         self._written = {row["record_id"] for row in _read_trajectories(self.log_path) if "record_id" in row}
+        self._completed_snapshot_callback = completed_snapshot_callback
 
     def _optional(self, callback: Any, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -218,10 +235,23 @@ class TrajectoryLogger:
         credit = finite_number(getattr(strategy, "_entry_credit", None))
         entries = getattr(strategy, "_entry_orders", [])
         book = self._books.get(name)
-        if len(legs) == 4 and len(entries) == 4 and credit is not None and credit > 0:
-            if book is None or book["entry"] is not entries[0]:
+        if len(legs) == 4 and credit is not None and credit > 0:
+            entry_token = (
+                entries[0]
+                if entries
+                else tuple(
+                    (
+                        str(getattr(asset, "symbol", "")),
+                        str(getattr(asset, "expiration", "")),
+                        float(getattr(asset, "strike", 0.0)),
+                        str(getattr(asset, "right", "")),
+                    )
+                    for asset, _ in legs
+                )
+            )
+            if book is None or book["entry"] != entry_token:
                 book = {
-                    "entry": entries[0], "legs": list(legs), "credit": credit,
+                    "entry": entry_token, "legs": list(legs), "credit": credit,
                     "trade_id": getattr(strategy, "_current_trade_id", None),
                     "trajectory_id": f"{name}:{now.isoformat()}",
                     "quantity": int(parameters["quantity"]),
@@ -285,8 +315,10 @@ class TrajectoryLogger:
                         state["put_pressure" if "put" in right else "call_pressure"] = pressure
         return state
 
-    def record(self, strategy: Any, action: str, *, session_end: bool = False) -> None:
-        """Collect one strategy tick; the caller isolates telemetry failures."""
+    def record(
+        self, strategy: Any, action: str, *, session_end: bool = False
+    ) -> dict[str, Any] | None:
+        """Collect a tick and return the last row finalized by this call."""
         now = strategy.get_datetime()
         if now.tzinfo is None:
             raise ValueError("Strategy clock must be timezone-aware")
@@ -301,17 +333,20 @@ class TrajectoryLogger:
         event = "SESSION_END" if session_end else "SNAPSHOT"
         record_id = f"{session}:{bucket}:{event}"
         name = _strategy_name(strategy)
+        finalized: list[dict[str, Any]] = []
         with self._lock:
             if name not in self.names:
                 raise ValueError(f"Unregistered trajectory strategy: {name}")
             if record_id in self._written:
                 if session_end:
                     relabel_session(session, self.log_path)
-                return
+                return None
             if self._bucket is not None and bucket < self._bucket:
                 return
             if self._pending and self._pending["record_id"] != record_id:
-                self._flush()
+                row = self._flush()
+                if row is not None:
+                    finalized.append(row)
             if session != self._session:
                 self._books.clear()
                 self._previous_states.clear()
@@ -341,12 +376,22 @@ class TrajectoryLogger:
                 strategy.get_datetime().astimezone(timezone.utc).isoformat()
             )
             if all(state is not None for state in self._pending["strategies"].values()):
-                self._flush()
+                row = self._flush()
+                if row is not None:
+                    finalized.append(row)
+        callback = self._completed_snapshot_callback
+        if callback is not None:
+            for row in finalized:
+                try:
+                    callback(row)
+                except Exception as error:
+                    logger.warning("Completed snapshot callback failed: %s", error)
+        return finalized[-1] if finalized else None
 
-    def _flush(self) -> None:
+    def _flush(self) -> dict[str, Any] | None:
         row = self._pending
         if row is None:
-            return
+            return None
         states = row["strategies"]
         row["timestamp"] = max(state["observed_at"] for state in states.values() if state)
         total_risk = sum(state["max_risk"] for state in states.values() if state and state["position_open"])
@@ -376,6 +421,7 @@ class TrajectoryLogger:
         self._pending = None
         if row["event"] == "SESSION_END":
             relabel_session(row["session"], self.log_path)
+        return row
 
 
 def record_trade_entry(

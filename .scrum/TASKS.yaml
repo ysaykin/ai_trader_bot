@@ -91,12 +91,20 @@ tasks:
 
   # --- Follow-Up Tasks & Edge-Case Defects ---
   - id: neural-policy-training-and-live-adapter
-    title: "Implement offline trajectory trainer and live feature-sequence inference adapter for MultiHeadPolicyNetwork"
-    status: pending
+    title: "Implement offline trajectory trainer, live inference adapter, and robust state serialization for MultiHeadPolicyNetwork with isolated ledger tracking"
+    status: completed
     owner: antigravity
     deliverables:
       - ml/train.py
       - ml/inference.py
+      - ml/policy_net.py
+      - strategies/iron_condor_math.py
+      - strategies/position_ledger.py
+      - strategies/iron_condor.py
+      - main.py
+      - tests/test_policy_pipeline.py
+      - tests/test_iron_condor_math.py
+      - tests/test_policy_net.py
 
   - id: fix-local-lumibot-namespace-shadowing
     title: "Remove or relocate legacy untracked ./lumibot/ directory so local non-Docker Python invocations do not shadow upstream lumibot package"
@@ -104,3 +112,11 @@ tasks:
     owner: antigravity
     deliverables:
       - pyproject.toml
+
+  - id: tradier-live-multileg-reconciliation
+    title: "Verify end-to-end Tradier multileg order fills against live paper broker sandbox and test multi-day ledger rollover"
+    status: pending
+    owner: antigravity
+    deliverables:
+      - strategies/position_ledger.py
+      - strategies/iron_condor.py

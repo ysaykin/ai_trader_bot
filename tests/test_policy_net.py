@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import json
 import unittest
 
 from ml.policy_net import (
@@ -84,14 +85,47 @@ class MultiHeadPolicyNetworkTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.network.forward([[]])
         with self.assertRaises(ValueError):
+            self.network.forward([True])
+        with self.assertRaises(ValueError):
+            self.network.forward([[1.0]])
+        with self.assertRaises(ValueError):
             self.network.forward([[(1.0, 2.0)]])
         with self.assertRaises(ValueError):
             self.network.forward([[(1.0, 2.0, float("nan"))]])
+        with self.assertRaises(ValueError):
+            self.network.forward([[(1.0, True, 3.0)]])
+        with self.assertRaises(ValueError):
+            self.network.forward([["123"]])
 
         state = self.network.state_dict()
         state.pop("action_bias")
         with self.assertRaises(ValueError):
             self.network.load_state_dict(state)
+
+    def test_json_round_trip_normalizes_lists_to_immutable_tuples(self) -> None:
+        state = json.loads(json.dumps(self.network.state_dict()))
+        self.network.load_state_dict(state)
+        loaded = self.network.state_dict()
+        self.assertTrue(all(isinstance(value, tuple) for value in loaded.values()))
+        self.assertTrue(
+            all(
+                isinstance(row, tuple)
+                for value in loaded.values()
+                if value and isinstance(value[0], tuple)
+                for row in value
+            )
+        )
+
+    def test_bool_in_json_state_is_rejected(self) -> None:
+        state = json.loads(json.dumps(self.network.state_dict()))
+        state["action_bias"][0] = True
+        with self.assertRaises(ValueError):
+            self.network.load_state_dict(state)
+
+        matrix_state = json.loads(json.dumps(self.network.state_dict()))
+        matrix_state["action_weights"][0][0] = True
+        with self.assertRaises(ValueError):
+            self.network.load_state_dict(matrix_state)
 
 
 if __name__ == "__main__":

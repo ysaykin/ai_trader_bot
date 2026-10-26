@@ -21,7 +21,10 @@ import logging
 import os
 from typing import Any
 
-from strategies.iron_condor import SPXIronCondor
+try:
+    from strategies.iron_condor import SPXIronCondor
+except ImportError:
+    SPXIronCondor = Any  # type: ignore[misc, assignment]
 from strategies.market_data_hub import MarketDataHub, get_shared_market_data_hub
 
 logger = logging.getLogger(__name__)
@@ -74,6 +77,7 @@ def get_incubator_specs(limit: int | None = None) -> list[dict[str, Any]]:
 _HOST_DELEGATED_METHODS = (
     "get_datetime",
     "get_last_price",
+    "get_quote",
     "get_chains",
     "get_expiration",
     "get_strikes",
@@ -81,6 +85,7 @@ _HOST_DELEGATED_METHODS = (
     "get_greeks",
     "get_positions",
     "get_orders",
+    "get_order",
     "create_order",
     "submit_order",
     "cancel_order",
@@ -108,6 +113,14 @@ def attach_strategies_to_host(strategies: list[SPXIronCondor]) -> SPXIronCondor:
     for follower in followers:
         bind_follower_to_host(follower, host)
     host._attached_strategies = followers
+    host._strategy_lookup = {
+        str(getattr(strategy, "name", type(strategy).__name__)): strategy
+        for strategy in strategies
+    }
+    ledger = getattr(host, "_position_ledger", None)
+    if ledger is not None:
+        for strategy in strategies:
+            strategy._position_ledger = ledger
     return host
 
 
@@ -117,6 +130,7 @@ def build_strategy_variant(
     market_data_hub: MarketDataHub | None = None,
     budget: float = 100_000.0,
     host_strategy: SPXIronCondor | None = None,
+    position_ledger: Any | None = None,
 ) -> SPXIronCondor:
     """
     Instantiate a single `SPXIronCondor` variant with locked per-variant parameters
@@ -133,9 +147,13 @@ def build_strategy_variant(
     merged_params["quantity"] = 1
     merged_params.update(spec)
     merged_params["market_data_hub"] = hub
+    if position_ledger is not None:
+        merged_params["position_ledger"] = position_ledger
 
     strategy_name = str(merged_params.get("strategy_name", "SPXIronCondor"))
-    variant_overrides = set(spec.keys()) | {"quantity", "market_data_hub", "strategy_name"}
+    variant_overrides = set(spec.keys()) | {
+        "quantity", "market_data_hub", "position_ledger", "strategy_name"
+    }
 
     if host_strategy is not None:
         strategy = object.__new__(SPXIronCondor)
@@ -163,6 +181,8 @@ def build_strategy_variant(
         strategy.__dict__["parameters"] = dict(merged_params)
     strategy._variant_overrides = variant_overrides
     strategy._market_data_hub = hub
+    if position_ledger is not None:
+        strategy._position_ledger = position_ledger
     return strategy
 
 
@@ -170,6 +190,7 @@ def build_ab_strategies(
     broker: Any,
     market_data_hub: MarketDataHub | None = None,
     budget: float = 100_000.0,
+    position_ledger: Any | None = None,
 ) -> list[SPXIronCondor]:
     """Build 2 concurrent strategies (`Strategy_A_Conservative` vs `Strategy_B_Aggressive`) for A/B mode."""
     hub = market_data_hub or get_shared_market_data_hub()
@@ -189,9 +210,13 @@ def build_ab_strategies(
         "stop_loss_mult": float(os.getenv("AB_STRAT_B_SL", "2.5")),
         "entry_time": os.getenv("IC_ENTRY_TIME", "10:00"),
     }
-    strat_a = build_strategy_variant(broker=broker, spec=spec_a, market_data_hub=hub, budget=budget)
+    strat_a = build_strategy_variant(
+        broker=broker, spec=spec_a, market_data_hub=hub, budget=budget,
+        position_ledger=position_ledger,
+    )
     strat_b = build_strategy_variant(
-        broker=broker, spec=spec_b, market_data_hub=hub, budget=budget, host_strategy=strat_a
+        broker=broker, spec=spec_b, market_data_hub=hub, budget=budget,
+        host_strategy=strat_a, position_ledger=position_ledger,
     )
     return [strat_a, strat_b]
 
@@ -201,6 +226,7 @@ def build_incubator_strategies(
     market_data_hub: MarketDataHub | None = None,
     budget: float = 100_000.0,
     limit: int | None = None,
+    position_ledger: Any | None = None,
 ) -> list[SPXIronCondor]:
     """
     Build all 20 Iron Condor incubator strategies attached to a shared `MarketDataHub`.
@@ -217,6 +243,7 @@ def build_incubator_strategies(
                 market_data_hub=hub,
                 budget=budget,
                 host_strategy=host,
+                position_ledger=position_ledger,
             )
         )
     logger.info(

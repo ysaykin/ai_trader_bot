@@ -12,4 +12,5 @@ Acceptance:
 - [x] **Trading & Evaluation Pipeline**: Granular position actions (`ADD`, `TRIM`, `DYNAMIC_PT`, `FLATTEN`) and counterfactual regret / MFE / MAE evaluation across all 20 strategies (`ML-07`).
 - [x] **Logging Pipeline**: 5-minute intraday State-Action-Reward trajectory logger (`logs/trajectories.jsonl`) with EOD hindsight-optimal relabeling (`ML-04`).
 - [x] **Learning Pipeline**: Multi-head neural policy network (`ml/policy_net.py`) encoding market dynamics + cross-strategy signals to decide position scaling, profit-taking, and strategy selection (`ML-01` to `ML-06`).
+- [x] **Policy Training & Inference Bridge**: Offline trajectory trainer (`ml/train.py`), live normalization/imputation bridge (`ml/inference.py`), and transactional position ledger (`strategies/position_ledger.py`).
 - [ ] **Self-Improving Bot Loop**: Automated post-market continual learner with Purged Walk-Forward CV and Champion vs. Challenger shadow promotion gate (`ML-08`).

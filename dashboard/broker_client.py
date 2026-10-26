@@ -197,17 +197,28 @@ class TradierClient:
 
 def get_broker_client():
     """Instantiate and return the active broker client (Tradier or Alpaca)."""
+    broker_type = os.getenv("TRADING_BROKER", "").strip().lower()
+    if broker_type not in ("", "tradier", "alpaca"):
+        return None
     # 1. Check Tradier
-    tradier_key = os.getenv("TRADIER_API_KEY")
-    if tradier_key and tradier_key != "your_tradier_api_key_here":
+    tradier_key = os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY")
+    if (broker_type == "tradier" or not broker_type) and tradier_key and not tradier_key.startswith("your_"):
         account = os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT", "VA21359019")
-        sandbox = os.getenv("TRADIER_IS_PAPER", "true").lower() in ("true", "1") or os.getenv("TRADIER_SANDBOX", "1") == "1"
+        paper_value = next(
+            (
+                raw.strip()
+                for name in ("TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX")
+                if (raw := os.getenv(name)) is not None and raw.strip()
+            ),
+            "true",
+        )
+        sandbox = paper_value.lower() in ("true", "1", "yes", "on")
         return TradierClient(api_key=tradier_key, account=account, sandbox=sandbox)
 
     # 2. Check Alpaca
     alpaca_key = os.getenv("ALPACA_API_KEY")
     alpaca_secret = os.getenv("ALPACA_API_SECRET")
-    if alpaca_key and alpaca_secret and alpaca_key != "your_paper_api_key_here":
+    if (broker_type == "alpaca" or not broker_type) and alpaca_key and alpaca_secret and alpaca_key != "your_paper_api_key_here":
         try:
             from alpaca_client import get_client
             client = get_client()

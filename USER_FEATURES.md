@@ -260,6 +260,7 @@ This document is the **single source of truth** for all user-facing features sup
   * **Head 3 — Contextual Strategy Selector ($A^* \in \{1, \dots, 20\}$)**:
     * Scores all 20 parameter variations given current market context $S_t$ to select optimal delta, wing width, and entry window.
 * **GUI Manifestation**: "🎯 Neural Policy Recommendation" panel with live action distribution, dynamic profit target line, and selected strategy variant badge.
+* **Deliverables**: `ml/policy_net.py`, `ml/train.py`, `ml/inference.py`, `tests/test_policy_net.py`, `tests/test_policy_pipeline.py`.
 
 #### `ML-07`: Counterfactual Strategy & Regret Evaluator
 * **User Story**: As a quant trader, I want the trading pipeline to evaluate every live decision against all 20 simultaneous variants using risk-adjusted and counterfactual metrics, so we measure whether the bot is genuinely making better decisions than static rules.

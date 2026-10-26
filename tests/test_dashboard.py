@@ -1,9 +1,28 @@
 """Offline tests for dashboard telemetry, attribution, and benchmark math."""
 from datetime import date
+import importlib.util
+import os
+from pathlib import Path
+from types import ModuleType
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from dashboard import app
+
+
+def _load_broker_client() -> ModuleType:
+    dotenv = ModuleType("dotenv")
+    dotenv.load_dotenv = Mock()
+    requests_mod = ModuleType("requests")
+    spec = importlib.util.spec_from_file_location(
+        "dashboard_broker_client_under_test",
+        Path(__file__).resolve().parents[1] / "dashboard" / "broker_client.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    with patch.dict("sys.modules", {"dotenv": dotenv, "requests": requests_mod}):
+        spec.loader.exec_module(module)
+    return module
 
 
 class DashboardSettingsTests(unittest.TestCase):
@@ -20,6 +39,49 @@ class DashboardSettingsTests(unittest.TestCase):
                 self.assertFalse(settings.paper)
                 self.assertEqual(settings.base_url, "https://api.tradier.com/v1")
                 self.assertNotIn("test-token", repr(settings))
+
+        canonical_live = app.broker_settings({
+            "TRADING_BROKER": "tradier",
+            "TRADIER_ACCESS_TOKEN": "test-token",
+            "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
+            "TRADIER_PAPER": "false",
+            "TRADIER_IS_PAPER": "true",
+            "TRADIER_SANDBOX": "1",
+        })
+        self.assertFalse(canonical_live.paper)
+
+        blank_canonical_falls_back = app.broker_settings({
+            "TRADING_BROKER": "tradier",
+            "TRADIER_ACCESS_TOKEN": "test-token",
+            "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
+            "TRADIER_PAPER": "",
+            "TRADIER_IS_PAPER": "true",
+        })
+        self.assertTrue(blank_canonical_falls_back.paper)
+
+    def test_broker_client_matches_canonical_tradier_paper_precedence(self) -> None:
+        broker_client = _load_broker_client()
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier",
+            "TRADIER_ACCESS_TOKEN": "test-token",
+            "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
+            "TRADIER_PAPER": "false",
+            "TRADIER_IS_PAPER": "true",
+            "TRADIER_SANDBOX": "1",
+        }, clear=True):
+            client = broker_client.get_broker_client()
+        self.assertIsNotNone(client)
+        self.assertFalse(client.sandbox)
+
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier",
+            "TRADIER_ACCESS_TOKEN": "test-token",
+            "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
+            "TRADIER_PAPER": "",
+            "TRADIER_IS_PAPER": "true",
+        }, clear=True):
+            client = broker_client.get_broker_client()
+        self.assertTrue(client.sandbox)
 
     def test_invalid_or_missing_settings_do_not_create_mock_account(self) -> None:
         for environment in ({}, {"TRADING_BROKER": "unknown"}, {"TRADING_BROKER": "tradier"}, {

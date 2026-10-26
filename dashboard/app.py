@@ -14,12 +14,17 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html import escape
 from pathlib import Path
 from typing import Any, Mapping
 from zoneinfo import ZoneInfo
+
+_ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(_ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(_ROOT_DIR))
 
 
 @dataclass(frozen=True)
@@ -37,6 +42,14 @@ class BrokerSettings:
         return "https://sandbox.tradier.com/v1" if self.paper else "https://api.tradier.com/v1"
 
 
+def _first_configured(environment: Mapping[str, str], *names: str, default: str = "") -> str:
+    for name in names:
+        raw = environment.get(name)
+        if raw is not None and raw.strip():
+            return raw.strip()
+    return default
+
+
 def broker_settings(environment: Mapping[str, str]) -> BrokerSettings:
     """Use the same explicit selection and Tradier aliases as the trading entrypoint."""
     token = environment.get("TRADIER_ACCESS_TOKEN") or environment.get("TRADIER_API_KEY", "")
@@ -45,7 +58,9 @@ def broker_settings(environment: Mapping[str, str]) -> BrokerSettings:
         raise ValueError(f"Unsupported TRADING_BROKER: {name}")
     if name == "tradier":
         account = environment.get("TRADIER_ACCOUNT_NUMBER") or environment.get("TRADIER_ACCOUNT", "")
-        paper = environment.get("TRADIER_IS_PAPER", environment.get("TRADIER_SANDBOX", "true"))
+        paper = _first_configured(
+            environment, "TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX", default="true"
+        )
         if not token.strip() or token.startswith("your_") or not account.strip():
             raise ValueError("Set TRADIER_ACCESS_TOKEN and TRADIER_ACCOUNT_NUMBER to connect telemetry.")
         secret = ""
@@ -53,13 +68,13 @@ def broker_settings(environment: Mapping[str, str]) -> BrokerSettings:
         token = environment.get("ALPACA_API_KEY", "")
         secret = environment.get("ALPACA_API_SECRET", "")
         account = ""
-        paper = environment.get("ALPACA_PAPER", "true")
+        paper = _first_configured(environment, "ALPACA_PAPER", default="true")
         if not token.strip() or token.startswith("your_") or not secret.strip():
             raise ValueError("Set broker credentials to connect telemetry.")
     paper = paper.strip().lower()
-    if paper not in {"true", "false", "1", "0"}:
+    if paper not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
         raise ValueError("Broker paper/sandbox setting must be true, false, 1, or 0.")
-    return BrokerSettings(name, token.strip(), account.strip(), paper in {"true", "1"}, secret)
+    return BrokerSettings(name, token.strip(), account.strip(), paper in {"true", "1", "yes", "on"}, secret)
 
 
 def number(value: Any) -> float | None:
@@ -279,8 +294,10 @@ def position_records(positions: list[dict[str, Any]], quotes: dict[str, dict[str
         greeks = quote.get("greeks") or {}
         bid, ask = number(quote.get("bid")), number(quote.get("ask"))
         mid = (bid + ask) / 2 if bid is not None and ask is not None and 0 <= bid <= ask and ask > 0 else None
+        strat = position.get("strategy") or position.get("tag")
+        tag = strategy_tag(strat) or (str(strat) if strat else "Unattributed")
         rows.append({
-            "Strategy": strategy_tag(position.get("strategy") or position.get("tag")) or "Unattributed",
+            "Strategy": tag,
             "Symbol": symbol, "Contracts": position.get("quantity", position.get("qty")),
             "Strike": number(quote.get("strike")), "Expiration": quote.get("expiration_date"),
             "Cost Basis": number(position.get("cost_basis")), "Market Mid": mid,
@@ -289,6 +306,121 @@ def position_records(positions: list[dict[str, Any]], quotes: dict[str, dict[str
             "Unrealized P&L": number(position.get("unrealized_pl")),
         })
     return rows
+
+
+def get_incubator_summary(all_trades: list[dict[str, Any]]) -> dict[str, Any]:
+    """Compile performance matrix and metrics for all 20 incubator variants."""
+    try:
+        from strategies.incubator import INCUBATOR_GRID_20
+        specs = INCUBATOR_GRID_20
+    except ImportError:
+        specs = []
+
+    rows = []
+    total_realized_pnl = 0.0
+    total_trades_count = 0
+    total_wins = 0
+
+    for spec in specs:
+        name = spec["strategy_name"]
+        short_id = name.split("_")[0] + "_" + name.split("_")[1]
+        v_trades = [t for t in all_trades if t.get("strategy") == name]
+        closed = [t for t in v_trades if str(t.get("status", "")).upper() == "CLOSED"]
+        open_t = [t for t in v_trades if str(t.get("status", "")).upper() == "OPEN"]
+        pnl = sum(number(t.get("pnl")) or 0.0 for t in closed)
+        wins = sum(1 for t in closed if (number(t.get("pnl")) or 0.0) > 0)
+        win_rate = (wins / len(closed) * 100) if closed else None
+        credit = sum(number(t.get("credit_received")) or 0.0 for t in v_trades)
+
+        total_realized_pnl += pnl
+        total_trades_count += len(closed)
+        total_wins += wins
+
+        status = "OPEN POSITION" if open_t else ("PROFIT TAKEN" if closed else "MONITORING")
+        rows.append({
+            "Variant": short_id,
+            "Strategy Name": name,
+            "Delta (Δ)": spec["short_delta"],
+            "Wing ($)": f"${spec['wing_width']:.1f}",
+            "DTE": f"{spec['dte']}DTE",
+            "Profit Target": f"{spec['profit_target']*100:.0f}%",
+            "Stop Loss": f"{spec['stop_loss_mult']:.1f}x",
+            "Entry Window": f"{spec['entry_time']} ET",
+            "Closed Trades": len(closed),
+            "Open Trades": len(open_t),
+            "Win Rate": f"{win_rate:.0f}%" if win_rate is not None else "-",
+            "Realized P&L ($)": pnl,
+            "Credit Coll. ($)": credit,
+            "Status": status,
+            "raw_trades": v_trades,
+            "raw_closed": closed,
+        })
+
+    active_count = sum(1 for r in rows if r["Closed Trades"] > 0 or r["Open Trades"] > 0)
+    overall_win_rate = (total_wins / total_trades_count * 100) if total_trades_count > 0 else 0.0
+
+    return {
+        "rows": rows,
+        "total_variants": len(specs),
+        "active_variants": active_count,
+        "total_trades": total_trades_count,
+        "total_pnl": total_realized_pnl,
+        "overall_win_rate": overall_win_rate,
+    }
+
+
+def get_neural_policy_summary() -> dict[str, Any]:
+    """Load neural policy recommendations and counterfactual regret evaluation."""
+    import json
+    from pathlib import Path
+
+    model_path = Path("logs/models/policy.json")
+    traj_path = Path("logs/trajectories.jsonl")
+
+    res: dict[str, Any] = {
+        "model_loaded": False,
+        "model_path": str(model_path),
+        "recommendation": None,
+        "market_regime": "Unknown",
+        "evaluator_results": None,
+        "mfe_efficiency": None,
+        "latest_snapshot": None,
+        "ticks_count": 0,
+    }
+
+    if traj_path.exists():
+        try:
+            from ml.evaluator import evaluate_counterfactual_regret, compute_mfe_mae_efficiency, classify_market_regime
+            from trade_logger import load_all_trades
+            res["evaluator_results"] = evaluate_counterfactual_regret(traj_path)
+            res["mfe_efficiency"] = compute_mfe_mae_efficiency(load_all_trades())
+
+            with open(traj_path, "r", encoding="utf-8") as f:
+                lines = [l for l in f.readlines() if l.strip()]
+                res["ticks_count"] = len(lines)
+                for line in reversed(lines):
+                    try:
+                        row = json.loads(line)
+                        if row.get("event") == "SNAPSHOT":
+                            res["latest_snapshot"] = row
+                            res["market_regime"] = classify_market_regime(row.get("market"))
+                            break
+                    except json.JSONDecodeError:
+                        continue
+        except Exception:
+            pass
+
+    if model_path.exists():
+        try:
+            from ml.inference import LivePolicyController
+            controller = LivePolicyController(model_path)
+            res["model_loaded"] = True
+            if res.get("latest_snapshot"):
+                res["recommendation"] = controller.on_snapshot(res["latest_snapshot"])
+        except Exception:
+            pass
+
+    return res
 
 
 # -------------------------------------------------------------
@@ -547,8 +679,13 @@ def main() -> None:
         m2.metric("Available Cash", money((account or {}).get("cash")))
         m3.metric("Option Buying Power", money((account or {}).get("buying_power")))
         m4.metric("Open Option Requirement", money(open_exposure), f"of ${env_max_pos_risk:,.0f} cap")
-        observed_tags = {strategy_tag(t.get("strategy")) for t in all_trades} - {None}
-        m5.metric("Observed A/B Variants", f"{len(observed_tags)}/2", "Tagged journal records")
+        trading_mode = os.getenv("TRADING_MODE", "single").strip().lower()
+        if trading_mode == "incubator":
+            active_incubator = {t.get("strategy") for t in all_trades if str(t.get("strategy", "")).startswith("IC_V")}
+            m5.metric("Active Incubator Grid", f"{len(active_incubator)}/20", "Variants with trades")
+        else:
+            observed_tags = {strategy_tag(t.get("strategy")) for t in all_trades} - {None}
+            m5.metric("Observed A/B Variants", f"{len(observed_tags)}/2", "Tagged journal records")
         m6.metric("Unrealized Account P&L", money((account or {}).get("open_pl")))
 
         st.divider()
@@ -597,7 +734,9 @@ def main() -> None:
         # -------------------------------------------------------------
         # Main Navigation Tabs
         # -------------------------------------------------------------
-        tab_benchmark, tab_ab, tab_positions, tab_orders, tab_config, tab_logs, tab_features = st.tabs([
+        tab_incubator, tab_ml, tab_benchmark, tab_ab, tab_positions, tab_orders, tab_config, tab_logs, tab_features = st.tabs([
+            "🧬 20-Strategy Incubator Grid",
+            "🧠 Neural Policy & Evaluation",
             "📈 S&P 500 Benchmark",
             "⚖️ A/B Strategy Lab",
             "📊 Active Positions & Greeks",
@@ -606,6 +745,208 @@ def main() -> None:
             "📜 Real-Time Log Console",
             "📘 User Features Matrix",
         ])
+
+        # =============================================================
+        # TAB: 20-STRATEGY INCUBATOR GRID (EXP-05)
+        # =============================================================
+        with tab_incubator:
+            st.subheader("🧬 20-Variant Iron Condor Strategy Incubator (EXP-05)")
+            st.caption("Real-time forward-testing across 20 distinct parameter variations on XSP (Delta 0.08–0.25, Wing 2–15pt, DTE 0–1, Entry 09:45–13:00 ET). Independent ledgers isolate positions per variant.")
+
+            incubator_data = get_incubator_summary(all_trades)
+            i_col1, i_col2, i_col3, i_col4 = st.columns(4)
+            i_col1.metric("Active Incubator Grid", f"{incubator_data['active_variants']}/{incubator_data['total_variants']} Active", f"{incubator_data['total_variants']} Configured Variants")
+            i_col2.metric("Total Completed Trades", str(incubator_data["total_trades"]), "Closed across all variants")
+            i_col3.metric("Overall Win Rate", f"{incubator_data['overall_win_rate']:.1f}%", f"{incubator_data['total_trades']} closed trades")
+            i_col4.metric("Total Realized P&L", f"${incubator_data['total_pnl']:,.2f}", "Cumulative Net Gain")
+
+            st.divider()
+
+            # Leaderboard & Performance Matrix
+            st.markdown("#### 🏆 Incubator Performance Leaderboard")
+            view_mode = st.radio("Grid Ordering", ["Rank by Realized P&L", "Numeric Order (IC_V01 - IC_V20)"], horizontal=True)
+
+            raw_rows = incubator_data["rows"]
+            display_rows = []
+            for r in raw_rows:
+                display_rows.append({
+                    "Variant": r["Variant"],
+                    "Delta": f"{r['Delta (Δ)']:.2f}",
+                    "Wing": r["Wing ($)"],
+                    "DTE": r["DTE"],
+                    "PT": r["Profit Target"],
+                    "SL": r["Stop Loss"],
+                    "Entry Time": r["Entry Window"],
+                    "Closed Trades": r["Closed Trades"],
+                    "Open Trades": r["Open Trades"],
+                    "Win Rate": r["Win Rate"],
+                    "Realized P&L": r["Realized P&L ($)"],
+                    "Credit Coll.": f"${r['Credit Coll. ($)']:.2f}",
+                    "Status": r["Status"],
+                })
+
+            df_inc = pd.DataFrame(display_rows)
+            if view_mode == "Rank by Realized P&L":
+                df_inc = df_inc.sort_values(by="Realized P&L", ascending=False)
+
+            df_inc_display = df_inc.copy()
+            df_inc_display["Realized P&L"] = df_inc_display["Realized P&L"].apply(lambda v: f"${v:,.2f}" if isinstance(v, (int, float)) else str(v))
+            st.dataframe(df_inc_display, use_container_width=True, hide_index=True)
+
+            # Cumulative Realized P&L Chart across Incubator Variants
+            st.markdown("#### 📈 Cumulative Realized P&L by Variant")
+            inc_pnl_points = []
+            for r in raw_rows:
+                closed = r["raw_closed"]
+                if not closed:
+                    continue
+                cum = 0.0
+                v_name = r["Variant"]
+                for t in sorted(closed, key=lambda x: str(x.get("exit_time", ""))):
+                    p = number(t.get("pnl"))
+                    if p is not None:
+                        cum += p
+                        inc_pnl_points.append({"Exit": t.get("exit_time"), "Variant": v_name, "Cumulative P&L ($)": cum})
+
+            if inc_pnl_points:
+                df_inc_pnl = pd.DataFrame(inc_pnl_points)
+                fig_inc_pnl = go.Figure()
+                for v_name in df_inc_pnl["Variant"].unique():
+                    series = df_inc_pnl[df_inc_pnl["Variant"] == v_name]
+                    fig_inc_pnl.add_trace(go.Scatter(
+                        x=series["Exit"], y=series["Cumulative P&L ($)"],
+                        name=v_name, mode="lines+markers",
+                    ))
+                fig_inc_pnl.update_layout(template="plotly_dark", yaxis_title="Realized P&L ($)", hovermode="x unified")
+                st.plotly_chart(fig_inc_pnl, use_container_width=True)
+            else:
+                st.info("No closed trades to plot in the incubator equity chart yet.")
+
+            # Variant Detail Inspector
+            st.divider()
+            st.markdown("#### 🔍 Single-Variant Inspector")
+            variant_options = [r["Strategy Name"] for r in raw_rows]
+            chosen_variant = st.selectbox("Select Variant to Inspect Details", variant_options, index=3 if len(variant_options) > 3 else 0)
+            chosen_row = next((r for r in raw_rows if r["Strategy Name"] == chosen_variant), None)
+            if chosen_row:
+                c1, c2, c3, c4 = st.columns(4)
+                c1.write(f"• **Short Delta**: `{chosen_row['Delta (Δ)']:.2f}`")
+                c1.write(f"• **Wing Width**: `{chosen_row['Wing ($)']}`")
+                c2.write(f"• **Target DTE**: `{chosen_row['DTE']}`")
+                c2.write(f"• **Entry Window**: `{chosen_row['Entry Window']}`")
+                c3.write(f"• **Profit Target**: `{chosen_row['Profit Target']}`")
+                c3.write(f"• **Stop Loss**: `{chosen_row['Stop Loss']}`")
+                c4.write(f"• **Closed Trades**: `{chosen_row['Closed Trades']}`")
+                c4.write(f"• **Realized P&L**: `${chosen_row['Realized P&L ($)']:,.2f}`")
+
+                v_trades = chosen_row["raw_trades"]
+                if v_trades:
+                    st.write("**Recent Executions for this Variant:**")
+                    st.dataframe(pd.DataFrame(v_trades), use_container_width=True)
+                else:
+                    st.caption("No executions recorded yet for this variant.")
+
+        # =============================================================
+        # TAB: NEURAL POLICY & COUNTERFACTUAL EVALUATION (ML-01 to ML-07)
+        # =============================================================
+        with tab_ml:
+            st.subheader("🧠 Multi-Head Neural Policy & Regret Evaluator (ML-01 – ML-07)")
+            st.caption("Deep reinforcement learning policy network with shared temporal regime encoder driving Scale-In/Out, Dynamic Profit Taking, and 20-Grid Contextual Variant Selection.")
+
+            ml_data = get_neural_policy_summary()
+            eval_res = ml_data["evaluator_results"] or {}
+            mfe_res = ml_data["mfe_efficiency"] or {}
+            rec = ml_data["recommendation"]
+
+            # Top KPI metrics
+            m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+            status_str = "✅ Active (policy.json)" if ml_data["model_loaded"] else "⚠️ Awaiting Model"
+            m_col1.metric("Policy Model", status_str, "20-Strategy Head")
+            m_col2.metric("Market Regime", ml_data["market_regime"], "Latent Encoder State")
+            dyn_pt_str = f"{rec.profit_target*100:.1f}%" if rec and rec.profit_target else "30.0% (Default)"
+            m_col3.metric("Dynamic Profit Target", dyn_pt_str, "Predicted E[Exit Value]")
+            rec_strat_str = (rec.strategy_name.split("_")[0] + "_" + rec.strategy_name.split("_")[1]) if rec and rec.strategy_name else "IC_V04 (Baseline)"
+            m_col4.metric("Contextual Selector", rec_strat_str, "Optimal Grid Variant")
+
+            st.divider()
+
+            # Dynamic Action Probabilities & Recommendations
+            st.markdown("#### 🎯 Neural Policy Recommendation (5-Minute Tick)")
+            p_c1, p_c2 = st.columns([1, 1])
+
+            with p_c1:
+                st.write(f"**Recommended Action**: `{rec.action if rec else 'HOLD'}`")
+                st.write(f"**Optimal Variant**: `{rec.strategy_name if rec else 'IC_V04_D10_W5_PT40_T1030'}`")
+                st.write(f"**Continuous Profit Target**: `{rec.profit_target*100:.1f}%` of credit received" if rec and rec.profit_target else "30% (static)")
+
+                if rec and rec.action_probabilities:
+                    prob_df = pd.DataFrame([
+                        {"Action": act, "Probability": prob}
+                        for act, prob in rec.action_probabilities.items()
+                    ])
+                    fig_prob = go.Figure(go.Bar(
+                        x=prob_df["Probability"] * 100,
+                        y=prob_df["Action"],
+                        orientation="h",
+                        marker_color=["#00d4b2" if a == rec.action else "#38bdf8" for a in prob_df["Action"]],
+                    ))
+                    fig_prob.update_layout(
+                        template="plotly_dark",
+                        xaxis_title="Action Probability (%)",
+                        margin={"l": 20, "r": 20, "t": 20, "b": 20},
+                        height=220,
+                    )
+                    st.plotly_chart(fig_prob, use_container_width=True)
+                else:
+                    st.info("Action probabilities will display once 5-minute ticks are streamed.")
+
+            with p_c2:
+                st.markdown(r"""
+                <div class="metric-card">
+                    <h5 style="color:#38bdf8;margin-top:0">🧬 Network Architecture (ml/policy_net.py)</h5>
+                    <p style="font-size:0.85rem">
+                    • <b>Input Features</b>: 15 causal market + 20-grid Greek pressure metrics.<br>
+                    • <b>Temporal Regime Encoder</b>: Recurrent 32-dim latent embedding \(z_t\).<br>
+                    • <b>Head 1 (Scaling)</b>: Sizing actions (ADD / HOLD / TRIM / FLATTEN).<br>
+                    • <b>Head 2 (Dynamic TP)</b>: Continuous threshold in [15%, 80%].<br>
+                    • <b>Head 3 (Contextual Selector)</b>: Probability across 20 incubator variants.
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+                if ml_data["model_loaded"]:
+                    st.success("Trained model artifact `logs/models/policy.json` verified and connected to dashboard.")
+                else:
+                    st.info("Train offline model via `python3 -m ml.train logs/trajectories.jsonl logs/models/policy.json`.")
+
+            st.divider()
+
+            # Counterfactual Regret & Evaluation (ML-07)
+            st.markdown("#### 📊 Counterfactual Regret & Trade Efficiency (ML-07)")
+            r1, r2, r3, r4 = st.columns(4)
+
+            zero_rate = eval_res.get("zero_regret_rate")
+            r1.metric("Zero-Regret Rate", f"{zero_rate*100:.1f}%" if zero_rate is not None else "-", "Matched hindsight-best")
+            mean_reg = eval_res.get("mean_action_regret")
+            r2.metric("Mean Action Regret", f"{mean_reg:.4f}" if mean_reg is not None else "-", "Score loss vs optimal")
+            mfe_ratio = mfe_res.get("mfe_capture_ratio")
+            r3.metric("MFE Capture Efficiency", f"{mfe_ratio*100:.1f}%" if mfe_ratio is not None else "-", "Profit capture vs peak")
+            mae_ratio = mfe_res.get("mae_avoidance_ratio")
+            r4.metric("MAE Loss Avoidance", f"{mae_ratio*100:.1f}%" if mae_ratio is not None else "-", "Adverse excursion avoided")
+
+            # Regime Breakdown Table
+            if eval_res.get("by_regime"):
+                st.write("**Performance & Regret by Intraday Market Regime:**")
+                reg_rows = []
+                for reg_name, reg_vals in eval_res["by_regime"].items():
+                    reg_rows.append({
+                        "Market Regime": reg_name,
+                        "Decisions Evaluated": reg_vals.get("decision_count", 0),
+                        "Mean Regret": f"{reg_vals.get('mean_regret', 0.0):.4f}",
+                        "Optimal Action": reg_vals.get("optimal_action", "HOLD"),
+                    })
+                st.dataframe(pd.DataFrame(reg_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("Regime breakdown available as trajectories are evaluated.")
 
 
         with tab_benchmark:
@@ -852,7 +1193,7 @@ def main() -> None:
                 with t_col1:
                     t_api_key = st.text_input(
                         "Tradier API Key / Access Token",
-                        value=env_vals.get("TRADIER_API_KEY", ""),
+                        value=env_vals.get("TRADIER_ACCESS_TOKEN") or env_vals.get("TRADIER_API_KEY", ""),
                         type="password",
                         help="Your sandbox or live Tradier API access token.",
                     )
@@ -863,11 +1204,13 @@ def main() -> None:
                     )
                 with t_col2:
                     t_is_paper = st.checkbox(
-                        "Sandbox / Paper Mode (`TRADIER_IS_PAPER=true`)",
-                        value=env_vals.get("TRADIER_IS_PAPER", "true").lower() in ("true", "1") or env_vals.get("TRADIER_SANDBOX", "1") == "1",
+                        "Sandbox / Paper Mode (`TRADIER_PAPER=true`)",
+                        value=_first_configured(
+                            env_vals, "TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX", default="true"
+                        ).lower() in ("true", "1", "yes", "on"),
                         help="Leave checked for Tradier Sandbox. Uncheck ONLY for real funded live trading.",
                     )
-                    st.caption("💡 Tradier sandbox provides free delayed index option chains (SPX, XSP).")
+                    st.caption("Tradier Sandbox users should select SPY. SPX/XSP need a separate compatible data source.")
 
                 # Test Connection Button
                 if st.button("🔌 Test Tradier Connection", key="test_tradier_btn"):
@@ -985,9 +1328,11 @@ def main() -> None:
                     "IC_MAX_SINGLE_TRADE_PCT": f"{cfg_single_pct:.2f}",
                 }
                 if is_tradier:
+                    new_env["TRADIER_ACCESS_TOKEN"] = t_api_key.strip()
                     new_env["TRADIER_API_KEY"] = t_api_key.strip()
                     new_env["TRADIER_ACCOUNT"] = t_account.strip()
                     new_env["TRADIER_ACCOUNT_NUMBER"] = t_account.strip()
+                    new_env["TRADIER_PAPER"] = "true" if t_is_paper else "false"
                     new_env["TRADIER_IS_PAPER"] = "true" if t_is_paper else "false"
                     new_env["TRADIER_SANDBOX"] = "1" if t_is_paper else "0"
                 else:
