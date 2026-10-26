@@ -3,7 +3,7 @@ services:
     build: .
     image: lumibot-lumibot-bot:latest
     container_name: lumibot-bot
-    restart: "no"
+    restart: unless-stopped
     env_file: .env
     volumes:
       - ./main.py:/app/main.py:ro

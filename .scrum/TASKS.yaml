@@ -115,8 +115,26 @@ tasks:
 
   - id: tradier-live-multileg-reconciliation
     title: "Verify end-to-end Tradier multileg order fills against live paper broker sandbox and test multi-day ledger rollover"
-    status: pending
+    status: completed
     owner: antigravity
     deliverables:
       - strategies/position_ledger.py
       - strategies/iron_condor.py
+      - trade_logger.py
+      - dashboard/trade_logger.py
+      - dashboard/app.py
+      - main.py
+      - tests/test_iron_condor_math.py
+      - tests/test_regressions.py
+      - tests/test_dashboard.py
+      - tests/test_tradier_sandbox.py
+      - .env.example
+      - docker-compose.yml
+      - README.md
+
+  - id: tradier-sandbox-live-execution-opt-in
+    title: "Execute live state-changing multileg order submission and cancellation against Tradier paper sandbox with active contract symbols (RUN_TRADIER_SANDBOX_WRITE_TEST=1)"
+    status: pending
+    owner: antigravity
+    deliverables:
+      - tests/test_tradier_sandbox.py

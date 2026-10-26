@@ -1,13 +1,16 @@
 """Offline tests for dashboard telemetry, attribution, and benchmark math."""
 from datetime import date
 import importlib.util
+import json
 import os
 from pathlib import Path
+import tempfile
 from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
 from dashboard import app
+from dashboard import trade_logger
 
 
 def _load_broker_client() -> ModuleType:
@@ -204,6 +207,34 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIsNone(app.strategy_tag("Strategy Alpha"))
         self.assertIsNone(app.strategy_tag("SPY261026C00500000"))
         self.assertIsNone(app.strategy_tag("SPXIronCondor"))
+
+
+class TradeJournalTests(unittest.TestCase):
+    def test_trim_and_final_exit_aggregate_cash_and_fees_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "trades.jsonl"
+            records = [
+                {
+                    "event": "ENTRY", "trade_id": "t1", "timestamp": "2026-10-26T10:00:00",
+                    "strategy": "IC", "symbol": "XSP", "quantity": 2, "credit": 0.8,
+                    "opening_credit_cash": 160.0, "entry_fees": 3.2, "max_risk": 840.0,
+                },
+                {
+                    "event": "ADJUSTMENT", "trade_id": "t1", "timestamp": "2026-10-26T11:00:00",
+                    "gross_pnl": 40.0, "fees": 1.6, "net_pnl": 38.4,
+                },
+                {
+                    "event": "EXIT", "trade_id": "t1", "timestamp": "2026-10-26T12:00:00",
+                    "gross_pnl": 30.0, "fees": 1.6, "net_pnl": 28.4,
+                    "exit_reason": "PROFIT_TARGET",
+                },
+            ]
+            path.write_text("".join(json.dumps(row) + "\n" for row in records))
+            [trade] = trade_logger.load_all_trades(path)
+        self.assertEqual(trade["gross_pnl"], 70.0)
+        self.assertEqual(trade["fees"], 6.4)
+        self.assertEqual(trade["net_pnl"], 63.6)
+        self.assertEqual(trade["credit_received_cash"], 160.0)
 
 
 if __name__ == "__main__":

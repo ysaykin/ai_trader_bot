@@ -152,6 +152,12 @@ This document is the **single source of truth** for all user-facing features sup
 #### `BRK-01` & `BRK-02`: Multi-Broker Tradier & Alpaca Execution
 * **User Story**: As a trader, I want to trade index options via Tradier Sandbox/Live or test stock/ETF options via Alpaca Paper/Live using the same codebase.
 * **Parameters**: `TRADING_BROKER=tradier` or `TRADING_BROKER=alpaca`.
+* **Key Reconciliation & Safety Capabilities (`BRK-01`)**:
+  * **Durable Multileg Parent/Child Reconciliation**: Reconciles multileg parent order IDs with individual child leg fill IDs in SQLite, handling partial fills and asynchronous broker updates.
+  * **Multi-Day Position Ledger Rollover**: Maintains position packages across market sessions and restarts without dropping open exposure when broker valuation quotes are temporarily missing.
+  * **Dynamic Close Repricing & Limit Protection**: Protects exits from illiquidity via configurable repricing cycles (`IC_CLOSE_REPRICE_SECONDS`, `IC_CLOSE_MAX_REPRICES`, `IC_CLOSE_PRICE_STEP`) before falling back to market orders (`IC_CLOSE_ALLOW_MARKET=false`).
+  * **Accurate Aggregate-Cash & Per-Contract Fee Accounting**: Tracks real cash flows, fees (`OPTION_FEE_PER_CONTRACT`), scale-ins (`ADD`), trims (`TRIM`), and net realized P&L.
+  * **Process Fault Containment & Automatic Recovery**: Docker `unless-stopped` restart policy and automated retry backoff (`PROCESS_RESTART_BACKOFF_SECONDS`), resuming from durable SQLite ledger without state corruption.
 * **GUI Manifestation**: Broker status badge showing current active broker, account number, option approval level, and ping latency.
 
 #### `BRK-03`: Native OrbStack Docker Containerization

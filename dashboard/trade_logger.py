@@ -134,7 +134,18 @@ def relabel_session(session: str, log_path: Path = DEFAULT_TRAJECTORY_PATH) -> i
                 for action, scale in multiples.items()
             }
             best = max(scores, key=scores.get)
-            labels[name] = {"action": best, "scores": scores, "future_pnl": gain, "max_adverse_excursion": adverse}
+            opening_credit = finite_number(state.get("entry_credit"))
+            best_future_pnl = max(item["pnl"] for item in path)
+            profit_target = None
+            if opening_credit is not None and opening_credit > 0:
+                profit_target = min(max(best_future_pnl / (opening_credit * 100.0), 0.15), 0.80)
+            labels[name] = {
+                "action": best,
+                "scores": scores,
+                "future_pnl": gain,
+                "max_adverse_excursion": adverse,
+                "profit_target": profit_target,
+            }
         best_strategy = max(labels, key=lambda name: max(labels[name]["scores"].values())) if labels else None
         _append_trajectory(log_path, {
             "schema_version": 1, "event": "HINDSIGHT_LABEL", "session": session,
@@ -156,7 +167,12 @@ class TrajectoryLogger:
     so EOD labels do not confuse going flat with a zero-valued contract basket.
     """
 
-    def __init__(self, strategy_names: list[str], log_path: Path = DEFAULT_TRAJECTORY_PATH) -> None:
+    def __init__(
+        self,
+        strategy_names: list[str],
+        log_path: Path = DEFAULT_TRAJECTORY_PATH,
+        completed_snapshot_callback: Any | None = None,
+    ) -> None:
         if not strategy_names or len(set(strategy_names)) != len(strategy_names):
             raise ValueError("Trajectory strategy names must be nonempty and unique")
         self.names = tuple(strategy_names)
@@ -172,6 +188,7 @@ class TrajectoryLogger:
         self._previous_states: dict[str, dict[str, Any]] = {}
         self._session = ""
         self._written = {row["record_id"] for row in _read_trajectories(self.log_path) if "record_id" in row}
+        self._completed_snapshot_callback = completed_snapshot_callback
 
     def _optional(self, callback: Any, *args: Any, **kwargs: Any) -> Any:
         try:
@@ -218,10 +235,23 @@ class TrajectoryLogger:
         credit = finite_number(getattr(strategy, "_entry_credit", None))
         entries = getattr(strategy, "_entry_orders", [])
         book = self._books.get(name)
-        if len(legs) == 4 and len(entries) == 4 and credit is not None and credit > 0:
-            if book is None or book["entry"] is not entries[0]:
+        if len(legs) == 4 and credit is not None and credit > 0:
+            entry_token = (
+                entries[0]
+                if entries
+                else tuple(
+                    (
+                        str(getattr(asset, "symbol", "")),
+                        str(getattr(asset, "expiration", "")),
+                        float(getattr(asset, "strike", 0.0)),
+                        str(getattr(asset, "right", "")),
+                    )
+                    for asset, _ in legs
+                )
+            )
+            if book is None or book["entry"] != entry_token:
                 book = {
-                    "entry": entries[0], "legs": list(legs), "credit": credit,
+                    "entry": entry_token, "legs": list(legs), "credit": credit,
                     "trade_id": getattr(strategy, "_current_trade_id", None),
                     "trajectory_id": f"{name}:{now.isoformat()}",
                     "quantity": int(parameters["quantity"]),
@@ -285,8 +315,10 @@ class TrajectoryLogger:
                         state["put_pressure" if "put" in right else "call_pressure"] = pressure
         return state
 
-    def record(self, strategy: Any, action: str, *, session_end: bool = False) -> None:
-        """Collect one strategy tick; the caller isolates telemetry failures."""
+    def record(
+        self, strategy: Any, action: str, *, session_end: bool = False
+    ) -> dict[str, Any] | None:
+        """Collect a tick and return the last row finalized by this call."""
         now = strategy.get_datetime()
         if now.tzinfo is None:
             raise ValueError("Strategy clock must be timezone-aware")
@@ -301,17 +333,20 @@ class TrajectoryLogger:
         event = "SESSION_END" if session_end else "SNAPSHOT"
         record_id = f"{session}:{bucket}:{event}"
         name = _strategy_name(strategy)
+        finalized: list[dict[str, Any]] = []
         with self._lock:
             if name not in self.names:
                 raise ValueError(f"Unregistered trajectory strategy: {name}")
             if record_id in self._written:
                 if session_end:
                     relabel_session(session, self.log_path)
-                return
+                return None
             if self._bucket is not None and bucket < self._bucket:
                 return
             if self._pending and self._pending["record_id"] != record_id:
-                self._flush()
+                row = self._flush()
+                if row is not None:
+                    finalized.append(row)
             if session != self._session:
                 self._books.clear()
                 self._previous_states.clear()
@@ -341,12 +376,22 @@ class TrajectoryLogger:
                 strategy.get_datetime().astimezone(timezone.utc).isoformat()
             )
             if all(state is not None for state in self._pending["strategies"].values()):
-                self._flush()
+                row = self._flush()
+                if row is not None:
+                    finalized.append(row)
+        callback = self._completed_snapshot_callback
+        if callback is not None:
+            for row in finalized:
+                try:
+                    callback(row)
+                except Exception as error:
+                    logger.warning("Completed snapshot callback failed: %s", error)
+        return finalized[-1] if finalized else None
 
-    def _flush(self) -> None:
+    def _flush(self) -> dict[str, Any] | None:
         row = self._pending
         if row is None:
-            return
+            return None
         states = row["strategies"]
         row["timestamp"] = max(state["observed_at"] for state in states.values() if state)
         total_risk = sum(state["max_risk"] for state in states.values() if state and state["position_open"])
@@ -376,6 +421,7 @@ class TrajectoryLogger:
         self._pending = None
         if row["event"] == "SESSION_END":
             relabel_session(row["session"], self.log_path)
+        return row
 
 
 def record_trade_entry(
@@ -386,6 +432,8 @@ def record_trade_entry(
     quantity: int,
     credit: float,
     max_risk: float,
+    opening_credit_cash: Optional[float] = None,
+    entry_fees: Optional[float] = None,
     trade_id: Optional[str] = None,
     log_path: Path = DEFAULT_LOG_PATH,
 ) -> str:
@@ -394,6 +442,18 @@ def record_trade_entry(
     if not trade_id:
         trade_id = f"trade_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{strategy_name.lower()[:7]}"
 
+    quantity_value = int(quantity)
+    credit_per_contract = float(credit)
+    opening_cash = float(
+        opening_credit_cash
+        if opening_credit_cash is not None
+        else credit_per_contract * 100.0 * quantity_value
+    )
+    fees = float(
+        entry_fees
+        if entry_fees is not None
+        else 4 * quantity_value * float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+    )
     entry_data = {
         "event": "ENTRY",
         "trade_id": trade_id,
@@ -402,8 +462,11 @@ def record_trade_entry(
         "symbol": symbol,
         "expiry": str(expiry),
         "strikes": strikes,
-        "quantity": quantity,
-        "credit": float(credit),
+        "quantity": quantity_value,
+        "credit": credit_per_contract,
+        "credit_per_contract": credit_per_contract,
+        "opening_credit_cash": opening_cash,
+        "entry_fees": fees,
         "max_risk": float(max_risk),
         "status": "OPEN",
     }
@@ -414,6 +477,61 @@ def record_trade_entry(
     return trade_id
 
 
+def record_trade_adjustment(
+    trade_id: str,
+    strategy_name: str,
+    opening_credit_cash: float,
+    closing_cash: float,
+    gross_pnl: float,
+    fees: float,
+    net_pnl: float,
+    remaining_quantity: int,
+    log_path: Path = DEFAULT_LOG_PATH,
+) -> None:
+    """Record a confirmed partial realization while leaving the trade open."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    adjustment = {
+        "event": "ADJUSTMENT",
+        "trade_id": trade_id,
+        "timestamp": datetime.now().isoformat(),
+        "strategy": strategy_name,
+        "opening_credit_cash": float(opening_credit_cash),
+        "closing_cash": float(closing_cash),
+        "gross_pnl": float(gross_pnl),
+        "fees": float(fees),
+        "net_pnl": float(net_pnl),
+        "pnl": float(net_pnl),
+        "remaining_quantity": int(remaining_quantity),
+        "status": "OPEN",
+    }
+    with open(log_path, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(adjustment) + "\n")
+
+
+def record_trade_addition(
+    trade_id: str,
+    strategy_name: str,
+    opening_credit_cash: float,
+    fees: float,
+    added_quantity: int,
+    log_path: Path = DEFAULT_LOG_PATH,
+) -> None:
+    """Record confirmed scale-in cash and fees for an existing trade."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    addition = {
+        "event": "ADDITION",
+        "trade_id": trade_id,
+        "timestamp": datetime.now().isoformat(),
+        "strategy": strategy_name,
+        "opening_credit_cash": float(opening_credit_cash),
+        "fees": float(fees),
+        "added_quantity": int(added_quantity),
+        "status": "OPEN",
+    }
+    with open(log_path, "a", encoding="utf-8") as stream:
+        stream.write(json.dumps(addition) + "\n")
+
+
 def record_trade_exit(
     trade_id: str,
     strategy_name: str,
@@ -422,18 +540,33 @@ def record_trade_exit(
     exit_price: float = 0.0,
     mfe_pnl: Optional[float] = None,
     mae_pnl: Optional[float] = None,
+    fees: Optional[float] = None,
+    gross_pnl: Optional[float] = None,
+    net_pnl: Optional[float] = None,
+    opening_credit_cash: Optional[float] = None,
+    closing_cash: Optional[float] = None,
     log_path: Path = DEFAULT_LOG_PATH,
 ) -> None:
-    """Record a trade exit event to logs/trades.jsonl."""
+    """Record a trade exit event to logs/trades.jsonl with fee and net P&L tracking."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    f_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+    calc_gross = float(gross_pnl if gross_pnl is not None else pnl)
+    calc_fees = float(fees if fees is not None else (8 * f_rate))
+    calc_net = float(net_pnl if net_pnl is not None else (calc_gross - calc_fees))
+
     exit_data: Dict[str, Any] = {
         "event": "EXIT",
         "trade_id": trade_id,
         "timestamp": datetime.now().isoformat(),
         "strategy": strategy_name,
         "exit_reason": exit_reason,
-        "pnl": float(pnl),
+        "gross_pnl": calc_gross,
+        "fees": calc_fees,
+        "pnl": calc_net,
+        "net_pnl": calc_net,
         "exit_price": float(exit_price),
+        "opening_credit_cash": opening_credit_cash,
+        "closing_cash": closing_cash,
         "status": "CLOSED",
     }
     if mfe_pnl is not None:
@@ -451,7 +584,9 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
         return []
 
     entries: Dict[str, Dict[str, Any]] = {}
-    completed_trades: List[Dict[str, Any]] = []
+    adjustments: Dict[str, List[Dict[str, Any]]] = {}
+    additions: Dict[str, List[Dict[str, Any]]] = {}
+    exits: Dict[str, Dict[str, Any]] = {}
 
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -463,51 +598,108 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
                     record = json.loads(line)
                     t_id = record.get("trade_id")
                     ev = record.get("event")
-
+                    if not t_id:
+                        continue
                     if ev == "ENTRY":
                         entries[t_id] = record
-                    elif ev == "EXIT" and t_id in entries:
-                        entry = entries.pop(t_id)
-                        entry_dt = datetime.fromisoformat(entry["timestamp"])
-                        exit_dt = datetime.fromisoformat(record["timestamp"])
-                        duration_mins = max(round((exit_dt - entry_dt).total_seconds() / 60.0, 1), 0.0)
-
-                        completed_trades.append({
-                            "trade_id": t_id,
-                            "strategy": entry.get("strategy", "SPXIronCondor"),
-                            "symbol": entry.get("symbol", "XSP"),
-                            "entry_time": entry["timestamp"],
-                            "exit_time": record["timestamp"],
-                            "duration_minutes": duration_mins,
-                            "credit_received": entry.get("credit", 0.0),
-                            "max_risk": entry.get("max_risk", 0.0),
-                            "quantity": entry.get("quantity", 1),
-                            "pnl": record.get("pnl", 0.0),
-                            "mfe_pnl": record.get("mfe_pnl"),
-                            "mae_pnl": record.get("mae_pnl"),
-                            "exit_reason": record.get("exit_reason", "MANUAL"),
-                            "status": "CLOSED",
-                        })
+                    elif ev == "ADJUSTMENT":
+                        adjustments.setdefault(t_id, []).append(record)
+                    elif ev == "ADDITION":
+                        additions.setdefault(t_id, []).append(record)
+                    elif ev == "EXIT":
+                        exits[t_id] = record
                 except json.JSONDecodeError:
                     continue
 
-        # Add remaining open entries
+        completed_trades: List[Dict[str, Any]] = []
         for t_id, entry in entries.items():
+            entry_qty = int(entry.get("quantity", 1))
+            trade_additions = additions.get(t_id, [])
+            qty = entry_qty + sum(
+                int(item.get("added_quantity", 0)) for item in trade_additions
+            )
+            f_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+            new_schema = "opening_credit_cash" in entry or "entry_fees" in entry
+            opening_cash = float(
+                entry.get(
+                    "opening_credit_cash",
+                    float(entry.get("credit", 0.0)) * 100.0 * entry_qty,
+                )
+            ) + sum(
+                float(item.get("opening_credit_cash", 0.0))
+                for item in trade_additions
+            )
+            entry_fees = float(
+                entry.get("entry_fees", round(4 * entry_qty * f_rate, 2))
+            ) + sum(float(item.get("fees", 0.0)) for item in trade_additions)
+            partials = adjustments.get(t_id, [])
+            partial_gross = sum(
+                float(item.get("gross_pnl", item.get("pnl", 0.0)))
+                for item in partials
+            )
+            partial_fees = sum(float(item.get("fees", 0.0)) for item in partials)
+            exit_record = exits.get(t_id)
+            if exit_record is None:
+                gross_pnl = partial_gross
+                fees = entry_fees + partial_fees
+                net_pnl = round(gross_pnl - fees, 2)
+                exit_time = "OPEN"
+                duration_mins = 0.0
+                status = "OPEN"
+                reason = "IN_PROGRESS"
+                terminal: Dict[str, Any] = {}
+            else:
+                terminal = exit_record
+                exit_gross = float(
+                    terminal.get("gross_pnl", terminal.get("pnl", 0.0))
+                )
+                gross_pnl = partial_gross + exit_gross
+                if new_schema:
+                    exit_fees = float(terminal.get("fees", 4 * qty * f_rate))
+                    fees = entry_fees + partial_fees + exit_fees
+                    net_pnl = round(gross_pnl - fees, 2)
+                else:
+                    exit_fees = float(terminal.get("fees", round(8 * qty * f_rate, 2)))
+                    fees = partial_fees + exit_fees
+                    net_pnl = sum(
+                        float(item.get("net_pnl", item.get("pnl", 0.0)))
+                        for item in partials
+                    ) + float(
+                        terminal.get("net_pnl", round(exit_gross - exit_fees, 2))
+                    )
+                entry_dt = datetime.fromisoformat(entry["timestamp"])
+                exit_dt = datetime.fromisoformat(terminal["timestamp"])
+                duration_mins = max(
+                    round((exit_dt - entry_dt).total_seconds() / 60.0, 1), 0.0
+                )
+                exit_time = terminal["timestamp"]
+                status = "CLOSED"
+                reason = terminal.get("exit_reason", "MANUAL")
+            net_roi_pct = (
+                round((net_pnl / opening_cash) * 100.0, 1)
+                if opening_cash > 0
+                else 0.0
+            )
             completed_trades.append({
                 "trade_id": t_id,
                 "strategy": entry.get("strategy", "SPXIronCondor"),
                 "symbol": entry.get("symbol", "XSP"),
                 "entry_time": entry["timestamp"],
-                "exit_time": "OPEN",
-                "duration_minutes": 0.0,
+                "exit_time": exit_time,
+                "duration_minutes": duration_mins,
                 "credit_received": entry.get("credit", 0.0),
+                "credit_received_cash": opening_cash,
                 "max_risk": entry.get("max_risk", 0.0),
-                "quantity": entry.get("quantity", 1),
-                "pnl": 0.0,
-                "mfe_pnl": None,
-                "mae_pnl": None,
-                "exit_reason": "IN_PROGRESS",
-                "status": "OPEN",
+                "quantity": qty,
+                "gross_pnl": gross_pnl,
+                "fees": fees,
+                "pnl": net_pnl,
+                "net_pnl": net_pnl,
+                "net_roi_pct": net_roi_pct,
+                "mfe_pnl": terminal.get("mfe_pnl"),
+                "mae_pnl": terminal.get("mae_pnl"),
+                "exit_reason": reason,
+                "status": status,
             })
 
     except Exception:
@@ -519,7 +711,7 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
 def compute_strategy_metrics(trades: List[Dict[str, Any]], strategy_name: str) -> Dict[str, Any]:
     """Compute real performance metrics for a specific strategy from trade history."""
     strat_trades = [t for t in trades if strategy_name.lower() in t["strategy"].lower() and t["status"] == "CLOSED"]
-    
+
     total_trades = len(strat_trades)
     if total_trades == 0:
         return {
@@ -527,6 +719,8 @@ def compute_strategy_metrics(trades: List[Dict[str, Any]], strategy_name: str) -
             "total_trades": 0,
             "win_rate": "N/A (0 trades)",
             "realized_pnl": "$0.00",
+            "gross_pnl": "$0.00",
+            "fees": "$0.00",
             "avg_credit": "$0.00",
             "avg_duration": "0 mins",
             "max_drawdown": "$0.00",
@@ -536,10 +730,14 @@ def compute_strategy_metrics(trades: List[Dict[str, Any]], strategy_name: str) -
             "raw_pnl": 0.0,
         }
 
-    pnls = [t["pnl"] for t in strat_trades]
-    wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p < 0]
-    total_pnl = sum(pnls)
+    gross_pnls = [t.get("gross_pnl", t["pnl"]) for t in strat_trades]
+    net_pnls = [t.get("net_pnl", t["pnl"]) for t in strat_trades]
+    total_gross = sum(gross_pnls)
+    total_fees = sum(t.get("fees", 0.0) for t in strat_trades)
+    total_net = sum(net_pnls)
+
+    wins = [p for p in net_pnls if p > 0]
+    losses = [p for p in net_pnls if p < 0]
 
     win_rate_pct = (len(wins) / total_trades) * 100.0
     avg_credit = sum(t["credit_received"] for t in strat_trades) / total_trades
@@ -549,11 +747,11 @@ def compute_strategy_metrics(trades: List[Dict[str, Any]], strategy_name: str) -
     gross_loss = abs(sum(losses))
     profit_factor = f"{(gross_profit / gross_loss):.2f}" if gross_loss > 0 else ("Inf" if gross_profit > 0 else "N/A")
 
-    # Max Drawdown calculation
+    # Max Drawdown calculation on net P&L
     cum_pnl = 0.0
     peak = 0.0
     max_dd = 0.0
-    for p in pnls:
+    for p in net_pnls:
         cum_pnl += p
         if cum_pnl > peak:
             peak = cum_pnl
@@ -569,12 +767,14 @@ def compute_strategy_metrics(trades: List[Dict[str, Any]], strategy_name: str) -
         "status": "🟢 Active Trading",
         "total_trades": total_trades,
         "win_rate": f"{win_rate_pct:.1f}%",
-        "realized_pnl": f"{'+' if total_pnl >= 0 else ''}${total_pnl:,.2f}",
+        "realized_pnl": f"{'+' if total_net >= 0 else ''}${total_net:,.2f}",
+        "gross_pnl": f"{'+' if total_gross >= 0 else ''}${total_gross:,.2f}",
+        "fees": f"-${total_fees:,.2f}",
         "avg_credit": f"${avg_credit:.2f} / contract",
         "avg_duration": duration_str,
         "max_drawdown": f"-${max_dd:,.2f}",
         "profit_factor": profit_factor,
         "wins": len(wins),
         "losses": len(losses),
-        "raw_pnl": total_pnl,
+        "raw_pnl": total_net,
     }

@@ -112,28 +112,47 @@ class BrokerSelectionTests(unittest.TestCase):
         })
         self.assertFalse(entrypoint._test_brokers.Tradier.call_args.args[0]["PAPER"])
 
-    def test_sandbox_index_requires_external_data_source(self) -> None:
+    def test_tradier_data_source_supports_indexes_and_rejects_unwired_sources(self) -> None:
         with patch.dict(os.environ, {
             "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "XSP",
-        }, clear=True), self.assertRaisesRegex(RuntimeError, "DATA_SOURCE"):
-            entrypoint.validate_runtime_configuration()
-        with patch.dict(os.environ, {
-            "TRADIER_ACCESS_TOKEN": "token", "TRADIER_PAPER": "true", "IC_SYMBOL": "SPX",
-        }, clear=True), self.assertRaisesRegex(RuntimeError, "DATA_SOURCE"):
-            entrypoint.validate_runtime_configuration()
-        with patch.dict(os.environ, {
-            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "SPY",
+            "TRADIER_ACCESS_TOKEN": "token", "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
+            "DATA_SOURCE": "tradier",
         }, clear=True):
             entrypoint.validate_runtime_configuration()
         with patch.dict(os.environ, {
+            "DATA_SOURCE": "polygon",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "DATA_SOURCE"):
+            entrypoint.validate_runtime_configuration()
+        with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "TRADIER_ACCESS_TOKEN"):
+            entrypoint.validate_runtime_configuration()
+        with patch.dict(os.environ, {
             "TRADING_BROKER": "tradier", "TRADIER_PAPER": "maybe",
+            "TRADIER_ACCESS_TOKEN": "token", "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
         }, clear=True), self.assertRaises(RuntimeError):
-            entrypoint.get_broker()
+            entrypoint.validate_runtime_configuration()
         with patch.dict(os.environ, {
             "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "SPY",
+            "TRADIER_ACCESS_TOKEN": "token", "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
             "ML_POLICY_ENABLED": "true", "ML_MODEL_PATH": "/nonexistent/policy.json",
         }, clear=True), self.assertRaises(FileNotFoundError):
             entrypoint.validate_runtime_configuration()
+
+    def test_runtime_failure_reconstructs_once_and_shutdown_does_not_restart(self) -> None:
+        with (
+            patch.object(entrypoint, "_run_once", side_effect=[RuntimeError("boom"), None]) as run_once,
+            patch.object(entrypoint.time, "sleep") as sleep,
+            patch.dict(os.environ, {"PROCESS_RESTART_BACKOFF_SECONDS": "0.25"}, clear=True),
+        ):
+            entrypoint.run()
+        self.assertEqual(run_once.call_count, 2)
+        sleep.assert_called_once_with(0.25)
+
+        with patch.object(entrypoint, "_run_once", side_effect=KeyboardInterrupt) as run_once:
+            with self.assertRaises(KeyboardInterrupt):
+                entrypoint.run()
+        run_once.assert_called_once()
 
     def test_incubator_attaches_one_collector_to_all_twenty_strategies(self) -> None:
         variants = [SimpleNamespace(name=f"IC_V{i:02}") for i in range(1, 21)]
@@ -351,6 +370,66 @@ class IronCondorTests(unittest.TestCase):
         self.assertTrue(self.strategy.submit_order.call_args.kwargs["is_multileg"])
         self.assertEqual(self.strategy.submit_order.call_args.kwargs["order_type"], "credit")
 
+    def test_multileg_parent_and_child_broker_ids_are_bound_without_fabricated_fills(self) -> None:
+        assets = [
+            SimpleNamespace(
+                asset_type="option", symbol="XSP", expiration="2026-10-26",
+                strike=strike, right=right,
+            )
+            for strike, right in ((95, "put"), (100, "put"), (110, "call"), (115, "call"))
+        ]
+        local_orders = []
+
+        def create_order(asset, quantity, side):
+            order = SimpleNamespace(
+                asset=asset, quantity=quantity, side=side,
+                identifier=f"local-{len(local_orders) + 1}", custom_params={},
+                is_active=lambda: True,
+            )
+            local_orders.append(order)
+            return order
+
+        self.strategy.create_order = Mock(side_effect=create_order)
+        children = [
+            SimpleNamespace(
+                asset=asset, quantity=1, side=side, identifier=f"broker-{index}",
+                status="submitted", filled_quantity=0, avg_fill_price=None,
+            )
+            for index, (asset, side) in enumerate(
+                zip(assets, ("buy_to_open", "sell_to_open", "sell_to_open", "buy_to_open")),
+                start=1,
+            )
+        ]
+        parent = SimpleNamespace(
+            identifier="broker-parent", child_orders=children, status="submitted",
+            is_active=lambda: True,
+        )
+        self.strategy.submit_order = Mock(return_value=[parent])
+        returned = self.strategy._submit_package(
+            list(zip(assets, (1, -1, -1, 1))),
+            intent="open", order_type="credit", price=2.0,
+        )
+        self.assertEqual(returned, [parent])
+        [basket] = self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())
+        self.assertEqual(basket.broker_parent_id, "broker-parent")
+        self.assertEqual(
+            {leg["broker_order_id"] for leg in basket.legs},
+            {"broker-1", "broker-2", "broker-3", "broker-4"},
+        )
+
+        # A parent-level fill cannot be expanded into four synthetic leg fills.
+        self.strategy.on_filled_order(None, parent, 2.0, 1, 100)
+        self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
+
+        with patch("trade_logger.record_trade_entry", return_value="trade-broker-ids"):
+            for child, price in zip(children, (0.25, 1.25, 1.25, 0.25)):
+                self.strategy.on_filled_order(None, child, price, 1, 100)
+        self.assertEqual(
+            sorted(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()).values()),
+            [-1, -1, 1, 1],
+        )
+        self.assertEqual(self.strategy._current_trade_id, "trade-broker-ids")
+
     def test_risk_tiers_and_quantity_scaling(self) -> None:
         self.strategy.get_positions.return_value = []
         self.strategy.parameters.update(wing_width=2, max_allocation=1.0)
@@ -455,7 +534,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
             strat.get_datetime = Mock(return_value=fixed_dt)
             strat.get_chains = Mock(side_effect=fake_get_chains)
             strat.get_expiration = Mock(return_value=["2026-10-26"])
-            strat.get_strikes = Mock(return_value=[570.0, 575.0, 580.0, 585.0, 590.0, 595.0, 600.0])
+            strat.get_strikes = Mock(return_value=[float(strike) for strike in range(540, 631)])
             strat.get_last_price = Mock(side_effect=fake_get_last_price)
 
         for strat in strategies:
@@ -600,7 +679,8 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         sync_broker_positions()
         self.assertEqual(strat.parameters["quantity"], 2)
         self.assertEqual(sorted(q for _, q in strat._owned_legs), [-2, -2, 2, 2])
-        self.assertAlmostEqual(strat._entry_credit, 1.60)
+        self.assertAlmostEqual(strat._entry_credit, 0.80)
+        self.assertAlmostEqual(strat._entry_credit_cash, 160.0)
 
         # 3. TRIM_POSITION (50% scale-out) submits an atomic debit package; ownership updates on fills
         res = strat.apply_policy_action("TRIM_POSITION")
@@ -614,6 +694,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(strat.parameters["quantity"], 1)
         self.assertEqual(sorted(q for _, q in strat._owned_legs), [-1, -1, 1, 1])
         self.assertAlmostEqual(strat._entry_credit, 0.80)
+        self.assertAlmostEqual(strat._entry_credit_cash, 80.0)
 
         # 4. ADD_POSITION is blocked when single-trade risk would exceed RSK-02 limit
         strat.parameters["wing_width"] = 10.0  # $1,000 per contract -> 2 contracts = $2,000 > $1,500 (30% of $5k)

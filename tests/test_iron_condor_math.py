@@ -132,6 +132,63 @@ class PositionLedgerTests(unittest.TestCase):
         reopened = PositionLedger(self.path)
         self.assertEqual(reopened.owned_quantities("strategy-a"), {self.legs[0].asset_key: 1})
 
+    def test_broker_aliases_resolve_terminal_fill_without_local_id(self) -> None:
+        self.ledger.record_submission(
+            "package-a",
+            "strategy-a",
+            "open",
+            self.legs,
+            broker_tag="IC_TEST",
+            duration="day",
+            limit_price=2.0,
+        )
+        children = [
+            SimpleNamespace(
+                identifier=f"broker-{index}",
+                asset=asset,
+                side=side,
+            )
+            for index, (asset, side) in enumerate(
+                zip(
+                    self.assets,
+                    ("buy_to_open", "sell_to_open", "sell_to_open", "buy_to_open"),
+                ),
+                start=1,
+            )
+        ]
+        parent = SimpleNamespace(identifier="broker-parent", child_orders=children)
+        self.ledger.bind_broker_submission("package-a", parent)
+        basket = None
+        for child, quantity, price in zip(children, (1, -1, -1, 1), (0.25, 1.25, 1.25, 0.25)):
+            basket = self.ledger.record_fill(
+                None,
+                quantity,
+                price,
+                broker_id=child.identifier,
+                cumulative=True,
+            )
+        self.assertIsNotNone(basket)
+        self.assertEqual(basket.state, "open")
+        self.assertEqual(basket.broker_parent_id, "broker-parent")
+
+        # Replaying cumulative broker state is idempotent.
+        replayed = self.ledger.record_fill(
+            None, 1, 0.25, broker_id="broker-1", cumulative=True
+        )
+        self.assertEqual(replayed.opening_cash_flow, 200.0)
+
+    def test_prior_day_day_order_is_discoverable_after_reopen(self) -> None:
+        self.ledger.record_submission(
+            "package-a", "strategy-a", "open", self.legs, duration="day"
+        )
+        self.ledger._connection.execute(
+            "UPDATE packages SET created_at = '2026-10-25T14:00:00+00:00'"
+        )
+        self.ledger._connection.commit()
+        reopened = PositionLedger(self.path)
+        stale = reopened.stale_day_baskets("strategy-a", date(2026, 10, 26))
+        self.assertEqual([basket.package_id for basket in stale], ["package-a"])
+
 
 if __name__ == "__main__":
     unittest.main()

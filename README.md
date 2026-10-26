@@ -51,7 +51,7 @@ lumibot/
 
 ## Quick Start
 
-1. Copy `.env.example` to `.env` and configure Tradier Sandbox (`TRADIER_ACCESS_TOKEN`, `TRADIER_ACCOUNT_NUMBER`, `TRADIER_PAPER=true`) or Alpaca Paper credentials. `TRADIER_IS_PAPER` and `TRADIER_SANDBOX` remain compatibility aliases. Tradier Sandbox users should select `SPY`; `SPX` and `XSP` require a compatible external `DATA_SOURCE`.
+1. Copy `.env.example` to `.env` and configure the canonical Tradier Sandbox variables (`TRADING_BROKER=tradier`, `TRADIER_ACCESS_TOKEN`, `TRADIER_ACCOUNT_NUMBER`, `TRADIER_PAPER=true`, and `DATA_SOURCE=tradier`) or Alpaca Paper credentials. This runner obtains SPY, SPX, and XSP data from Tradier.
    ```bash
    cp .env.example .env
    ```
@@ -78,6 +78,15 @@ lumibot/
 Submitted packages are not counted as positions. The strategy waits for fill
 callbacks, persists weighted fill prices and signed quantities, and blocks new
 entries if the broker reports contracts that the ledger cannot attribute.
+Close orders are repriced using `IC_CLOSE_REPRICE_SECONDS`,
+`IC_CLOSE_MAX_REPRICES`, and `IC_CLOSE_PRICE_STEP`; market fallback remains
+disabled unless `IC_CLOSE_ALLOW_MARKET=true`. Unexpected process failures are
+retried after `PROCESS_RESTART_BACKOFF_SECONDS` using the durable ledger.
+
+The opt-in Tradier sandbox test is state-changing: set
+`RUN_TRADIER_SANDBOX_WRITE_TEST=1`, `TRADIER_SANDBOX_TEST_UNDERLYING`, and four
+comma-separated `TRADIER_SANDBOX_TEST_OPTION_SYMBOLS` only for an account where
+submitting and canceling a paper order is acceptable.
 
 ## Running Tests
 

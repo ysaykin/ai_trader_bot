@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import logging
+import time
 from typing import TYPE_CHECKING
 from pathlib import Path
 
@@ -122,16 +123,18 @@ def _configured_sequence_length() -> int | None:
 def validate_runtime_configuration() -> None:
     """Fail before strategy construction when the requested runtime is unsafe."""
     broker = os.getenv("TRADING_BROKER", "").strip().lower()
-    access_token = os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY")
-    uses_tradier = broker == "tradier" or (not broker and bool(access_token))
-    symbol = os.getenv("IC_SYMBOL", "SPX").strip().upper()
     data_source = os.getenv("DATA_SOURCE", "").strip().lower()
-    if uses_tradier and _tradier_paper() and symbol in {"SPX", "XSP"}:
-        if not data_source or data_source == "tradier":
+    if data_source not in {"", "tradier"}:
+        raise RuntimeError(
+            f"Unsupported DATA_SOURCE: {data_source}. This runner supports Tradier data only."
+        )
+    if broker == "tradier":
+        if not os.getenv("TRADIER_ACCESS_TOKEN") or not os.getenv("TRADIER_ACCOUNT_NUMBER"):
             raise RuntimeError(
-                "Tradier Sandbox does not provide SPX/XSP index market data. "
-                "Set IC_SYMBOL=SPY or configure a non-Tradier DATA_SOURCE."
+                "TRADING_BROKER=tradier requires TRADIER_ACCESS_TOKEN and "
+                "TRADIER_ACCOUNT_NUMBER."
             )
+        _tradier_paper()
     if _env_bool("ML_POLICY_ENABLED", default=False):
         from ml.inference import LivePolicyController
 
@@ -223,8 +226,8 @@ def build_strategies_for_mode(
     return strategies
 
 
-def run() -> None:
-    """Validate configuration, construct the host strategy, and run the trader."""
+def _run_once() -> None:
+    """Construct a fresh broker/strategy graph and run it until it stops."""
     from strategies.incubator import attach_strategies_to_host
 
     validate_runtime_configuration()
@@ -243,6 +246,25 @@ def run() -> None:
         "strategy" if len(strategies) == 1 else "strategies",
     )
     trader.run_all()
+
+
+def run() -> None:
+    """Run the trader, rebuilding durable state after unexpected failures."""
+    raw_backoff = os.getenv("PROCESS_RESTART_BACKOFF_SECONDS", "15").strip()
+    try:
+        backoff = max(float(raw_backoff), 0.0)
+    except ValueError as error:
+        raise RuntimeError("PROCESS_RESTART_BACKOFF_SECONDS must be numeric.") from error
+    while True:
+        try:
+            _run_once()
+            return
+        except Exception:
+            logger.exception(
+                "Trader stopped unexpectedly; reconstructing from the durable ledger in %.1fs.",
+                backoff,
+            )
+            time.sleep(backoff)
 
 
 if __name__ == "__main__":
