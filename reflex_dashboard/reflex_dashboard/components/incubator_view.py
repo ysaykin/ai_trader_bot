@@ -332,7 +332,7 @@ def incubator_view() -> rx.Component:
                             cursor="pointer",
                         ),
                         rx.button(
-                            rx.hstack(rx.icon("file-spreadsheet", size=14), rx.text(f"Export Complete ({DashboardState.total_closed_trades_count}) CSV"), align="center", spacing="1"),
+                            rx.hstack(rx.icon("file-spreadsheet", size=14), rx.text(f"Export Tradier Journal ({DashboardState.total_closed_trades_count}) CSV"), align="center", spacing="1"),
                             on_click=DashboardState.download_all_trades_csv,
                             size="1",
                             color_scheme="gray",
@@ -404,14 +404,14 @@ def incubator_view() -> rx.Component:
                             rx.icon("archive", size=20, color=INDIGO),
                             rx.vstack(
                                 rx.text(
-                                    f"Showing latest 50 of {DashboardState.total_closed_trades_count} closed trades in live memory buffer.",
+                                    f"Showing all {DashboardState.total_closed_trades_count} verified broker trades executed via Tradier.",
                                     size="2",
                                     weight="bold",
                                     color=TEXT_PRIMARY,
                                 ),
                                 rx.text(
-                                    "Historical trades beyond the 50-trade interactive view are archived for execution performance and audit compliance. "
-                                    "Clicking 'Load More' triggers a complete CSV export of the full trade ledger.",
+                                    "Historical trades are sourced exclusively from actual Tradier fills and fee reconciliations. "
+                                    "Click below to download the complete Tradier trade execution journal in CSV format.",
                                     size="1",
                                     color=TEXT_MUTED,
                                 ),
