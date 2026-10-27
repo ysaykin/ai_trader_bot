@@ -14,4 +14,5 @@ Acceptance:
 - [x] **Learning Pipeline**: Multi-head neural policy network (`ml/policy_net.py`) encoding market dynamics + cross-strategy signals to decide position scaling, profit-taking, and strategy selection (`ML-01` to `ML-06`).
 - [x] **Policy Training & Inference Bridge**: Offline trajectory trainer (`ml/train.py`), live normalization/imputation bridge (`ml/inference.py`), and transactional position ledger (`strategies/position_ledger.py`).
 - [x] **Tradier Multileg Reconciliation & Ledger Rollover**: Durable SQLite parent/child order tracking, multi-day rollover persistence, close order repricing, and crash-recovery fault containment (`BRK-01`).
+- [x] **Local Import Hygiene & Packaging Isolation**: Relocated legacy prototype shim to prevent namespace shadowing, hardened configuration error exits, and established multi-package validation (`SYS-01`).
 - [ ] **Self-Improving Bot Loop**: Automated post-market continual learner with Purged Walk-Forward CV and Champion vs. Challenger shadow promotion gate (`ML-08`).

@@ -28,6 +28,7 @@ This document is the **single source of truth** for all user-facing features sup
 | **BRK-01** | Tradier Sandbox & Live Execution | Broker Connectivity | ✅ Active | Zero-commission index options trading | Connection Status & Account Pill |
 | **BRK-02** | Alpaca Paper & Live Execution | Broker Connectivity | ✅ Active | Secondary multi-asset broker support | Broker Selector Dropdown |
 | **BRK-03** | OrbStack Native Containerization | DevOps / System | ✅ Active | Instant zero-config local deployment | Container Uptime & Health Indicator |
+| **SYS-01** | Upstream Package & Import Hygiene | DevOps / System | ✅ Active | Clean native Python invocation without local directory namespace shadowing | Import verification test suite |
 | **CFG-01** | Interactive Config & Credentials GUI | Configuration | ✅ Active | Edit and test API keys & risk boundaries live in GUI | Dedicated Broker & Strategy Config Tab |
 | **GUI-01** | Live Engine Status & Session Clock | Dashboard UI | ✅ Active | Know exactly what the bot is doing | Header Status Bar & Market Clock |
 | **GUI-02** | Interactive Visual Risk Dials | Dashboard UI | ✅ Active | At-a-glance capital & cap visibility | Dual Risk Gauges ($5k & Single-Trade) |
@@ -285,3 +286,13 @@ This document is the **single source of truth** for all user-facing features sup
   4. **Automated Promotion Gate**: Promotes Challenger $\to$ Champion only when out-of-sample Sortino ratio, drawdown control, and counterfactual regret outperform the Champion over the validation window.
   5. **Immutable Risk Guardrails**: Every neural network action is strictly bounded by deterministic risk checks (`RSK-01` \$5,000 global cap and `RSK-02` 30%$\to$5% single-trade limit) in [`SPXIronCondor._check_allocation`](file:///Users/yevgeniysaykin/Documents/Projects/lumibot/strategies/iron_condor.py#L439-L499).
 * **GUI Manifestation**: Model Lineage card showing Active Champion version, Challenger shadow performance delta, and one-click rollback control.
+
+---
+
+### 7. System Architecture & Environment Hygiene
+
+#### `SYS-01`: Upstream Package & Import Hygiene
+* **User Story**: As a developer running tests or trading scripts outside Docker, I want `import lumibot` to resolve directly to the upstream installed package without conflict or shadowing from local mock prototypes.
+* **Problem Solved**: Untracked local mock directory `./lumibot` shadowed the real package during native `python` and `pytest` runs, causing import errors and broken class resolution.
+* **Resolution**: Relocated prototype code to `.legacy/mock_ui_lumibot_shim/` (ignored via `.gitignore`), and implemented `tests/test_import_hygiene.py` to prevent local directory shadowing.
+

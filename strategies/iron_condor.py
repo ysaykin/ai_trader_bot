@@ -31,7 +31,8 @@ import logging
 import json
 import math
 import uuid
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Iterable
 
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
@@ -252,8 +253,8 @@ class SPXIronCondor(Strategy):
         return int(getattr(self, "_iteration_count", 0))
 
     @on_trading_iteration_count.setter
-    def on_trading_iteration_count(self, value: int) -> None:
-        self._iteration_count = int(value)
+    def on_trading_iteration_count(self, value: int | None) -> None:
+        self._iteration_count = int(value or 0)
 
     def _record_trajectory(self, action: str, *, session_end: bool = False) -> None:
         """Keep telemetry failures independent of position management."""
@@ -829,16 +830,26 @@ class SPXIronCondor(Strategy):
                     ),
                     None,
                 )
+                created = self._as_aware_utc(datetime.fromisoformat(str(active_close.created_at)))
+                now = self._as_aware_utc(self.get_datetime())
+                age = (now - created).total_seconds()
                 if parent is not None and parent.is_active():
-                    created = datetime.fromisoformat(str(active_close.created_at))
-                    now = self.get_datetime()
-                    if now.tzinfo is None:
-                        now = now.replace(tzinfo=created.tzinfo)
-                    if (now - created).total_seconds() >= self._close_reprice_seconds:
+                    if age >= self._close_reprice_seconds:
                         self.cancel_order(parent)
                     return
-                # Cancellation/rejection must be observed by reconciliation before replacement.
-                return
+                never_reached_broker = (
+                    not active_close.broker_parent_id
+                    and self._find_order_by_tag(broker_orders, active_close.broker_tag) is None
+                    and all(int(leg["filled_signed_quantity"]) == 0 for leg in active_close.legs)
+                )
+                if not never_reached_broker or age < max(self._close_reprice_seconds, 60.0):
+                    # Cancellation/rejection must be observed by reconciliation before replacement.
+                    return
+                logger.error(
+                    "Close package %s never reached the broker; marking failed and resubmitting.",
+                    active_close.package_id,
+                )
+                self._position_ledger.record_terminal_status(active_close.package_id, "failed")
             self._hydrate_from_ledger()
             if not self._owned_legs:
                 return
@@ -1503,18 +1514,36 @@ class SPXIronCondor(Strategy):
         if order_type == "debit":
             if unit_value > 0:
                 return max(unit_value, 0.01)
-            if unit_value == 0:
-                natural = 0.0
-                for (_, signed_quantity), quote in zip(legs, quotes):
-                    bounds = self._quote_bounds(quote)
-                    if bounds is None:
-                        return None
-                    bid_value, ask_value = bounds
-                    natural += (ask_value if signed_quantity > 0 else -bid_value) * abs(signed_quantity)
-                natural_unit = natural / quantity
-                return max(natural_unit / 2.0, 0.01) if natural_unit > 0 else None
-            return None
+            # Mid is zero or a net credit (max-profit decay). A closing limit must still
+            # be sent; a minimal positive debit is marketable at or better than the market.
+            natural = 0.0
+            for (_, signed_quantity), quote in zip(legs, quotes):
+                bounds = self._quote_bounds(quote)
+                if bounds is None:
+                    return None
+                bid_value, ask_value = bounds
+                natural += (ask_value if signed_quantity > 0 else -bid_value) * abs(signed_quantity)
+            natural_unit = natural / quantity
+            return max(natural_unit / 2.0, 0.01) if natural_unit > 0 else 0.01
         return abs(unit_value)
+
+    @staticmethod
+    def _as_aware_utc(value: datetime) -> datetime:
+        return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _find_order_by_tag(orders: Iterable[Any], tag: str | None) -> Any | None:
+        if not tag:
+            return None
+        stack = list(orders)
+        while stack:
+            order = stack.pop()
+            custom = getattr(order, "custom_params", None)
+            order_tag = getattr(order, "tag", None) or (custom.get("tag") if isinstance(custom, dict) else None)
+            if str(order_tag or "") == tag:
+                return order
+            stack.extend(getattr(order, "child_orders", None) or ())
+        return None
 
     @staticmethod
     def _quote_bounds(quote) -> tuple[float, float] | None:

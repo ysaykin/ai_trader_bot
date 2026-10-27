@@ -118,10 +118,28 @@ tasks:
 
   - id: fix-local-lumibot-namespace-shadowing
     title: "Remove or relocate legacy untracked ./lumibot/ directory so local non-Docker Python invocations do not shadow upstream lumibot package"
-    status: pending
+    status: completed
     owner: antigravity
     deliverables:
-      - pyproject.toml
+      - .gitignore
+      - .legacy/mock_ui_lumibot_shim/
+      - main.py
+      - strategies/iron_condor.py
+      - tests/test_import_hygiene.py
+      - tests/test_reflex_dashboard.py
+      - tests/test_regressions.py
+      - tests/test_strike_selection_and_pnl.py
+
+  - id: jev-bot-packaging-and-validation
+    title: "Package jev-bot setuptools discovery, enforce finite numeric configuration validation, and return exit code 2 on configuration error"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - ../jev-bot/jev_bot/config.py
+      - ../jev-bot/jev_bot/main.py
+      - ../jev-bot/pyproject.toml
+      - ../jev-bot/tests/test_entrypoint.py
+      - ../jev-bot/tests/test_structure.py
 
   - id: tradier-live-multileg-reconciliation
     title: "Verify end-to-end Tradier multileg order fills against live paper broker sandbox and test multi-day ledger rollover"
@@ -148,3 +166,10 @@ tasks:
     owner: antigravity
     deliverables:
       - tests/test_tradier_sandbox.py
+
+  - id: verify-post-cs4d-specifications
+    title: "Verify and implement downstream requirements succeeding CS-4d once the full specification is unblocked"
+    status: pending
+    owner: antigravity
+    deliverables:
+      - tests/

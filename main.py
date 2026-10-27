@@ -39,6 +39,10 @@ except Exception as e:
 logger = logging.getLogger("main")
 
 
+class ConfigurationError(RuntimeError):
+    """Unrecoverable configuration problem; restarting cannot fix it."""
+
+
 def _env_bool(*names: str, default: bool = False) -> bool:
     """Parse the first configured environment boolean in precedence order."""
     for name in names:
@@ -50,7 +54,7 @@ def _env_bool(*names: str, default: bool = False) -> bool:
             return True
         if normalized in ("false", "0", "no", "off"):
             return False
-        raise RuntimeError(f"{name} must be true, false, 1, 0, yes, no, on, or off.")
+        raise ConfigurationError(f"{name} must be true, false, 1, 0, yes, no, on, or off.")
     return default
 
 
@@ -64,7 +68,7 @@ def get_broker() -> Broker:
     """Instantiate broker from env vars (Tradier sandbox or Alpaca)."""
     broker_type = os.getenv("TRADING_BROKER", "").strip().lower()
     if broker_type not in ("", "tradier", "alpaca"):
-        raise RuntimeError(f"Unsupported TRADING_BROKER: {broker_type}")
+        raise ConfigurationError(f"Unsupported TRADING_BROKER: {broker_type}")
     access_token = os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY")
 
     # Prioritize an explicit broker selection; otherwise infer from credentials.
@@ -73,7 +77,7 @@ def get_broker() -> Broker:
         token_str = (access_token or "").strip()
         account_str = (account_number or "").strip()
         if not token_str or token_str.startswith("your_") or not account_str or account_str.startswith("your_"):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "Tradier requires TRADIER_ACCESS_TOKEN and TRADIER_ACCOUNT_NUMBER "
                 "(or TRADIER_API_KEY and TRADIER_ACCOUNT)."
             )
@@ -104,7 +108,7 @@ def get_broker() -> Broker:
             "PAPER": paper,
         })
 
-    raise RuntimeError(
+    raise ConfigurationError(
         "No valid broker credentials found in .env. Please set "
         "TRADIER_ACCESS_TOKEN/TRADIER_ACCOUNT_NUMBER or ALPACA_API_KEY/ALPACA_API_SECRET."
     )
@@ -117,9 +121,9 @@ def _configured_sequence_length() -> int | None:
     try:
         parsed = int(raw.strip())
     except ValueError as error:
-        raise RuntimeError("ML_SEQUENCE_LENGTH must be a positive integer.") from error
+        raise ConfigurationError("ML_SEQUENCE_LENGTH must be a positive integer.") from error
     if parsed < 1:
-        raise RuntimeError("ML_SEQUENCE_LENGTH must be a positive integer.")
+        raise ConfigurationError("ML_SEQUENCE_LENGTH must be a positive integer.")
     return parsed
 
 
@@ -128,14 +132,14 @@ def validate_runtime_configuration() -> None:
     broker = os.getenv("TRADING_BROKER", "").strip().lower()
     data_source = os.getenv("DATA_SOURCE", "").strip().lower()
     if data_source not in {"", "tradier"}:
-        raise RuntimeError(
+        raise ConfigurationError(
             f"Unsupported DATA_SOURCE: {data_source}. This runner supports Tradier data only."
         )
     if broker == "tradier":
         access_token = (os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY") or "").strip()
         account_number = (os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT") or "").strip()
         if not access_token or access_token.startswith("your_") or not account_number or account_number.startswith("your_"):
-            raise RuntimeError(
+            raise ConfigurationError(
                 "TRADING_BROKER=tradier requires TRADIER_ACCESS_TOKEN and "
                 "TRADIER_ACCOUNT_NUMBER."
             )
@@ -278,13 +282,21 @@ def run() -> None:
     """Run the trader, rebuilding durable state after unexpected failures."""
     raw_backoff = os.getenv("PROCESS_RESTART_BACKOFF_SECONDS", "15").strip()
     try:
-        backoff = max(float(raw_backoff), 0.0)
-    except ValueError as error:
-        raise RuntimeError("PROCESS_RESTART_BACKOFF_SECONDS must be numeric.") from error
+        try:
+            backoff = max(float(raw_backoff), 0.0)
+        except ValueError as error:
+            raise ConfigurationError("PROCESS_RESTART_BACKOFF_SECONDS must be numeric.") from error
+        validate_runtime_configuration()
+    except (ConfigurationError, FileNotFoundError, ValueError) as error:
+        logger.critical("Fatal configuration error; not restarting: %s", error)
+        raise SystemExit(2) from error
     while True:
         try:
             _run_once()
             return
+        except ConfigurationError as error:
+            logger.critical("Fatal configuration error; not restarting: %s", error)
+            raise SystemExit(2) from error
         except Exception:
             logger.exception(
                 "Trader stopped unexpectedly; reconstructing from the durable ledger in %.1fs.",

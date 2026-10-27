@@ -20,6 +20,7 @@ reflex_dashboard/reflex.lock
 
 # Legacy mock-UI prototype & local scratch artifacts
 /lumibot/
+/.legacy/
 /backend/
 /ui/
 /docker-compose.mock-ui.yml

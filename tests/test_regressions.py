@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -160,6 +160,39 @@ class BrokerSelectionTests(unittest.TestCase):
                 entrypoint.run()
         run_once.assert_called_once()
 
+    def test_bad_configuration_exits_without_retrying(self) -> None:
+        environments = (
+            {"DATA_SOURCE": "unsupported"},
+            {"TRADING_BROKER": "tradier"},
+            {"ML_POLICY_ENABLED": "invalid"},
+            {"ML_POLICY_ENABLED": "true", "ML_MODEL_PATH": "/nonexistent/policy.json"},
+            {"PROCESS_RESTART_BACKOFF_SECONDS": "invalid"},
+        )
+        for environment in environments:
+            with (
+                self.subTest(environment=environment),
+                patch.dict(os.environ, environment, clear=True),
+                patch.object(entrypoint, "_run_once") as run_once,
+                patch.object(entrypoint.time, "sleep") as sleep,
+                self.assertRaises(SystemExit) as raised,
+            ):
+                entrypoint.run()
+            self.assertEqual(raised.exception.code, 2)
+            run_once.assert_not_called()
+            sleep.assert_not_called()
+
+    def test_broker_configuration_error_exits_without_retrying(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(entrypoint, "_run_once", side_effect=entrypoint.ConfigurationError("bad broker")) as run_once,
+            patch.object(entrypoint.time, "sleep") as sleep,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            entrypoint.run()
+        self.assertEqual(raised.exception.code, 2)
+        run_once.assert_called_once()
+        sleep.assert_not_called()
+
     def test_incubator_attaches_one_collector_to_all_twenty_strategies(self) -> None:
         variants = [SimpleNamespace(name=f"IC_V{i:02}") for i in range(1, 21)]
         modules = {
@@ -259,6 +292,120 @@ class IronCondorTests(unittest.TestCase):
             self.strategy.on_trading_iteration()
         self.assertTrue(self.strategy._position_open)
         self.assertEqual(self.strategy._iteration_count, 1)
+
+    def test_iteration_counter_supports_framework_initialization_and_ticks(self) -> None:
+        strategy = iron_condor.SPXIronCondor.__new__(iron_condor.SPXIronCondor)
+        self.assertEqual(strategy.on_trading_iteration_count, 0)
+        strategy.on_trading_iteration_count = None
+        self.assertEqual(strategy.on_trading_iteration_count, 0)
+        strategy.on_trading_iteration_count = 7
+        strategy._position_open = False
+        strategy._exit_requested = False
+        strategy._run_trading_iteration = Mock()
+        strategy._record_trajectory = Mock()
+        strategy.on_trading_iteration()
+        self.assertEqual(strategy.on_trading_iteration_count, 8)
+
+    def record_pending_close(self, age_seconds: float = 120.0) -> str:
+        ledger = self.strategy._position_ledger
+        legs = [
+            iron_condor.LedgerLeg(f"pending-close-{index}", iron_condor.asset_key(asset), -quantity)
+            for index, (asset, quantity) in enumerate(self.strategy._owned_legs)
+        ]
+        ledger.record_submission(
+            "pending-close", self.strategy._strategy_id(), "close", legs,
+            broker_tag="pending-close-tag", limit_price=2.0,
+        )
+        basket = ledger.get_basket("pending-close")
+        created = datetime.fromisoformat(basket.created_at)
+        self.strategy.get_datetime.return_value = created + timedelta(seconds=age_seconds)
+        return basket.package_id
+
+    def test_stale_active_close_cancels_with_naive_strategy_clock(self) -> None:
+        self.open_filled_position()
+        package_id = self.record_pending_close()
+        parent = SimpleNamespace(identifier="broker-close", is_active=lambda: True)
+        self.strategy._position_ledger.bind_broker_submission(package_id, parent)
+        self.strategy.get_orders.return_value = [parent]
+        self.strategy.get_datetime.return_value = self.strategy.get_datetime.return_value.replace(tzinfo=None)
+        self.strategy._close_all_options()
+        self.strategy.cancel_order.assert_called_once_with(parent)
+        self.strategy.submit_order.assert_not_called()
+        self.assertTrue(self.strategy._position_open)
+
+    def test_close_that_never_reached_broker_is_replaced_after_grace_period(self) -> None:
+        self.open_filled_position()
+        package_id = self.record_pending_close()
+        self.strategy._close_all_options()
+        ledger = self.strategy._position_ledger
+        self.assertEqual(ledger.get_basket(package_id).state, "failed")
+        self.strategy.submit_order.assert_called_once()
+        replacement = ledger.latest_basket(self.strategy._strategy_id(), {"close"})
+        self.assertEqual(replacement.replacement_of, package_id)
+        self.assertEqual(replacement.reprice_count, 1)
+        self.assertTrue(self.strategy._position_open)
+        self.assertTrue(self.strategy._exit_requested)
+
+    def test_pending_close_is_retained_during_grace_period(self) -> None:
+        self.open_filled_position()
+        package_id = self.record_pending_close(age_seconds=59.0)
+        self.strategy._close_all_options()
+        self.assertEqual(self.strategy._position_ledger.get_basket(package_id).state, "submitted")
+        self.strategy.submit_order.assert_not_called()
+
+    def assert_close_is_not_replaced(self, evidence: str) -> None:
+        self.open_filled_position()
+        package_id = self.record_pending_close()
+        ledger = self.strategy._position_ledger
+        if evidence == "parent_id":
+            ledger.bind_broker_submission(package_id, SimpleNamespace(identifier="broker-close"))
+        elif evidence in {"tag", "child_tag"}:
+            order = SimpleNamespace(custom_params={"tag": "pending-close-tag"})
+            if evidence == "child_tag":
+                order = SimpleNamespace(child_orders=[order])
+            self.strategy.get_orders.return_value = [order]
+        else:
+            leg = ledger.get_basket(package_id).legs[0]
+            ledger.record_fill(leg["order_id"], leg["requested_signed_quantity"], 0.25)
+        self.strategy._close_all_options()
+        self.assertIn(ledger.get_basket(package_id).state, {"submitted", "partial"})
+        self.strategy.submit_order.assert_not_called()
+
+    def test_broker_parent_id_prevents_replacing_unconfirmed_close(self) -> None:
+        self.assert_close_is_not_replaced("parent_id")
+
+    def test_broker_tag_prevents_replacing_unconfirmed_close(self) -> None:
+        self.assert_close_is_not_replaced("tag")
+
+    def test_nested_broker_tag_prevents_replacing_unconfirmed_close(self) -> None:
+        self.assert_close_is_not_replaced("child_tag")
+
+    def test_partial_fill_prevents_replacing_unconfirmed_close(self) -> None:
+        self.assert_close_is_not_replaced("fill")
+
+    def test_failed_close_submission_recovers_without_discarding_ownership(self) -> None:
+        self.open_filled_position()
+        owned_before = self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id())
+        self.strategy.submit_order.side_effect = RuntimeError("broker unavailable")
+        self.strategy._close_all_options()
+        failed = self.strategy._position_ledger.latest_basket(self.strategy._strategy_id(), {"close"})
+        self.strategy.get_datetime.return_value = datetime.fromisoformat(failed.created_at) + timedelta(seconds=120)
+        self.strategy.submit_order.side_effect = None
+        self.strategy._close_all_options()
+        self.assertEqual(self.strategy.submit_order.call_count, 2)
+        self.assertEqual(self.strategy._position_ledger.get_basket(failed.package_id).state, "failed")
+        self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), owned_before)
+
+    def test_zero_credit_contracts_submit_eod_close_with_zero_quotes(self) -> None:
+        self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0))
+        self.strategy.get_quote.side_effect = None
+        self.strategy.get_quote.return_value = {"bid": 0.0, "ask": 0.0}
+        self.strategy.before_market_closes()
+        self.strategy.submit_order.assert_called_once()
+        self.assertEqual(self.strategy.submit_order.call_args.kwargs["price"], 0.01)
+        self.assertTrue(self.strategy._position_open)
+        self.assertTrue(self.strategy._exit_requested)
+        self.assertEqual(len(self.strategy._owned_legs), 4)
 
     def test_flat_iteration_and_market_close_both_publish_telemetry(self) -> None:
         collector = Mock()
