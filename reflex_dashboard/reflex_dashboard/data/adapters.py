@@ -221,10 +221,73 @@ def get_broker_telemetry() -> dict[str, Any]:
     return res
 
 
+def extract_variant_tag(strat_name: str) -> str:
+    """Extract standard variant prefix like IC_V01, IC_V23 from strategy name."""
+    if not strat_name:
+        return ""
+    parts = str(strat_name).split("_")
+    if len(parts) >= 2 and parts[0] == "IC" and parts[1].startswith("V"):
+        return f"{parts[0]}_{parts[1]}"
+    return str(strat_name)
+
+
+def format_structure(struct: str) -> str:
+    s = (struct or "").lower()
+    if "bull_put" in s:
+        return "Bull Put (Vertical)"
+    elif "bear_call" in s:
+        return "Bear Call (Vertical)"
+    return "Iron Condor"
+
+
+def format_strategy_label(strat_name: str) -> str:
+    s = str(strat_name or "")
+    if "NEURAL" in s:
+        return "IC_V22 (Neural Pure AI)"
+    if "BULL_PUT" in s:
+        return "IC_V23 (Bull Put 7DTE)"
+    if "BEAR_CALL" in s:
+        return "IC_V24 (Bear Call 7DTE)"
+    if "25DTE" in s:
+        return "IC_V21 (25DTE Test)"
+    parts = s.split("_")
+    if len(parts) >= 3:
+        return f"{parts[0]}_{parts[1]} ({parts[2]})"
+    elif len(parts) == 2:
+        return f"{parts[0]}_{parts[1]}"
+    return s
+
+
+def format_strikes(strikes: dict[str, Any] | None, structure: str) -> str:
+    if not strikes or not isinstance(strikes, dict):
+        return "-"
+    struct = (structure or "").lower()
+    if struct == "bull_put" or ("short_put" in strikes and "long_put" in strikes and "short_call" not in strikes):
+        lp = strikes.get("long_put", "")
+        sp = strikes.get("short_put", "")
+        lp_str = f"{lp:.0f}" if isinstance(lp, (int, float)) else str(lp)
+        sp_str = f"{sp:.0f}" if isinstance(sp, (int, float)) else str(sp)
+        return f"{lp_str}P / {sp_str}P"
+    elif struct == "bear_call" or ("short_call" in strikes and "long_call" in strikes and "short_put" not in strikes):
+        sc = strikes.get("short_call", "")
+        lc = strikes.get("long_call", "")
+        sc_str = f"{sc:.0f}" if isinstance(sc, (int, float)) else str(sc)
+        lc_str = f"{lc:.0f}" if isinstance(lc, (int, float)) else str(lc)
+        return f"{sc_str}C / {lc_str}C"
+    else:
+        lp = strikes.get("long_put", "")
+        sp = strikes.get("short_put", "")
+        sc = strikes.get("short_call", "")
+        lc = strikes.get("long_call", "")
+        if all(isinstance(x, (int, float)) for x in (lp, sp, sc, lc)):
+            return f"{lp:.0f}/{sp:.0f}P | {sc:.0f}/{lc:.0f}C"
+        return f"{lp}/{sp} | {sc}/{lc}"
+
+
 def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Parses logs/trades.jsonl and unifies lifecycle events by trade_id.
-    Calculates exact fees (4 legs * 2 roundtrips = 8 legs per contract = $3.20/ct),
+    Calculates exact fees (2 legs for verticals = $1.60/ct, 4 legs for IC = $3.20/ct),
     Gross P&L, Net P&L, Capital at Risk, Credit Received, and Net ROI % (RoR and RoC).
     Returns (trades_by_id, closed_trades, open_trades).
     """
@@ -278,7 +341,9 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
 
         if status == "CLOSED" or evt == "EXIT" or is_expired:
             t["status"] = "CLOSED"
-            gross_pnl = number(t.get("pnl"))
+            gross_pnl = number(t.get("gross_pnl"))
+            if gross_pnl is None:
+                gross_pnl = number(t.get("pnl"))
             if gross_pnl is None:
                 if is_expired:
                     gross_pnl = credit_cash
@@ -286,10 +351,21 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
                     gross_pnl = 0.0
             t["gross_pnl"] = gross_pnl
 
-            # 8 legs per roundtrip IC (4 on entry + 4 on exit)
-            fees = 8.0 * fee_per_contract * qty
+            # Fees: 2 legs on entry + 2 legs on exit = 4 legs for vertical ($1.60/ct)
+            # 4 legs on entry + 4 legs on exit = 8 legs for iron condor ($3.20/ct)
+            struct = str(t.get("structure") or "").lower()
+            strikes = t.get("strikes") or {}
+            is_vert = struct in ("bull_put", "bear_call") or len(strikes) == 2
+            num_legs = 2 if is_vert else 4
+            legs_per_roundtrip = num_legs * 2
+            fees = number(t.get("fees"))
+            if fees is None:
+                fees = legs_per_roundtrip * fee_per_contract * qty
             t["fees"] = fees
-            net_pnl = gross_pnl - fees
+
+            net_pnl = number(t.get("net_pnl"))
+            if net_pnl is None:
+                net_pnl = gross_pnl - fees
             t["net_pnl"] = net_pnl
 
             # Net RoR % (Return on Capital at Risk)
@@ -297,10 +373,32 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             # Net RoC % (Return on Credit Received)
             t["net_roc_pct"] = (net_pnl / credit_cash * 100.0) if credit_cash > 0 else 0.0
 
+            # UI Formatting Fields
+            t["gross_pnl_str"] = money(gross_pnl)
+            t["fees_str"] = money(-fees)
+            t["net_pnl_str"] = money(net_pnl)
+            t["net_pnl_color"] = "jade" if net_pnl >= 0 else "crimson"
+            t["net_ror_str"] = f"{t['net_ror_pct']:+.2f}%"
+            t["credit_str"] = money(credit_per_share)
+            t["structure_label"] = format_structure(struct)
+            t["strategy_label"] = format_strategy_label(t.get("strategy", ""))
+            t["strikes_display"] = format_strikes(strikes, struct)
+            t["dte_str"] = f"{t.get('dte', 7)}DTE" if "dte" in t else "-"
+
+            ts = t.get("timestamp", "")
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                t["time_str"] = dt.strftime("%m/%d %H:%M")
+            except Exception:
+                t["time_str"] = ts[:16] if ts else "-"
+
             closed_trades.append(t)
         elif status == "OPEN":
             t["status"] = "OPEN"
             open_trades.append(t)
+
+    # Sort closed trades chronologically descending (latest first)
+    closed_trades.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
 
     return trades_by_id, closed_trades, open_trades
 
@@ -334,8 +432,7 @@ def get_incubator_data() -> dict[str, Any]:
 
     for spec in specs:
         name = spec["strategy_name"]
-        parts = name.split("_")
-        short_id = parts[0] + "_" + parts[1] if len(parts) > 1 else name
+        spec_tag = extract_variant_tag(name)
         is_neural = bool(spec.get("pure_neural_mode", False))
         is_testing = bool(spec.get("is_testing_variant", False))
         struct = str(spec.get("structure", "iron_condor")).lower()
@@ -347,9 +444,11 @@ def get_incubator_data() -> dict[str, Any]:
             short_id = f"IC_V23 (Bull Put {spec.get('dte', 7)}DTE)"
         elif struct == "bear_call":
             short_id = f"IC_V24 (Bear Call {spec.get('dte', 7)}DTE)"
+        else:
+            short_id = spec_tag
 
-        v_closed = [t for t in closed_all if t.get("strategy") == name or short_id in str(t.get("strategy")) or name.split("_")[0] in str(t.get("strategy"))]
-        v_open = [t for t in open_all if t.get("strategy") == name or short_id in str(t.get("strategy")) or name.split("_")[0] in str(t.get("strategy"))]
+        v_closed = [t for t in closed_all if t.get("strategy") == name or extract_variant_tag(str(t.get("strategy", ""))) == spec_tag]
+        v_open = [t for t in open_all if t.get("strategy") == name or extract_variant_tag(str(t.get("strategy", ""))) == spec_tag]
 
         gross_pnl = sum(t.get("gross_pnl", 0.0) for t in v_closed)
         fees = sum(t.get("fees", 0.0) for t in v_closed)
@@ -389,6 +488,7 @@ def get_incubator_data() -> dict[str, Any]:
 
         row = {
             "variant": short_id,
+            "variant_code": spec_tag,
             "strategy_name": name,
             "delta": f"{spec['short_delta']:.2f}",
             "wing": f"${spec['wing_width']:.1f}",
@@ -399,6 +499,7 @@ def get_incubator_data() -> dict[str, Any]:
             "closed_trades": len(v_closed),
             "open_trades": len(v_open),
             "win_rate": f"{win_rate:.0f}%" if win_rate is not None else "-",
+            "win_rate_num": win_rate if win_rate is not None else 0.0,
             "gross_pnl": gross_pnl,
             "gross_pnl_str": money(gross_pnl),
             "fees": fees,
@@ -406,6 +507,7 @@ def get_incubator_data() -> dict[str, Any]:
             "net_pnl": net_pnl,
             "net_pnl_str": money(net_pnl),
             "net_ror_pct": f"{net_ror_pct:+.2f}%" if v_closed else "-",
+            "net_ror_num": net_ror_pct,
             "net_roc_pct": f"{net_roc_pct:+.1f}%" if v_closed else "-",
             "status": status,
             "status_color": status_color,
@@ -414,6 +516,7 @@ def get_incubator_data() -> dict[str, Any]:
             "is_neural": is_neural,
             "is_testing": is_testing,
             "structure": struct,
+            "structure_label": format_structure(struct),
         }
         all_rows.append(row)
         if len(v_closed) > 0 or len(v_open) > 0:
@@ -423,9 +526,115 @@ def get_incubator_data() -> dict[str, Any]:
 
     overall_win_rate = (total_wins / total_trades_count * 100.0) if total_trades_count > 0 else 0.0
 
+    # -------------------------------------------------------------
+    # Curated Leaderboard: AI Strategy + Top 5 + Bottom 3 Strategies
+    # -------------------------------------------------------------
+    ai_rows = [r for r in all_rows if r["is_neural"]]
+    ai_row = ai_rows[0] if ai_rows else None
+
+    non_ai_rows = [r for r in all_rows if not r["is_neural"]]
+    # Sort non-AI strategies by Net P&L descending
+    non_ai_sorted = sorted(non_ai_rows, key=lambda x: (x["net_pnl"], x["win_rate_num"]), reverse=True)
+
+    top5_rows = non_ai_sorted[:5]
+    bottom3_rows = non_ai_sorted[-3:] if len(non_ai_sorted) >= 3 else non_ai_sorted
+
+    # Assign rank badges and styling tokens
+    curated_rows: list[dict[str, Any]] = []
+
+    if ai_row:
+        ai_copy = dict(ai_row)
+        ai_copy["rank_badge"] = "🤖 AI MANAGED"
+        ai_copy["badge_color"] = "indigo"
+        ai_copy["group_type"] = "AI"
+        ai_copy["group_label"] = "Pure Neural Meta-Policy"
+        curated_rows.append(ai_copy)
+
+    top_badges = ["🥇 #1 Leader", "🥈 #2 Runner-up", "🥉 #3 Top-3", "⭐ #4 High Return", "⭐ #5 High Return"]
+    for idx, r in enumerate(top5_rows):
+        rc = dict(r)
+        rc["rank_badge"] = top_badges[idx] if idx < len(top_badges) else f"#{idx+1}"
+        rc["badge_color"] = "jade" if idx == 0 else "cyan"
+        rc["group_type"] = "TOP5"
+        rc["group_label"] = "Top 5 Performing Strategies"
+        curated_rows.append(rc)
+
+    bottom_badges = ["⚠️ Underperformer", "⚠️ Underperformer", "⚠️ Worst Performer"]
+    for idx, r in enumerate(bottom3_rows):
+        rc = dict(r)
+        rc["rank_badge"] = bottom_badges[idx] if idx < len(bottom_badges) else "⚠️ Low Return"
+        rc["badge_color"] = "crimson"
+        rc["group_type"] = "BOTTOM3"
+        rc["group_label"] = "Bottom 3 Underperforming Strategies"
+        curated_rows.append(rc)
+
+    # -------------------------------------------------------------
+    # Strategy Group Aggregates
+    # -------------------------------------------------------------
+    ai_pnl = ai_row["net_pnl"] if ai_row else 0.0
+    ai_wr = ai_row["win_rate"] if ai_row else "-"
+    ai_trades = ai_row["closed_trades"] if ai_row else 0
+    ai_fees = ai_row["fees"] if ai_row else 0.0
+
+    top5_pnl = sum(r["net_pnl"] for r in top5_rows)
+    top5_trades = sum(r["closed_trades"] for r in top5_rows)
+    top5_wins = sum(round(r["closed_trades"] * (r["win_rate_num"] / 100.0)) for r in top5_rows)
+    top5_wr = (top5_wins / top5_trades * 100.0) if top5_trades > 0 else 0.0
+    top5_fees = sum(r["fees"] for r in top5_rows)
+
+    bottom3_pnl = sum(r["net_pnl"] for r in bottom3_rows)
+    bottom3_trades = sum(r["closed_trades"] for r in bottom3_rows)
+    bottom3_wins = sum(round(r["closed_trades"] * (r["win_rate_num"] / 100.0)) for r in bottom3_rows)
+    bottom3_wr = (bottom3_wins / bottom3_trades * 100.0) if bottom3_trades > 0 else 0.0
+    bottom3_fees = sum(r["fees"] for r in bottom3_rows)
+
+    strategy_aggregates = {
+        "ai": {
+            "title": "🤖 AI Pure Neural Strategy",
+            "variant": ai_row["variant"] if ai_row else "IC_V22",
+            "net_pnl": ai_pnl,
+            "net_pnl_str": money(ai_pnl),
+            "win_rate": ai_wr,
+            "trades": ai_trades,
+            "fees_str": money(-ai_fees),
+            "status": "DYNAMIC REGIME ADAPT",
+            "badge_color": "indigo",
+        },
+        "top5": {
+            "title": "🏆 Top 5 Performing Strategies",
+            "net_pnl": top5_pnl,
+            "net_pnl_str": money(top5_pnl),
+            "avg_win_rate": f"{top5_wr:.1f}%",
+            "trades": top5_trades,
+            "fees_str": money(-top5_fees),
+            "best_variant": top5_rows[0]["variant"] if top5_rows else "-",
+            "badge_color": "jade",
+        },
+        "bottom3": {
+            "title": "⚠️ Bottom 3 Underperforming Strategies",
+            "net_pnl": bottom3_pnl,
+            "net_pnl_str": money(bottom3_pnl),
+            "avg_win_rate": f"{bottom3_wr:.1f}%",
+            "trades": bottom3_trades,
+            "fees_str": money(-bottom3_fees),
+            "worst_variant": bottom3_rows[-1]["variant"] if bottom3_rows else "-",
+            "badge_color": "crimson",
+        },
+    }
+
+    # Per-Trade Highlight data: past 50 visible trades
+    visible_trades_50 = closed_all[:50]
+
     return {
         "all_rows": all_rows,
-        "rows": all_rows,  # Present all configured variants for complete transparency
+        "rows": curated_rows,  # Returns the 9 AI + Top 5 + Bottom 3 rows for the main view
+        "curated_rows": curated_rows,
+        "top5_rows": top5_rows,
+        "bottom3_rows": bottom3_rows,
+        "ai_row": ai_row,
+        "strategy_aggregates": strategy_aggregates,
+        "visible_trades_50": visible_trades_50,
+        "all_closed_trades": closed_all,
         "traded_rows": traded_rows,
         "monitored_rows": monitored_rows,
         "total_variants": len(specs),
@@ -441,6 +650,51 @@ def get_incubator_data() -> dict[str, Any]:
         "overall_win_rate": f"{overall_win_rate:.1f}%",
         "active_grid_str": f"{len(traded_rows)}/{len(specs)} Active",
     }
+
+
+def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
+    """Format a list of trades into RFC 4180 CSV string with full analytics fields."""
+    import io
+    import csv
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Trade ID",
+        "Timestamp (ISO)",
+        "Strategy Name",
+        "Strategy Label",
+        "Structure",
+        "DTE",
+        "Strikes",
+        "Quantity",
+        "Credit ($)",
+        "Exit Reason",
+        "Gross P&L ($)",
+        "Contract Fees ($)",
+        "Net Realized P&L ($)",
+        "Net RoR (%)",
+        "Status",
+    ])
+    for t in trades:
+        writer.writerow([
+            t.get("trade_id", ""),
+            t.get("timestamp", ""),
+            t.get("strategy", ""),
+            t.get("strategy_label", t.get("strategy", "")),
+            t.get("structure_label", t.get("structure", "Iron Condor")),
+            t.get("dte_str", t.get("dte", "")),
+            t.get("strikes_display", ""),
+            t.get("quantity", 1),
+            f"{t.get('credit', 0.0):.2f}",
+            t.get("exit_reason", ""),
+            f"{t.get('gross_pnl', 0.0):.2f}",
+            f"{t.get('fees', 0.0):.2f}",
+            f"{t.get('net_pnl', 0.0):.2f}",
+            f"{t.get('net_ror_pct', 0.0):.2f}%",
+            t.get("status", "CLOSED"),
+        ])
+    return output.getvalue()
 
 
 def get_ab_lab_data() -> dict[str, Any]:

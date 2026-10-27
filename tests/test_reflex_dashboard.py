@@ -40,7 +40,15 @@ class TestReflexDashboard(unittest.TestCase):
     def test_incubator_data(self):
         inc = get_incubator_data()
         self.assertIn("rows", inc)
-        self.assertGreaterEqual(len(inc["rows"]), 20)
+        self.assertIn("all_rows", inc)
+        self.assertGreaterEqual(len(inc["all_rows"]), 20)
+        self.assertEqual(len(inc["curated_rows"]), 9)
+        self.assertIn("strategy_aggregates", inc)
+        self.assertIn("ai", inc["strategy_aggregates"])
+        self.assertIn("top5", inc["strategy_aggregates"])
+        self.assertIn("bottom3", inc["strategy_aggregates"])
+        self.assertEqual(len(inc["visible_trades_50"]), 50)
+        self.assertGreaterEqual(len(inc["all_closed_trades"]), 50)
         self.assertIn("total_net_pnl_str", inc)
         self.assertIn("active_grid_str", inc)
 

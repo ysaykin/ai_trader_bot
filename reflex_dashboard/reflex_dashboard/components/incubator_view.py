@@ -1,6 +1,7 @@
 """
-Tab 1: 20-Variant Iron Condor Strategy Incubator Grid (EXP-05).
-Fully responsive across mobile, tablet, and desktop screens with horizontal table scrolling.
+Tab 1: Curated Strategy Leaderboard & Trade Journal Execution View.
+Exclusively showcases the AI-managed strategy, Top 5 performing strategies, and Bottom 3 underperformers,
+along with strategy aggregates and a 50-trade highlight log with CSV export capabilities.
 """
 
 import reflex as rx
@@ -12,6 +13,7 @@ from ..styles.theme import (
     GREEN,
     RED,
     AMBER,
+    INDIGO,
     TEXT_MUTED,
     TEXT_PRIMARY,
     KPI_CARD_STYLE,
@@ -22,14 +24,14 @@ from ..styles.theme import (
 
 def incubator_view() -> rx.Component:
     return rx.vstack(
-        # Top KPI Scorecards (Responsive: 2 columns on mobile, 3 on tablet, 5 on desktop)
+        # 1. Top KPI Scorecards (Responsive Grid)
         rx.grid(
             # Metric 1: Active Grid
             rx.box(
                 rx.vstack(
                     rx.text("ACTIVE GRID", size="1", color=TEXT_MUTED, weight="bold"),
                     rx.heading(DashboardState.active_grid_str, size={"initial": "5", "sm": "6"}, color=CYAN, class_name="tabular-nums"),
-                    rx.text("20 Configured", size="1", color=TEXT_MUTED),
+                    rx.text("24 Configured Variants", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
                 style=KPI_CARD_STYLE,
@@ -79,18 +81,18 @@ def incubator_view() -> rx.Component:
             width="100%",
         ),
 
-        # Broker Account Cash Flow & Equity Reconciliation Callout - Responsive Grid
+        # 2. Strategy Group Aggregates Panel (Responsive 3-Column Grid)
         rx.box(
             rx.vstack(
                 rx.flex(
                     rx.hstack(
-                        rx.icon("landmark", size=18, color=CYAN),
-                        rx.heading("🏛️ Broker Account Cash Flow & Equity Reconciliation", size="3", color=TEXT_PRIMARY, weight="bold"),
+                        rx.icon("layers", size=18, color=CYAN),
+                        rx.heading("Strategy Performance Aggregates", size="3", color=TEXT_PRIMARY, weight="bold"),
                         align="center",
                         spacing="2",
                         wrap="wrap",
                     ),
-                    rx.badge("Tradier Sandbox Reconciled", color_scheme="jade", variant="surface", size="1"),
+                    rx.badge("Curated Multi-Variant Rollup", color_scheme="cyan", variant="surface", size="1"),
                     direction={"initial": "column", "sm": "row"},
                     justify="between",
                     align={"initial": "start", "sm": "center"},
@@ -98,58 +100,121 @@ def incubator_view() -> rx.Component:
                     gap="2",
                 ),
                 rx.text(
-                    "Transparent breakdown reconciling trade journal midpoint marks against actual broker cash execution fills and exchange fees:",
+                    "High-level group comparison isolating the Autonomous Neural Policy against the Top 5 momentum configurations and Bottom 3 underperformers:",
                     size="2",
                     color=TEXT_MUTED,
                 ),
                 rx.grid(
+                    # Aggregate Card 1: AI Pure Neural Policy
                     rx.box(
-                        rx.text("Starting Capital", size="1", color=TEXT_MUTED),
-                        rx.text("$100,000.00", size="2", weight="bold", class_name="tabular-nums nowrap"),
-                        padding="10px 12px",
+                        rx.vstack(
+                            rx.flex(
+                                rx.hstack(
+                                    rx.icon("brain-circuit", size=16, color=INDIGO),
+                                    rx.text("AI Pure Neural Strategy", size="2", weight="bold", color=TEXT_PRIMARY),
+                                    align="center",
+                                    spacing="1",
+                                ),
+                                rx.badge("LIVE META-POLICY", color_scheme="indigo", variant="surface", size="1"),
+                                justify="between",
+                                width="100%",
+                            ),
+                            rx.hstack(
+                                rx.heading(DashboardState.ai_aggregate["net_pnl_str"], size="5", color=CYAN, class_name="tabular-nums font-mono"),
+                                rx.badge(DashboardState.ai_aggregate["win_rate"], color_scheme="jade", size="1"),
+                                align="baseline",
+                                spacing="2",
+                            ),
+                            rx.grid(
+                                rx.box(rx.text("Trades", size="1", color=TEXT_MUTED), rx.text(DashboardState.ai_aggregate["trades"], size="1", weight="bold")),
+                                rx.box(rx.text("Fees", size="1", color=TEXT_MUTED), rx.text(DashboardState.ai_aggregate["fees_str"], size="1", color=AMBER)),
+                                rx.box(rx.text("Regime", size="1", color=TEXT_MUTED), rx.text("Adaptive", size="1", color=CYAN)),
+                                columns="3",
+                                width="100%",
+                                spacing="1",
+                            ),
+                            spacing="2",
+                        ),
+                        padding="14px",
                         background_color="#0C101A",
-                        border_radius="4px",
+                        border=f"1px solid {BORDER_COLOR}",
+                        border_radius="6px",
                     ),
+                    # Aggregate Card 2: Top 5 Performers
                     rx.box(
-                        rx.text("Option Buys (Debits)", size="1", color=TEXT_MUTED),
-                        rx.text("-$598.00", size="2", weight="bold", color=RED, class_name="tabular-nums nowrap"),
-                        padding="10px 12px",
+                        rx.vstack(
+                            rx.flex(
+                                rx.hstack(
+                                    rx.icon("trophy", size=16, color=GREEN),
+                                    rx.text("Top 5 Performing Strategies", size="2", weight="bold", color=TEXT_PRIMARY),
+                                    align="center",
+                                    spacing="1",
+                                ),
+                                rx.badge("ALPHA LEADERS", color_scheme="jade", variant="surface", size="1"),
+                                justify="between",
+                                width="100%",
+                            ),
+                            rx.hstack(
+                                rx.heading(DashboardState.top5_aggregate["net_pnl_str"], size="5", color=GREEN, class_name="tabular-nums font-mono"),
+                                rx.badge(f"{DashboardState.top5_aggregate['avg_win_rate']} Win Rate", color_scheme="jade", size="1"),
+                                align="baseline",
+                                spacing="2",
+                            ),
+                            rx.grid(
+                                rx.box(rx.text("Combined Volume", size="1", color=TEXT_MUTED), rx.text(f"{DashboardState.top5_aggregate['trades']} Trades", size="1", weight="bold")),
+                                rx.box(rx.text("Total Fees", size="1", color=TEXT_MUTED), rx.text(DashboardState.top5_aggregate["fees_str"], size="1", color=AMBER)),
+                                rx.box(rx.text("Top Variant", size="1", color=TEXT_MUTED), rx.text(DashboardState.top5_aggregate["best_variant"], size="1", color=GREEN)),
+                                columns="3",
+                                width="100%",
+                                spacing="1",
+                            ),
+                            spacing="2",
+                        ),
+                        padding="14px",
                         background_color="#0C101A",
-                        border_radius="4px",
+                        border=f"1px solid {BORDER_COLOR}",
+                        border_radius="6px",
                     ),
+                    # Aggregate Card 3: Bottom 3 Underperformers
                     rx.box(
-                        rx.text("Option Sells (Credits)", size="1", color=TEXT_MUTED),
-                        rx.text("+$410.00", size="2", weight="bold", color=GREEN, class_name="tabular-nums nowrap"),
-                        padding="10px 12px",
+                        rx.vstack(
+                            rx.flex(
+                                rx.hstack(
+                                    rx.icon("triangle-alert", size=16, color=RED),
+                                    rx.text("Bottom 3 Underperformers", size="2", weight="bold", color=TEXT_PRIMARY),
+                                    align="center",
+                                    spacing="1",
+                                ),
+                                rx.badge("UNDERPERFORMERS", color_scheme="crimson", variant="surface", size="1"),
+                                justify="between",
+                                width="100%",
+                            ),
+                            rx.hstack(
+                                rx.heading(DashboardState.bottom3_aggregate["net_pnl_str"], size="5", color=RED, class_name="tabular-nums font-mono"),
+                                rx.badge(f"{DashboardState.bottom3_aggregate['avg_win_rate']} Win Rate", color_scheme="crimson", size="1"),
+                                align="baseline",
+                                spacing="2",
+                            ),
+                            rx.grid(
+                                rx.box(rx.text("Combined Volume", size="1", color=TEXT_MUTED), rx.text(f"{DashboardState.bottom3_aggregate['trades']} Trades", size="1", weight="bold")),
+                                rx.box(rx.text("Total Fees", size="1", color=TEXT_MUTED), rx.text(DashboardState.bottom3_aggregate["fees_str"], size="1", color=AMBER)),
+                                rx.box(rx.text("Lagging Variant", size="1", color=TEXT_MUTED), rx.text(DashboardState.bottom3_aggregate["worst_variant"], size="1", color=RED)),
+                                columns="3",
+                                width="100%",
+                                spacing="1",
+                            ),
+                            spacing="2",
+                        ),
+                        padding="14px",
                         background_color="#0C101A",
-                        border_radius="4px",
+                        border=f"1px solid {BORDER_COLOR}",
+                        border_radius="6px",
                     ),
-                    rx.box(
-                        rx.text("Net Fills (close_pl)", size="1", color=TEXT_MUTED),
-                        rx.text("-$188.00", size="2", weight="bold", color=AMBER, class_name="tabular-nums nowrap"),
-                        padding="10px 12px",
-                        background_color="#0C101A",
-                        border_radius="4px",
-                    ),
-                    rx.box(
-                        rx.text("Contract Fees (124 legs)", size="1", color=TEXT_MUTED),
-                        rx.text("-$49.60", size="2", weight="bold", color=RED, class_name="tabular-nums nowrap"),
-                        padding="10px 12px",
-                        background_color="#0C101A",
-                        border_radius="4px",
-                    ),
-                    rx.box(
-                        rx.text("Ending Tradier Equity", size="1", color=TEXT_MUTED),
-                        rx.text("$99,762.40", size="2", weight="bold", color=CYAN, class_name="tabular-nums nowrap"),
-                        padding="10px 12px",
-                        background_color="#0C101A",
-                        border_radius="4px",
-                    ),
-                    columns={"initial": "2", "sm": "3", "md": "6"},
-                    spacing="2",
+                    columns={"initial": "1", "md": "3"},
+                    spacing="3",
                     width="100%",
                 ),
-                spacing="2",
+                spacing="3",
                 width="100%",
             ),
             padding={"initial": "12px", "sm": "16px"},
@@ -159,18 +224,18 @@ def incubator_view() -> rx.Component:
             width="100%",
         ),
 
-        # Traded Strategies Performance Leaderboard Table - Horizontally Scrollable on Mobile
+        # 3. Curated Strategy Leaderboard Table (AI + Top 5 + Bottom 3)
         rx.box(
             rx.vstack(
                 rx.flex(
                     rx.hstack(
                         rx.icon("list-ordered", size=18, color=CYAN),
-                        rx.heading("Traded Strategies Performance Leaderboard", size="3", color=TEXT_PRIMARY, weight="bold"),
+                        rx.heading("Curated Strategy Leaderboard (AI, Top 5 & Bottom 3 Performers)", size="3", color=TEXT_PRIMARY, weight="bold"),
                         align="center",
                         spacing="2",
                     ),
                     rx.hstack(
-                        rx.badge("Realized Trades Only", color_scheme="jade", variant="surface", size="1"),
+                        rx.badge("9 Curated Variants", color_scheme="jade", variant="surface", size="1"),
                         rx.text("(Swipe table horizontally on mobile)", size="1", color=TEXT_MUTED, display={"initial": "block", "md": "none"}),
                         align="center",
                         spacing="2",
@@ -182,8 +247,8 @@ def incubator_view() -> rx.Component:
                     gap="2",
                 ),
                 rx.text(
-                    "Displaying only variants with completed roundtrips or active positions. "
-                    "Untriggered incubator variants are housed separately in the Scanner & Monitor tab.",
+                    "Displaying only the high-signal spectrum: the Pure Neural AI strategy alongside the Top 5 leaders and Bottom 3 underperformers. "
+                    "Uninformative middle-ranking variants are excluded from the primary table.",
                     size="2",
                     color=TEXT_MUTED,
                 ),
@@ -192,19 +257,20 @@ def incubator_view() -> rx.Component:
                     rx.table.root(
                         rx.table.header(
                             rx.table.row(
+                                rx.table.column_header_cell("Rank / Group", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Variant", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Structure", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Delta (Δ)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Wing", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("DTE", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Profit Target", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Stop Loss", style=TABLE_HEADER_STYLE, class_name="nowrap"),
-                                rx.table.column_header_cell("Entry Time", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Closed", style=TABLE_HEADER_STYLE, class_name="nowrap"),
-                                rx.table.column_header_cell("Win Rate (Closed)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Win Rate", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Gross P&L", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Fees ($0.40/leg)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Realized Net P&L", style=TABLE_HEADER_STYLE, class_name="nowrap"),
-                                rx.table.column_header_cell("Realized Net P&L % (RoR)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Net RoR %", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Status", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                             )
                         ),
@@ -212,18 +278,19 @@ def incubator_view() -> rx.Component:
                             rx.foreach(
                                 DashboardState.incubator_rows,
                                 lambda row: rx.table.row(
+                                    rx.table.cell(rx.badge(row["rank_badge"], color_scheme=row["badge_color"], size="1", variant="surface")),
                                     rx.table.cell(rx.text(row["variant"], weight="bold", color=CYAN, class_name="font-mono nowrap")),
+                                    rx.table.cell(rx.badge(row["structure_label"], color_scheme="gray", size="1")),
                                     rx.table.cell(rx.text(row["delta"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["wing"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(row["dte"], color_scheme="gray", size="1")),
                                     rx.table.cell(rx.text(row["profit_target"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["stop_loss"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["entry_time"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["closed_trades"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["win_rate"], weight="bold", color=GREEN, class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["gross_pnl_str"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["net_pnl_str"], weight="bold", color=GREEN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(row["net_pnl_str"], weight="bold", color=row["status_color"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["net_ror_pct"], weight="bold", color=CYAN, class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(row["status"], color_scheme=row["status_color"], size="1")),
                                     style=TABLE_ROW_STYLE,
@@ -234,41 +301,182 @@ def incubator_view() -> rx.Component:
                     ),
                     class_name="table-responsive-container",
                 ),
+                spacing="3",
+                width="100%",
+            ),
+            padding={"initial": "12px", "sm": "16px"},
+            background_color=SURFACE_DARK,
+            border=f"1px solid {BORDER_COLOR}",
+            border_radius="8px",
+            width="100%",
+        ),
 
-                # Callout linking to the separate Monitor tab
-                rx.box(
-                    rx.flex(
-                        rx.hstack(
-                            rx.icon("scan", size=18, color=CYAN),
-                            rx.text(
-                                "9 untriggered variants are actively scanning the SPX/XSP chain in background monitoring. "
-                                "Inspect entry windows, delta targets, and risk caps in the Scanner & Monitor tab.",
-                                size="2",
-                                color=TEXT_MUTED,
-                            ),
-                            align="center",
-                            spacing="2",
-                        ),
+        # 4. Per-Trade Execution Highlights & CSV Export Section (Past 50 Trades + Load More)
+        rx.box(
+            rx.vstack(
+                rx.flex(
+                    rx.hstack(
+                        rx.icon("receipt", size=18, color=CYAN),
+                        rx.heading("Per-Trade Execution Highlights (Past 50 Trades)", size="3", color=TEXT_PRIMARY, weight="bold"),
+                        align="center",
+                        spacing="2",
+                        wrap="wrap",
+                    ),
+                    rx.hstack(
                         rx.button(
-                            rx.hstack(rx.text("View Scanner & Monitor"), rx.icon("arrow-right", size=14), align="center", spacing="1"),
-                            on_click=DashboardState.set_tab("monitor"),
+                            rx.hstack(rx.icon("download", size=14), rx.text("Export Visible (50) CSV"), align="center", spacing="1"),
+                            on_click=DashboardState.download_visible_trades_csv,
                             size="1",
                             color_scheme="cyan",
                             variant="surface",
                             cursor="pointer",
                         ),
+                        rx.button(
+                            rx.hstack(rx.icon("file-spreadsheet", size=14), rx.text(f"Export Complete ({DashboardState.total_closed_trades_count}) CSV"), align="center", spacing="1"),
+                            on_click=DashboardState.download_all_trades_csv,
+                            size="1",
+                            color_scheme="gray",
+                            variant="surface",
+                            cursor="pointer",
+                        ),
+                        spacing="2",
+                        wrap="wrap",
+                    ),
+                    direction={"initial": "column", "sm": "row"},
+                    justify="between",
+                    align={"initial": "start", "sm": "center"},
+                    width="100%",
+                    gap="2",
+                ),
+                rx.text(
+                    "Individual closed roundtrip executions with exact broker fills, vertical & condor fee accounting ($0.40/leg), and net returns:",
+                    size="2",
+                    color=TEXT_MUTED,
+                ),
+                # Table of 50 visible trades
+                rx.box(
+                    rx.table.root(
+                        rx.table.header(
+                            rx.table.row(
+                                rx.table.column_header_cell("Time (ET)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Trade ID", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Strategy Variant", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Structure", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Strikes", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Qty", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Credit", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Exit Reason", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Gross P&L", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Fees", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Net Realized P&L", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("RoR %", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                            )
+                        ),
+                        rx.table.body(
+                            rx.foreach(
+                                DashboardState.visible_trades_50,
+                                lambda t: rx.table.row(
+                                    rx.table.cell(rx.text(t["time_str"], class_name="font-mono text-xs nowrap")),
+                                    rx.table.cell(rx.text(t["trade_id"], class_name="font-mono text-xs text-slate-400 nowrap")),
+                                    rx.table.cell(rx.text(t["strategy_label"], weight="bold", color=CYAN, class_name="nowrap")),
+                                    rx.table.cell(rx.badge(t["structure_label"], color_scheme="gray", size="1")),
+                                    rx.table.cell(rx.text(t["strikes_display"], class_name="font-mono text-xs nowrap")),
+                                    rx.table.cell(rx.text(t["quantity"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(t["credit_str"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.badge(t["exit_reason"], color_scheme=t["net_pnl_color"], size="1")),
+                                    rx.table.cell(rx.text(t["gross_pnl_str"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(t["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(t["net_pnl_str"], weight="bold", color=t["net_pnl_color"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(t["net_ror_str"], weight="bold", color=CYAN, class_name="tabular-nums nowrap")),
+                                    style=TABLE_ROW_STYLE,
+                                )
+                            )
+                        ),
+                        width="100%",
+                    ),
+                    class_name="table-responsive-container",
+                ),
+
+                # Bottom Load More Callout (Forces user to download complete CSV archive)
+                rx.box(
+                    rx.flex(
+                        rx.hstack(
+                            rx.icon("archive", size=20, color=INDIGO),
+                            rx.vstack(
+                                rx.text(
+                                    f"Showing latest 50 of {DashboardState.total_closed_trades_count} closed trades in live memory buffer.",
+                                    size="2",
+                                    weight="bold",
+                                    color=TEXT_PRIMARY,
+                                ),
+                                rx.text(
+                                    "Historical trades beyond the 50-trade interactive view are archived for execution performance and audit compliance. "
+                                    "Clicking 'Load More' triggers a complete CSV export of the full trade ledger.",
+                                    size="1",
+                                    color=TEXT_MUTED,
+                                ),
+                                spacing="0",
+                            ),
+                            align="center",
+                            spacing="3",
+                        ),
+                        # Load More Alert Dialog Trigger
+                        rx.alert_dialog.root(
+                            rx.alert_dialog.trigger(
+                                rx.button(
+                                    rx.hstack(
+                                        rx.icon("download", size=16),
+                                        rx.text("Load More (Download Full CSV Archive)"),
+                                        align="center",
+                                        spacing="1",
+                                    ),
+                                    color_scheme="indigo",
+                                    variant="solid",
+                                    size="2",
+                                    cursor="pointer",
+                                    width={"initial": "100%", "sm": "auto"},
+                                ),
+                            ),
+                            rx.alert_dialog.content(
+                                rx.alert_dialog.title("📥 Complete Trade Ledger Archive Export"),
+                                rx.alert_dialog.description(
+                                    f"The interactive table is calibrated for the past 50 trades to maintain ultra-fast sub-millisecond dashboard rendering. "
+                                    f"To view and audit all {DashboardState.total_closed_trades_count} historical trades, download the full RFC-4180 compliant CSV export.",
+                                    size="2",
+                                ),
+                                rx.hstack(
+                                    rx.alert_dialog.cancel(
+                                        rx.button("Cancel", variant="soft", color_scheme="gray"),
+                                    ),
+                                    rx.alert_dialog.action(
+                                        rx.button(
+                                            "Download Complete Trade Archive",
+                                            color_scheme="indigo",
+                                            on_click=DashboardState.load_more_and_export_csv,
+                                        ),
+                                    ),
+                                    spacing="3",
+                                    margin_top="16px",
+                                    justify="end",
+                                ),
+                                style={
+                                    "background_color": SURFACE_DARK,
+                                    "border": f"1px solid {BORDER_COLOR}",
+                                },
+                            ),
+                        ),
                         direction={"initial": "column", "sm": "row"},
                         justify="between",
                         align={"initial": "start", "sm": "center"},
                         width="100%",
-                        gap="2",
+                        gap="3",
                     ),
-                    padding="10px 14px",
+                    padding="14px 18px",
                     background_color="#0C101A",
                     border=f"1px solid {BORDER_COLOR}",
                     border_radius="6px",
                     width="100%",
-                    margin_top="8px",
+                    margin_top="10px",
                 ),
                 spacing="3",
                 width="100%",

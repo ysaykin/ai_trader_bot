@@ -17,6 +17,7 @@ from .data.adapters import (
     get_recent_logs,
     get_config_settings,
     save_config_settings,
+    generate_trades_csv,
     money,
 )
 
@@ -68,6 +69,39 @@ class DashboardState(rx.State):
     total_fees_str: str = "$0.00"
     total_net_pnl_str: str = "$150.00"
     selected_variant: str = "IC_V01"
+
+    # Incubator Curated Groups & Per-Trade History
+    ai_aggregate: dict[str, Any] = {
+        "title": "🤖 AI Pure Neural Strategy",
+        "variant": "IC_V22 (Neural Pure)",
+        "net_pnl_str": "$127.35",
+        "win_rate": "83%",
+        "trades": 6,
+        "fees_str": "-$19.20",
+        "status": "DYNAMIC REGIME ADAPT",
+        "badge_color": "indigo",
+    }
+    top5_aggregate: dict[str, Any] = {
+        "title": "🏆 Top 5 Performing Strategies",
+        "net_pnl_str": "$704.80",
+        "avg_win_rate": "83.3%",
+        "trades": 24,
+        "fees_str": "-$76.80",
+        "best_variant": "IC_V07",
+        "badge_color": "jade",
+    }
+    bottom3_aggregate: dict[str, Any] = {
+        "title": "⚠️ Bottom 3 Underperforming Strategies",
+        "net_pnl_str": "-$1,044.30",
+        "avg_win_rate": "30.8%",
+        "trades": 13,
+        "fees_str": "-$33.60",
+        "worst_variant": "IC_V20",
+        "badge_color": "crimson",
+    }
+    visible_trades_50: list[dict[str, Any]] = []
+    total_closed_trades_count: int = 111
+    load_more_modal_open: bool = False
 
     # A/B Multi-Strategy Testing Lab (EXP-01 through EXP-04)
     ab_all_strategies: list[dict[str, Any]] = []
@@ -243,6 +277,12 @@ class DashboardState(rx.State):
             self.total_gross_pnl_str = inc["total_gross_pnl_str"]
             self.total_fees_str = inc["total_fees_str"]
             self.total_net_pnl_str = inc["total_net_pnl_str"]
+            if "strategy_aggregates" in inc:
+                self.ai_aggregate = inc["strategy_aggregates"].get("ai", {})
+                self.top5_aggregate = inc["strategy_aggregates"].get("top5", {})
+                self.bottom3_aggregate = inc["strategy_aggregates"].get("bottom3", {})
+            self.visible_trades_50 = inc.get("visible_trades_50", [])
+            self.total_closed_trades_count = len(inc.get("all_closed_trades", []))
 
             # 5. A/B Testing Lab
             ab = get_ab_lab_data()
@@ -473,3 +513,46 @@ class DashboardState(rx.State):
         if success:
             return rx.toast.success("Configuration successfully saved to .env!")
         return rx.toast.error("Failed to write .env file.")
+
+    # -------------------------------------------------------------
+    # Trade Journal CSV Exports & Archive Handlers
+    # -------------------------------------------------------------
+    def download_visible_trades_csv(self):
+        """Export the currently visible 50 historical trades to CSV."""
+        inc = get_incubator_data()
+        trades = inc.get("visible_trades_50", [])
+        csv_content = generate_trades_csv(trades)
+        return rx.download(
+            data=csv_content,
+            filename="lumibot_visible_trades_past_50.csv",
+            mime_type="text/csv",
+        )
+
+    def download_all_trades_csv(self):
+        """Export all recorded historical trades to CSV archive."""
+        inc = get_incubator_data()
+        trades = inc.get("all_closed_trades", [])
+        csv_content = generate_trades_csv(trades)
+        return rx.download(
+            data=csv_content,
+            filename="lumibot_complete_trades_journal.csv",
+            mime_type="text/csv",
+        )
+
+    def open_load_more_modal(self):
+        self.load_more_modal_open = True
+
+    def close_load_more_modal(self):
+        self.load_more_modal_open = False
+
+    def load_more_and_export_csv(self):
+        """Forces the user to download the full CSV export to view/audit historical trades beyond the visible 50."""
+        self.load_more_modal_open = False
+        inc = get_incubator_data()
+        trades = inc.get("all_closed_trades", [])
+        csv_content = generate_trades_csv(trades)
+        return rx.download(
+            data=csv_content,
+            filename="lumibot_complete_trades_archive.csv",
+            mime_type="text/csv",
+        )
