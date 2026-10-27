@@ -79,7 +79,16 @@ def neural_view() -> rx.Component:
                         spacing="2",
                         wrap="wrap",
                     ),
-                    rx.badge(f"ACTION: {DashboardState.recommendation_action}", color_scheme="indigo", variant="solid", size="2"),
+                    rx.hstack(
+                        rx.badge(
+                            DashboardState.data_readiness_str,
+                            color_scheme=rx.cond(DashboardState.has_sufficient_data, "jade", "amber"),
+                            variant="surface",
+                            size="1",
+                        ),
+                        rx.badge(f"ACTION: {DashboardState.recommendation_action}", color_scheme="indigo", variant="solid", size="2"),
+                        spacing="2",
+                    ),
                     direction={"initial": "column", "sm": "row"},
                     justify="between",
                     align={"initial": "start", "sm": "center"},
@@ -145,6 +154,66 @@ def neural_view() -> rx.Component:
                 ),
 
                 spacing="4",
+                width="100%",
+            ),
+            padding={"initial": "14px", "sm": "20px"},
+            background_color=SURFACE_DARK,
+            border=f"1px solid {BORDER_COLOR}",
+            border_radius="8px",
+            width="100%",
+        ),
+
+        # Dynamic Strategy Switching & Regime Meta-Controller Panel
+        rx.box(
+            rx.vstack(
+                rx.flex(
+                    rx.hstack(
+                        rx.icon("shuffle", size=18, color=CYAN),
+                        rx.heading("🔄 Autonomous Dynamic Strategy Switching", size="3", color=TEXT_PRIMARY, weight="bold"),
+                        align="center",
+                        spacing="2",
+                    ),
+                    rx.badge("Real-Time Regime Meta-Controller", color_scheme="cyan", variant="surface", size="1"),
+                    direction={"initial": "column", "sm": "row"},
+                    justify="between",
+                    align={"initial": "start", "sm": "center"},
+                    width="100%",
+                    gap="2",
+                ),
+                rx.text(
+                    "The neural network trades exclusively when sufficient temporal market data has been collected. "
+                    "Based on real-time signals, volatility term structure, and cross-strategy feedback, the AI dynamically "
+                    "selects and switches between all 20 strategy setups to deploy the optimal configuration.",
+                    size="2",
+                    color=TEXT_MUTED,
+                ),
+                rx.grid(
+                    rx.box(
+                        rx.text("Data Readiness Gate", size="1", color=TEXT_MUTED),
+                        rx.text(DashboardState.data_readiness_str, size="2", weight="bold", color=CYAN, class_name="tabular-nums"),
+                        padding="10px 14px",
+                        background_color="#0C101A",
+                        border_radius="4px",
+                    ),
+                    rx.box(
+                        rx.text("Selected Profile", size="1", color=TEXT_MUTED),
+                        rx.text(DashboardState.contextual_selector, size="2", weight="bold", color=INDIGO, class_name="nowrap"),
+                        padding="10px 14px",
+                        background_color="#0C101A",
+                        border_radius="4px",
+                    ),
+                    rx.box(
+                        rx.text("Operational Parameters", size="1", color=TEXT_MUTED),
+                        rx.text("Auto-Configured by Policy Net", size="2", weight="bold", color=GREEN),
+                        padding="10px 14px",
+                        background_color="#0C101A",
+                        border_radius="4px",
+                    ),
+                    columns={"initial": "1", "sm": "3"},
+                    spacing="3",
+                    width="100%",
+                ),
+                spacing="3",
                 width="100%",
             ),
             padding={"initial": "14px", "sm": "20px"},

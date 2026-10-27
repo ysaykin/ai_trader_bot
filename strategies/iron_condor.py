@@ -272,6 +272,11 @@ class SPXIronCondor(Strategy):
             self._queued_policy_action = None
             self.apply_policy_action(queued[0], dynamic_profit_target=queued[1])
 
+        queued_switch = getattr(self, "_queued_strategy_switch", None)
+        if queued_switch is not None:
+            self._queued_strategy_switch = None
+            self._apply_neural_strategy_switch(queued_switch)
+
         # --- MANAGEMENT: Check existing position ---
         if self._position_open:
             self._manage_position()
@@ -280,6 +285,25 @@ class SPXIronCondor(Strategy):
         if self._recovery_lock:
             logger.error("Unmanaged broker option positions detected; new entries are locked.")
             return
+
+        # --- DATA SUFFICIENCY CHECK FOR NEURAL STRATEGY ---
+        if self.pure_neural_mode:
+            controller = getattr(self, "_policy_controller", None)
+            if controller is not None:
+                if not controller.has_sufficient_data:
+                    logger.info(
+                        "[%s] Neural network waiting for sufficient data: %d/%d ticks. Skipping entry.",
+                        getattr(self, "name", "NeuralPure"),
+                        controller.current_ticks,
+                        controller.required_ticks,
+                    )
+                    return
+                if getattr(controller, "last_recommendation", None) is None:
+                    logger.info(
+                        "[%s] Waiting for initial neural recommendation before trading.",
+                        getattr(self, "name", "NeuralPure"),
+                    )
+                    return
 
         # --- COOLDOWN CHECK: Prevent duplicate entry on transient network blips ---
         # If we just checked positions and got an empty result, wait before re-entering
@@ -701,6 +725,39 @@ class SPXIronCondor(Strategy):
 
         self._last_action = "HOLD"
         return "HOLD"
+
+    def _apply_neural_strategy_switch(self, target_strategy_name: str) -> None:
+        """Dynamically adapt parameters to match the variant selected by the neural network
+        based on real-time market regime, volatility, and cross-strategy signals."""
+        from strategies.incubator import get_incubator_specs
+        specs = {s["strategy_name"]: s for s in get_incubator_specs(include_neural=False)}
+        target_spec = specs.get(target_strategy_name)
+        if target_spec is None:
+            prefix = target_strategy_name.split("_")[0] + "_" + target_strategy_name.split("_")[1] if "_" in target_strategy_name else target_strategy_name
+            target_spec = next((s for name, s in specs.items() if name.startswith(prefix)), None)
+
+        if target_spec is not None:
+            old_name = getattr(self, "_active_switched_strategy", "Default")
+            self._active_switched_strategy = target_spec.get("strategy_name", target_strategy_name)
+            self.parameters["short_delta"] = float(target_spec.get("short_delta", self.parameters["short_delta"]))
+            self.parameters["wing_width"] = float(target_spec.get("wing_width", self.parameters["wing_width"]))
+            self.parameters["dte"] = int(target_spec.get("dte", self.parameters["dte"]))
+            self.parameters["stop_loss_mult"] = float(target_spec.get("stop_loss_mult", self.parameters["stop_loss_mult"]))
+            if "entry_time" in target_spec:
+                try:
+                    h, m = map(int, str(target_spec["entry_time"]).split(":"))
+                    self._entry_time = time(h, m)
+                except Exception:
+                    pass
+            logger.info(
+                "[%s] Neural network dynamically switched strategy: %s -> %s (DTE=%d, Δ=%.2f, Wing=$%.1f)",
+                getattr(self, "name", "IC_V22_NEURAL_PURE"),
+                old_name,
+                self._active_switched_strategy,
+                self.parameters["dte"],
+                self.parameters["short_delta"],
+                self.parameters["wing_width"],
+            )
 
     def _close_all_options(
         self,
@@ -1570,8 +1627,12 @@ class SPXIronCondor(Strategy):
         )
 
     def _is_entry_window(self, now: datetime) -> bool:
-        """Only allow entry within a 30-minute window starting at entry_time."""
+        """Allow entry within a 30-minute window starting at entry_time (or active market hours for neural mode)."""
         current_time = now.time()
+        if getattr(self, "pure_neural_mode", False):
+            # Pure neural strategy trades dynamically during active market hours (10:00 - 15:30) once data is sufficient
+            return time(10, 0) <= current_time <= time(15, 30)
+
         window_end = time(
             self._entry_time.hour,
             self._entry_time.minute + 30 if self._entry_time.minute + 30 < 60

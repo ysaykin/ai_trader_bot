@@ -232,6 +232,9 @@ def build_strategies_for_mode(
             logger.info("Attached LivePolicyController to neural-managed strategy")
         except Exception as exc:
             logger.warning("Could not initialize LivePolicyController for neural strategy: %s", exc)
+    if controller is not None:
+        for strategy in strategies:
+            strategy._policy_controller = controller
     if os.getenv("TRAJECTORY_LOGGING_ENABLED", "true").strip().lower() in ("true", "1", "yes"):
         from trade_logger import TrajectoryLogger
 

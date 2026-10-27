@@ -68,6 +68,21 @@ class LivePolicyController:
         self._session: str | None = None
         self.last_recommendation: PolicyRecommendation | None = None
 
+    @property
+    def has_sufficient_data(self) -> bool:
+        """True when sufficient temporal sequence ticks have been accumulated for valid neural inference."""
+        return len(self._sequence) >= self.sequence_length
+
+    @property
+    def current_ticks(self) -> int:
+        """Number of temporal ticks currently accumulated in the session buffer."""
+        return len(self._sequence)
+
+    @property
+    def required_ticks(self) -> int:
+        """Number of temporal ticks required before the neural network can trade."""
+        return self.sequence_length
+
     def on_snapshot(self, snapshot: Mapping[str, Any]) -> PolicyRecommendation | None:
         """Normalize a completed snapshot, predict, and queue its selected action."""
         if snapshot.get("event") != "SNAPSHOT" or not snapshot.get("complete"):
@@ -93,13 +108,15 @@ class LivePolicyController:
                 recommendation.action,
                 recommendation.profit_target,
             )
-        # Always route neural actions & dynamic profit targets directly to pure neural managed strategies
+        # Always route neural actions, dynamic profit targets, and dynamic strategy switches to pure neural managed strategies
         for s in self.strategies.values():
             if getattr(s, "pure_neural_mode", False) or getattr(s, "parameters", {}).get("pure_neural_mode", False):
                 s._queued_policy_action = (
                     recommendation.action,
                     recommendation.profit_target,
                 )
+                s._queued_strategy_switch = recommendation.strategy_name
+                s._last_neural_recommendation = recommendation
         return recommendation
 
     @staticmethod

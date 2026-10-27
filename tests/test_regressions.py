@@ -899,6 +899,59 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(action, "ADJUST_PROFIT_TARGET")
         self.assertAlmostEqual(strat.parameters["profit_target"], 0.42)
 
+    def test_neural_strategy_entry_blocked_without_sufficient_data(self) -> None:
+        """Pure neural strategy must hold off trading until sufficient sequence data has been ingested."""
+        strat = iron_condor.SPXIronCondor()
+        strat.parameters = {
+            "strategy_name": "IC_V22_NEURAL_PURE",
+            "pure_neural_mode": True,
+            "quantity": 1,
+            "wing_width": 5.0,
+            "entry_time": "10:00",
+        }
+        strat.initialize()
+        mock_controller = Mock()
+        mock_controller.has_sufficient_data = False
+        mock_controller.current_ticks = 4
+        mock_controller.required_ticks = 12
+        strat._policy_controller = mock_controller
+        strat.get_datetime = Mock(return_value=datetime(2026, 10, 27, 10, 30, tzinfo=timezone.utc))
+        strat._reconcile_broker_state = Mock(return_value=True)
+        strat._find_expiration = Mock()
+
+        # Execute trading iteration
+        strat._run_trading_iteration()
+
+        # Find expiration must not be called because insufficient data blocks entry
+        strat._find_expiration.assert_not_called()
+
+    def test_neural_strategy_dynamically_switches_strategy_parameters(self) -> None:
+        """Pure neural strategy dynamically switches between all strategy configurations based on signals."""
+        strat = iron_condor.SPXIronCondor()
+        strat.parameters = {
+            "strategy_name": "IC_V22_NEURAL_PURE",
+            "pure_neural_mode": True,
+            "short_delta": 0.10,
+            "wing_width": 2.0,
+            "dte": 0,
+            "stop_loss_mult": 1.5,
+        }
+        strat.initialize()
+
+        # Neural net selects IC_V07 (7DTE, delta 0.15, wing 5.0, stop loss 2.0)
+        strat._apply_neural_strategy_switch("IC_V07_7DTE_D15_W5_PT50_T1030")
+        self.assertEqual(strat.parameters["dte"], 7)
+        self.assertEqual(strat.parameters["short_delta"], 0.15)
+        self.assertEqual(strat.parameters["wing_width"], 5.0)
+        self.assertEqual(strat.parameters["stop_loss_mult"], 2.0)
+
+        # Later, market shifts and neural net switches to IC_V16 (21DTE, delta 0.20, wing 5.0, stop loss 2.5)
+        strat._apply_neural_strategy_switch("IC_V16_21DTE_D20_W5_PT50_T1100")
+        self.assertEqual(strat.parameters["dte"], 21)
+        self.assertEqual(strat.parameters["short_delta"], 0.20)
+        self.assertEqual(strat.parameters["wing_width"], 5.0)
+        self.assertEqual(strat.parameters["stop_loss_mult"], 2.5)
+
 
 if __name__ == "__main__":
     unittest.main()

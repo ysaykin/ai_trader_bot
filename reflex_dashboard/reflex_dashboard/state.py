@@ -110,6 +110,10 @@ class DashboardState(rx.State):
     market_regime: str = "Low-Vol Pinning"
     dynamic_pt: str = "40.0%"
     contextual_selector: str = "IC_V05 (15Δ, $5 Wing)"
+    active_switched_profile: str = "IC_V05_7DTE_D12_W3_PT35_T1015"
+    dynamic_switching_status: str = "AUTO-ADAPTING TO MARKET REGIME"
+    data_readiness_str: str = "READY (12/12 Ticks)"
+    has_sufficient_data: bool = True
     recommendation_action: str = "HOLD"
     action_prob_hold: int = 68
     action_prob_add: int = 12
@@ -251,6 +255,10 @@ class DashboardState(rx.State):
             self.market_regime = ml["market_regime"]
             self.dynamic_pt = ml["dynamic_pt"]
             self.contextual_selector = ml["contextual_selector"]
+            self.active_switched_profile = ml.get("active_switched_profile", "IC_V05_7DTE_D12_W3_PT35_T1015")
+            self.dynamic_switching_status = ml.get("dynamic_switching_status", "AUTO-ADAPTING TO MARKET REGIME")
+            self.data_readiness_str = ml.get("readiness_str", "READY (12/12 Ticks)")
+            self.has_sufficient_data = bool(ml.get("has_sufficient_data", True))
             self.recommendation_action = ml["recommendation_action"]
             self.action_prob_hold = int(ml["action_probs"]["HOLD"])
             self.action_prob_add = int(ml["action_probs"]["ADD"])
