@@ -178,8 +178,11 @@ class SPXIronCondor(Strategy):
         ).strip().lower() in {"true", "1", "yes", "on"}
 
         # Define the underlying asset
-        # Tradier quotes index tickers without changing their instrument type.
-        asset_type = (
+        # Note: Tradier quotes index tickers (SPX, XSP) without the 'I:' index prefix.
+        broker_name = getattr(getattr(self, "broker", None), "name", "").lower()
+        env_broker = os.getenv("TRADING_BROKER", "").lower()
+        is_tradier = "tradier" in broker_name or "tradier" in env_broker
+        asset_type = Asset.AssetType.STOCK if is_tradier else (
             Asset.AssetType.INDEX
             if str(p["symbol"]).upper() in {"SPX", "XSP"}
             else Asset.AssetType.STOCK

@@ -207,49 +207,60 @@ class PositionLedger:
             raise ValueError("limit_price must be finite and non-negative")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection:
-            self._connection.execute(
-                """INSERT INTO packages
-                   (package_id, strategy_id, intent, state, opening_cash_flow,
-                    closing_cash_flow, created_at, updated_at, broker_parent_id,
-                    broker_tag, duration, limit_price, trade_id, replacement_of,
-                    reprice_count)
-                   VALUES (?, ?, ?, 'submitted', NULL, NULL, ?, ?, NULL, ?, ?, ?,
-                           NULL, ?, ?)""",
-                (
-                    package_id,
-                    strategy_id,
-                    normalized_intent,
-                    now,
-                    now,
-                    broker_tag,
-                    duration.lower(),
-                    price,
-                    replacement_of,
-                    int(reprice_count),
-                ),
+            package_data = {
+                "package_id": package_id,
+                "strategy_id": strategy_id,
+                "intent": normalized_intent,
+                "state": "submitted",
+                "opening_cash_flow": None,
+                "closing_cash_flow": None,
+                "created_at": now,
+                "updated_at": now,
+                "broker_parent_id": None,
+                "broker_tag": broker_tag,
+                "duration": duration.lower(),
+                "limit_price": price,
+                "trade_id": None,
+                "replacement_of": replacement_of,
+                "reprice_count": int(reprice_count),
+            }
+            package_cols = {
+                str(col["name"])
+                for col in self._connection.execute("PRAGMA table_info(packages)").fetchall()
+            }
+            active_package_cols = [k for k in package_data if k in package_cols]
+            pkg_sql = (
+                f"INSERT INTO packages ({', '.join(active_package_cols)}) "
+                f"VALUES ({', '.join('?' for _ in active_package_cols)})"
             )
-            self._connection.executemany(
-                """INSERT INTO legs
-                   (order_id, package_id, asset_key, requested_signed_quantity,
-                    filled_signed_quantity, fill_price, status, local_order_id,
-                    broker_order_id, broker_parent_id, side, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 0, NULL, 'submitted', ?, ?, ?, ?, ?, ?)""",
-                [
-                    (
-                        leg.order_id,
-                        package_id,
-                        leg.asset_key,
-                        leg.requested_signed_quantity,
-                        leg.order_id,
-                        leg.broker_order_id,
-                        leg.broker_parent_id,
-                        self._side_for(normalized_intent, leg.requested_signed_quantity),
-                        now,
-                        now,
-                    )
-                    for leg in normalized
-                ],
-            )
+            self._connection.execute(pkg_sql, tuple(package_data[k] for k in active_package_cols))
+
+            leg_cols = {
+                str(col["name"])
+                for col in self._connection.execute("PRAGMA table_info(legs)").fetchall()
+            }
+            for leg in normalized:
+                leg_data = {
+                    "order_id": leg.order_id,
+                    "package_id": package_id,
+                    "asset_key": leg.asset_key,
+                    "requested_signed_quantity": leg.requested_signed_quantity,
+                    "filled_signed_quantity": 0,
+                    "fill_price": None,
+                    "status": "submitted",
+                    "local_order_id": leg.order_id,
+                    "broker_order_id": leg.broker_order_id,
+                    "broker_parent_id": leg.broker_parent_id,
+                    "side": self._side_for(normalized_intent, leg.requested_signed_quantity),
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                active_leg_cols = [k for k in leg_data if k in leg_cols]
+                leg_sql = (
+                    f"INSERT INTO legs ({', '.join(active_leg_cols)}) "
+                    f"VALUES ({', '.join('?' for _ in active_leg_cols)})"
+                )
+                self._connection.execute(leg_sql, tuple(leg_data[k] for k in active_leg_cols))
 
     def bind_broker_submission(self, package_id: str, parent_order: Any) -> BasketRecord:
         """Bind the broker-assigned parent ID and any returned child orders."""
@@ -709,23 +720,24 @@ class PositionLedger:
             "SELECT * FROM legs WHERE package_id = ? ORDER BY order_id",
             (package["package_id"],),
         ).fetchall()
+        row = dict(package)
         return BasketRecord(
-            package_id=str(package["package_id"]),
-            strategy_id=str(package["strategy_id"]),
-            intent=str(package["intent"]),
-            state=str(package["state"]),
-            opening_cash_flow=package["opening_cash_flow"],
-            closing_cash_flow=package["closing_cash_flow"],
+            package_id=str(row["package_id"]),
+            strategy_id=str(row["strategy_id"]),
+            intent=str(row["intent"]),
+            state=str(row["state"]),
+            opening_cash_flow=row.get("opening_cash_flow"),
+            closing_cash_flow=row.get("closing_cash_flow"),
             legs=tuple(dict(leg) for leg in legs),
-            broker_parent_id=package["broker_parent_id"],
-            broker_tag=package["broker_tag"],
-            duration=package["duration"],
-            limit_price=package["limit_price"],
-            trade_id=package["trade_id"],
-            created_at=package["created_at"],
-            updated_at=package["updated_at"],
-            replacement_of=package["replacement_of"],
-            reprice_count=int(package["reprice_count"] or 0),
+            broker_parent_id=row.get("broker_parent_id"),
+            broker_tag=row.get("broker_tag"),
+            duration=row.get("duration"),
+            limit_price=row.get("limit_price"),
+            trade_id=row.get("trade_id"),
+            created_at=row.get("created_at"),
+            updated_at=row.get("updated_at"),
+            replacement_of=row.get("replacement_of"),
+            reprice_count=int(row.get("reprice_count") or 0),
         )
 
     @staticmethod

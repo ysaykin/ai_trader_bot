@@ -707,6 +707,96 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(res, "HOLD")
         self.assertEqual(strat.parameters["quantity"], 1)
 
+    def test_tradier_underlying_asset_type_avoids_index_prefix(self) -> None:
+        """Tradier quotes index tickers (SPX, XSP) as stocks, avoiding the invalid 'I:' prefix."""
+        iron_condor.Asset.AssetType.STOCK = "stock"
+        iron_condor.Asset.AssetType.INDEX = "index"
+        iron_condor.Asset.side_effect = lambda symbol, asset_type=None, **kwargs: SimpleNamespace(
+            symbol=symbol, asset_type=asset_type, **kwargs
+        )
+        try:
+            strat = iron_condor.SPXIronCondor()
+            strat.parameters.update(symbol="XSP")
+            strat.broker = SimpleNamespace(name="Tradier")
+            strat._hydrate_from_ledger = Mock()
+            strat.initialize()
+            self.assertEqual(strat._underlying.asset_type, "stock")
+
+            # Non-Tradier broker preserves INDEX type for indexes
+            strat_other = iron_condor.SPXIronCondor()
+            strat_other.parameters.update(symbol="XSP")
+            strat_other.broker = SimpleNamespace(name="Alpaca")
+            strat_other._hydrate_from_ledger = Mock()
+            with patch.dict(os.environ, {"TRADING_BROKER": "alpaca"}, clear=True):
+                strat_other.initialize()
+            self.assertEqual(strat_other._underlying.asset_type, "index")
+        finally:
+            iron_condor.Asset.side_effect = None
+
+    def test_position_ledger_schema_mismatch_resilience(self) -> None:
+        """PositionLedger dynamically handles legacy 8-column and migrated 15-column schemas."""
+        import sqlite3
+        from strategies.position_ledger import LedgerLeg, PositionLedger
+
+        # 1. Test against a legacy 8-column table (simulating pre-migration DB or partial rollout)
+        connection = sqlite3.connect(":memory:")
+        connection.executescript(
+            """
+            CREATE TABLE packages (
+                package_id TEXT PRIMARY KEY,
+                strategy_id TEXT NOT NULL,
+                intent TEXT NOT NULL,
+                state TEXT NOT NULL,
+                opening_cash_flow REAL,
+                closing_cash_flow REAL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE legs (
+                order_id TEXT PRIMARY KEY,
+                package_id TEXT NOT NULL,
+                asset_key TEXT NOT NULL,
+                requested_signed_quantity INTEGER NOT NULL,
+                filled_signed_quantity INTEGER NOT NULL DEFAULT 0,
+                fill_price REAL,
+                status TEXT NOT NULL
+            );
+            """
+        )
+        ledger = PositionLedger.__new__(PositionLedger)
+        ledger.path = ":memory:"
+        ledger._connection = connection
+        ledger._connection.row_factory = sqlite3.Row
+        ledger._lock = type("DummyLock", (), {"__enter__": lambda s: None, "__exit__": lambda s, *a: None})()
+
+        legs = [
+            LedgerLeg(order_id=f"leg-{i}", asset_key=f"k-{i}", requested_signed_quantity=1 if i % 2 == 1 else -1)
+            for i in range(1, 5)
+        ]
+        # Must not raise "table packages has 8 columns but 15 values were supplied"
+        ledger.record_submission("pkg-legacy-1", "strat-1", "open", legs, limit_price=1.25)
+        row = connection.execute("SELECT * FROM packages WHERE package_id = 'pkg-legacy-1'").fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["state"], "submitted")
+
+        # _basket_from_row safely populates defaults when new columns do not exist
+        basket = ledger._basket_from_row(row)
+        self.assertEqual(basket.package_id, "pkg-legacy-1")
+        self.assertIsNone(basket.broker_parent_id)
+        self.assertEqual(basket.reprice_count, 0)
+
+        # 2. Test against fully migrated 15-column table
+        ledger_full = PositionLedger(":memory:")
+        ledger_full.record_submission(
+            "pkg-full-1", "strat-1", "open", legs,
+            limit_price=2.50, broker_tag="TAG123", replacement_of="pkg-old", reprice_count=1,
+        )
+        basket_full = ledger_full.get_basket("pkg-full-1")
+        self.assertEqual(basket_full.limit_price, 2.50)
+        self.assertEqual(basket_full.broker_tag, "TAG123")
+        self.assertEqual(basket_full.replacement_of, "pkg-old")
+        self.assertEqual(basket_full.reprice_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
