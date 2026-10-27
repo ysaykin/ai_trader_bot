@@ -9,6 +9,7 @@ from ..styles.theme import (
     SURFACE_DARK,
     BORDER_COLOR,
     CYAN,
+    INDIGO,
     TEXT_MUTED,
     TEXT_PRIMARY,
 )
