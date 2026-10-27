@@ -2,13 +2,12 @@
 20-Variant Iron Condor Strategy Incubator
 ==========================================
 
-Defines a deterministic 20-variant parameter grid (`IC_V01` .. `IC_V20`) that
-explores the 0DTE/1DTE Iron Condor space across:
-  - Short-strike delta (`0.08`, `0.12`, `0.15`, `0.20`, `0.25`)
-  - Wing width (`2`, `3`, `5`, `10`, `15` points)
-  - Profit target (`25%`, `35%`, `50%`, `65%`)
-  - Stop-loss multiplier (`1.5x`, `2.0x`, `2.5x`, `3.0x`)
-  - Entry time window (`09:45`, `10:00`, `10:30`, `11:00`, `13:00`)
+Defines a deterministic 20-variant parameter grid (`IC_V01` .. `IC_V20`) across
+5 DTE tiers (0, 7, 14, 21, 30 DTE) with 4 setup variations per tier:
+  - Setup 1 (Conservative Far-OTM): Delta 0.10, Wing 2.0, PT 30%, SL 1.5x, Entry 10:00
+  - Setup 2 (Moderate Core Theta): Delta 0.12, Wing 3.0, PT 35%, SL 2.0x, Entry 10:15
+  - Setup 3 (Standard 15-Delta Benchmark): Delta 0.15, Wing 5.0, PT 50%, SL 2.0x, Entry 10:30
+  - Setup 4 (High-Yield 20-Delta): Delta 0.20, Wing 5.0, PT 50%, SL 2.5x, Entry 11:00
 
 All 20 strategies share a single `MarketDataHub` instance so option chain and
 quote lookups are deduplicated across the 5-minute execution tick, and each
@@ -30,39 +29,38 @@ from strategies.market_data_hub import MarketDataHub, get_shared_market_data_hub
 logger = logging.getLogger(__name__)
 
 
-# 20 distinct Iron Condor strategy configurations spanning conservative far-OTM
-# scalpers, balanced core theta collectors, wide-wing high-credit variants, and
-# afternoon low-decay variants.
+# 20 distinct Iron Condor strategy configurations spanning 5 DTE tiers
+# (0, 7, 14, 21, 30 DTE) with 4 setup variations per tier.
 INCUBATOR_GRID_20: list[dict[str, Any]] = [
-    # --- Tier 1: Ultra-Conservative Far-OTM (Delta 0.08 - 0.10) ---
-    {"strategy_name": "IC_V01_D08_W2_PT25_T0945", "short_delta": 0.08, "wing_width": 2.0,  "profit_target": 0.25, "stop_loss_mult": 1.5, "entry_time": "09:45", "dte": 0},
-    {"strategy_name": "IC_V02_D08_W3_PT35_T1000", "short_delta": 0.08, "wing_width": 3.0,  "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:00", "dte": 0},
-    {"strategy_name": "IC_V03_D10_W2_PT30_T1000", "short_delta": 0.10, "wing_width": 2.0,  "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 0},
-    {"strategy_name": "IC_V04_D10_W5_PT40_T1030", "short_delta": 0.10, "wing_width": 5.0,  "profit_target": 0.40, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 0},
+    # --- Tier 1: 0 DTE (Same-Day Expiration) ---
+    {"strategy_name": "IC_V01_0DTE_D10_W2_PT30_T1000", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 0},
+    {"strategy_name": "IC_V02_0DTE_D12_W3_PT35_T1015", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:15", "dte": 0},
+    {"strategy_name": "IC_V03_0DTE_D15_W5_PT50_T1030", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 0},
+    {"strategy_name": "IC_V04_0DTE_D20_W5_PT50_T1100", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 0},
 
-    # --- Tier 2: Moderate-Conservative (Delta 0.12) ---
-    {"strategy_name": "IC_V05_D12_W2_PT25_T0945", "short_delta": 0.12, "wing_width": 2.0,  "profit_target": 0.25, "stop_loss_mult": 1.5, "entry_time": "09:45", "dte": 0},
-    {"strategy_name": "IC_V06_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0,  "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:00", "dte": 0},
-    {"strategy_name": "IC_V07_D12_W5_PT50_T1030", "short_delta": 0.12, "wing_width": 5.0,  "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 0},
-    {"strategy_name": "IC_V08_D12_W5_PT35_T1100", "short_delta": 0.12, "wing_width": 5.0,  "profit_target": 0.35, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 0},
+    # --- Tier 2: 7 DTE (Weekly Swing) ---
+    {"strategy_name": "IC_V05_7DTE_D10_W2_PT30_T1000", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 7},
+    {"strategy_name": "IC_V06_7DTE_D12_W3_PT35_T1015", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:15", "dte": 7},
+    {"strategy_name": "IC_V07_7DTE_D15_W5_PT50_T1030", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 7},
+    {"strategy_name": "IC_V08_7DTE_D20_W5_PT50_T1100", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 7},
 
-    # --- Tier 3: Standard Core 15-Delta Benchmark Grid ---
-    {"strategy_name": "IC_V09_D15_W2_PT30_T0945", "short_delta": 0.15, "wing_width": 2.0,  "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "09:45", "dte": 0},
-    {"strategy_name": "IC_V10_D15_W2_PT50_T1000", "short_delta": 0.15, "wing_width": 2.0,  "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:00", "dte": 0},
-    {"strategy_name": "IC_V11_D15_W3_PT35_T1000", "short_delta": 0.15, "wing_width": 3.0,  "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:00", "dte": 0},
-    {"strategy_name": "IC_V12_D15_W5_PT50_T1030", "short_delta": 0.15, "wing_width": 5.0,  "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 0},
-    {"strategy_name": "IC_V13_D15_W10_PT40_T1100", "short_delta": 0.15, "wing_width": 10.0, "profit_target": 0.40, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 0},
-    {"strategy_name": "IC_V14_D15_W3_PT30_T1300", "short_delta": 0.15, "wing_width": 3.0,  "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "13:00", "dte": 0},
+    # --- Tier 3: 14 DTE (Bi-Weekly Swing) ---
+    {"strategy_name": "IC_V09_14DTE_D10_W2_PT30_T1000", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 14},
+    {"strategy_name": "IC_V10_14DTE_D12_W3_PT35_T1015", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:15", "dte": 14},
+    {"strategy_name": "IC_V11_14DTE_D15_W5_PT50_T1030", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 14},
+    {"strategy_name": "IC_V12_14DTE_D20_W5_PT50_T1100", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 14},
 
-    # --- Tier 4: Dynamic High-Theta 20-Delta Grid ---
-    {"strategy_name": "IC_V15_D20_W2_PT35_T1000", "short_delta": 0.20, "wing_width": 2.0,  "profit_target": 0.35, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 0},
-    {"strategy_name": "IC_V16_D20_W3_PT50_T1030", "short_delta": 0.20, "wing_width": 3.0,  "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 0},
-    {"strategy_name": "IC_V17_D20_W5_PT65_T1100", "short_delta": 0.20, "wing_width": 5.0,  "profit_target": 0.65, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 0},
-    {"strategy_name": "IC_V18_D20_W3_PT35_T1300", "short_delta": 0.20, "wing_width": 3.0,  "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "13:00", "dte": 0},
+    # --- Tier 4: 21 DTE (Three-Week Swing) ---
+    {"strategy_name": "IC_V13_21DTE_D10_W2_PT30_T1000", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 21},
+    {"strategy_name": "IC_V14_21DTE_D12_W3_PT35_T1015", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:15", "dte": 21},
+    {"strategy_name": "IC_V15_21DTE_D15_W5_PT50_T1030", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 21},
+    {"strategy_name": "IC_V16_21DTE_D20_W5_PT50_T1100", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 21},
 
-    # --- Tier 5: Aggressive / 1DTE Carry Comparison Grid ---
-    {"strategy_name": "IC_V19_D25_W5_PT50_T1030", "short_delta": 0.25, "wing_width": 5.0,  "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": "10:30", "dte": 0},
-    {"strategy_name": "IC_V20_D15_W5_PT50_1DTE",  "short_delta": 0.15, "wing_width": 5.0,  "profit_target": 0.50, "stop_loss_mult": 3.0, "entry_time": "10:30", "dte": 1},
+    # --- Tier 5: 30 DTE (Monthly Core) ---
+    {"strategy_name": "IC_V17_30DTE_D10_W2_PT30_T1000", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": "10:00", "dte": 30},
+    {"strategy_name": "IC_V18_30DTE_D12_W3_PT35_T1015", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": "10:15", "dte": 30},
+    {"strategy_name": "IC_V19_30DTE_D15_W5_PT50_T1030", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": "10:30", "dte": 30},
+    {"strategy_name": "IC_V20_30DTE_D20_W5_PT50_T1100", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": "11:00", "dte": 30},
 ]
 
 

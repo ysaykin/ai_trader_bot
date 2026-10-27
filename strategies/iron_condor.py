@@ -861,6 +861,28 @@ class SPXIronCondor(Strategy):
                 return False
         return True
 
+    def _is_expiring_today(self) -> bool:
+        """Check if any owned leg expires today or earlier."""
+        if not self._owned_legs:
+            return int(self.parameters.get("dte", 0)) == 0
+        today = self.get_datetime().date()
+        for asset, _ in self._owned_legs:
+            raw_exp = getattr(asset, "expiration", None)
+            if raw_exp is None:
+                continue
+            if isinstance(raw_exp, datetime):
+                exp_date = raw_exp.date()
+            elif isinstance(raw_exp, date):
+                exp_date = raw_exp
+            else:
+                try:
+                    exp_date = datetime.strptime(str(raw_exp)[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+            if exp_date <= today:
+                return True
+        return False
+
     def _asset_from_key(self, key: str) -> Asset:
         decoded = json.loads(key)
         return Asset(
@@ -1658,8 +1680,8 @@ class SPXIronCondor(Strategy):
                 if to_date(exp) >= target_date:
                     return exp
 
-            # Fallback: use the nearest available
-            return sorted_exps[0] if sorted_exps else None
+            # Fallback: use the latest available expiration closest to target_date
+            return sorted_exps[-1] if sorted_exps else None
 
         except Exception as e:
             logger.error("Error finding expiration: %s", e)
@@ -1740,10 +1762,15 @@ class SPXIronCondor(Strategy):
         """
         Safety net: close any remaining positions before market close.
         Especially important for 0DTE to avoid settlement issues.
+        Multi-day swing positions are carried overnight unless expiring today.
         """
-        if self._position_open:
-            logger.info("Market closing — closing all option positions")
+        dte = int(self.parameters.get("dte", 0))
+        should_close = (dte == 0) or self._is_expiring_today()
+        if self._position_open and should_close:
+            logger.info("Market closing — closing option positions expiring today (dte=%s)", dte)
             self._close_all_options()
+        elif self._position_open:
+            logger.info("Market closing — holding swing position overnight (dte=%s)", dte)
         for follower in getattr(self, "_attached_strategies", ()):
             try:
                 follower.before_market_closes()

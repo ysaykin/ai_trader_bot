@@ -4,7 +4,7 @@ import importlib.util
 import logging
 import os
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -796,6 +796,59 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(basket_full.broker_tag, "TAG123")
         self.assertEqual(basket_full.replacement_of, "pkg-old")
         self.assertEqual(basket_full.reprice_count, 1)
+
+    def test_swing_positions_held_overnight_unless_expiring(self) -> None:
+        """Swing positions (DTE > 0) are held overnight and only closed on their expiration day."""
+        today = date(2026, 10, 27)
+        strat = iron_condor.SPXIronCondor.__new__(iron_condor.SPXIronCondor)
+        strat.parameters = {"symbol": "XSP", "dte": 7}
+        strat.get_datetime = Mock(return_value=datetime(2026, 10, 27, 15, 55, tzinfo=timezone.utc))
+        strat._position_open = True
+        strat._attached_strategies = []
+        strat._close_all_options = Mock()
+
+        # 1. 7 DTE position expiring in the future (November 3) -> DO NOT close at market close
+        future_asset = SimpleNamespace(expiration=date(2026, 11, 3))
+        strat._owned_legs = [(future_asset, 1)]
+        self.assertFalse(strat._is_expiring_today())
+        strat.before_market_closes()
+        strat._close_all_options.assert_not_called()
+
+        # 2. Position expiring today (October 27) -> DO close before market close
+        today_asset = SimpleNamespace(expiration=today)
+        strat._owned_legs = [(today_asset, 1)]
+        self.assertTrue(strat._is_expiring_today())
+        strat.before_market_closes()
+        strat._close_all_options.assert_called_once()
+
+        # 3. 0 DTE position -> DO close before market close even without legs populated
+        strat._close_all_options.reset_mock()
+        strat.parameters["dte"] = 0
+        strat._owned_legs = []
+        self.assertTrue(strat._is_expiring_today())
+        strat.before_market_closes()
+        strat._close_all_options.assert_called_once()
+
+    def test_incubator_5_dte_tiers_configuration(self) -> None:
+        """INCUBATOR_GRID_20 covers 5 DTE tiers (0, 7, 14, 21, 30) with 4 setup variations each."""
+        self.assertEqual(len(incubator.INCUBATOR_GRID_20), 20)
+        expected_dtes = [0, 7, 14, 21, 30]
+        actual_dtes = sorted(list({variant["dte"] for variant in incubator.INCUBATOR_GRID_20}))
+        self.assertEqual(actual_dtes, expected_dtes)
+
+        for dte in expected_dtes:
+            tier_variants = [v for v in incubator.INCUBATOR_GRID_20 if v["dte"] == dte]
+            self.assertEqual(len(tier_variants), 4, f"DTE {dte} should have 4 setup variations")
+            deltas = [v["short_delta"] for v in tier_variants]
+            self.assertEqual(deltas, [0.10, 0.12, 0.15, 0.20])
+
+        # All strategy names must follow IC_V01..IC_V20 sequence
+        for idx, variant in enumerate(incubator.INCUBATOR_GRID_20, start=1):
+            prefix = f"IC_V{idx:02d}"
+            self.assertTrue(
+                variant["strategy_name"].startswith(prefix),
+                f"Variant {idx} name {variant['strategy_name']} must start with {prefix}",
+            )
 
 
 if __name__ == "__main__":
