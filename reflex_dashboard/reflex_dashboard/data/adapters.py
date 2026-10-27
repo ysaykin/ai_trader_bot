@@ -338,10 +338,15 @@ def get_incubator_data() -> dict[str, Any]:
         short_id = parts[0] + "_" + parts[1] if len(parts) > 1 else name
         is_neural = bool(spec.get("pure_neural_mode", False))
         is_testing = bool(spec.get("is_testing_variant", False))
+        struct = str(spec.get("structure", "iron_condor")).lower()
         if is_neural:
             short_id = f"IC_V22 (Neural Pure)"
         elif is_testing:
             short_id = f"IC_V21 ({spec.get('dte', 25)}DTE Test)"
+        elif struct == "bull_put":
+            short_id = f"IC_V23 (Bull Put {spec.get('dte', 7)}DTE)"
+        elif struct == "bear_call":
+            short_id = f"IC_V24 (Bear Call {spec.get('dte', 7)}DTE)"
 
         v_closed = [t for t in closed_all if t.get("strategy") == name or short_id in str(t.get("strategy")) or name.split("_")[0] in str(t.get("strategy"))]
         v_open = [t for t in open_all if t.get("strategy") == name or short_id in str(t.get("strategy")) or name.split("_")[0] in str(t.get("strategy"))]
@@ -408,6 +413,7 @@ def get_incubator_data() -> dict[str, Any]:
             "risk_cap": "$5,000",
             "is_neural": is_neural,
             "is_testing": is_testing,
+            "structure": struct,
         }
         all_rows.append(row)
         if len(v_closed) > 0 or len(v_open) > 0:
@@ -587,12 +593,15 @@ def get_config_settings() -> dict[str, str]:
         "testing_pt": env.get("TESTING_PT", "0.50"),
         "testing_sl": env.get("TESTING_SL", "2.0"),
         "testing_entry": env.get("TESTING_ENTRY_TIME", "10:30"),
+        "testing_structure": env.get("TESTING_STRUCTURE", "iron_condor"),
         # Pure Neural Network Managed Strategy
         "neural_enabled": env.get("NEURAL_STRATEGY_ENABLED", "true"),
         "neural_dte": env.get("NEURAL_STRATEGY_DTE", "7"),
         "neural_delta": env.get("NEURAL_STRATEGY_DELTA", "0.15"),
         "neural_wing": env.get("NEURAL_STRATEGY_WING", "5.0"),
         "neural_entry": env.get("NEURAL_STRATEGY_ENTRY_TIME", "10:00"),
+        # Standalone Vertical Spreads
+        "verticals_enabled": env.get("VERTICAL_STRATEGIES_ENABLED", "true"),
     }
 
 

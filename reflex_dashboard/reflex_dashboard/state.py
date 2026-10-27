@@ -146,6 +146,7 @@ class DashboardState(rx.State):
     cfg_testing_pt: str = "0.50"
     cfg_testing_sl: str = "2.0"
     cfg_testing_entry: str = "10:30"
+    cfg_testing_structure: str = "iron_condor"
 
     # Pure Neural Network Strategy Configuration
     cfg_neural_enabled: str = "true"
@@ -153,6 +154,9 @@ class DashboardState(rx.State):
     cfg_neural_delta: str = "0.15"
     cfg_neural_wing: str = "5.0"
     cfg_neural_entry: str = "10:00"
+
+    # Vertical Spread Strategy Configuration
+    cfg_verticals_enabled: str = "true"
 
     # Panic Liquidation Modal
     panic_modal_open: bool = False
@@ -283,11 +287,13 @@ class DashboardState(rx.State):
             self.cfg_testing_pt = cfg.get("testing_pt", "0.50")
             self.cfg_testing_sl = cfg.get("testing_sl", "2.0")
             self.cfg_testing_entry = cfg.get("testing_entry", "10:30")
+            self.cfg_testing_structure = cfg.get("testing_structure", "iron_condor")
             self.cfg_neural_enabled = cfg.get("neural_enabled", "true")
             self.cfg_neural_dte = cfg.get("neural_dte", "7")
             self.cfg_neural_delta = cfg.get("neural_delta", "0.15")
             self.cfg_neural_wing = cfg.get("neural_wing", "5.0")
             self.cfg_neural_entry = cfg.get("neural_entry", "10:00")
+            self.cfg_verticals_enabled = cfg.get("verticals_enabled", "true")
         except Exception as exc:
             import logging
             logging.getLogger("reflex_dashboard").warning(f"Error in load_all: {exc}")
@@ -388,6 +394,9 @@ class DashboardState(rx.State):
     def set_cfg_testing_entry(self, val: str):
         self.cfg_testing_entry = val
 
+    def set_cfg_testing_structure(self, val: str):
+        self.cfg_testing_structure = val
+
     def set_cfg_neural_enabled(self, val: str):
         self.cfg_neural_enabled = val
 
@@ -402,6 +411,9 @@ class DashboardState(rx.State):
 
     def set_cfg_neural_entry(self, val: str):
         self.cfg_neural_entry = val
+
+    def set_cfg_verticals_enabled(self, val: str):
+        self.cfg_verticals_enabled = val
 
     def set_tab(self, tab: str):
         self.current_tab = tab
@@ -446,11 +458,13 @@ class DashboardState(rx.State):
             "TESTING_PT": self.cfg_testing_pt,
             "TESTING_SL": self.cfg_testing_sl,
             "TESTING_ENTRY_TIME": self.cfg_testing_entry,
+            "TESTING_STRUCTURE": self.cfg_testing_structure,
             "NEURAL_STRATEGY_ENABLED": self.cfg_neural_enabled,
             "NEURAL_STRATEGY_DTE": self.cfg_neural_dte,
             "NEURAL_STRATEGY_DELTA": self.cfg_neural_delta,
             "NEURAL_STRATEGY_WING": self.cfg_neural_wing,
             "NEURAL_STRATEGY_ENTRY_TIME": self.cfg_neural_entry,
+            "VERTICAL_STRATEGIES_ENABLED": self.cfg_verticals_enabled,
         }
         if self.cfg_access_token:
             updates["TRADIER_ACCESS_TOKEN"] = self.cfg_access_token

@@ -1,6 +1,7 @@
 """Offline regressions for broker selection and iron condor position safety."""
 
 import importlib.util
+import json
 import logging
 import os
 import tempfile
@@ -951,6 +952,76 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertEqual(strat.parameters["short_delta"], 0.20)
         self.assertEqual(strat.parameters["wing_width"], 5.0)
         self.assertEqual(strat.parameters["stop_loss_mult"], 2.5)
+
+    def test_position_ledger_supports_2_leg_vertical_spread_packages(self) -> None:
+        """PositionLedger accepts 2-leg vertical spread submissions and calculates defined risk."""
+        ledger = iron_condor.PositionLedger(":memory:")
+        put_long_key = json.dumps({"symbol": "XSP", "expiration": "2026-11-03", "right": "put", "strike": 575.0})
+        put_short_key = json.dumps({"symbol": "XSP", "expiration": "2026-11-03", "right": "put", "strike": 580.0})
+        legs = [
+            iron_condor.LedgerLeg("order_long_p", put_long_key, 1),
+            iron_condor.LedgerLeg("order_short_p", put_short_key, -1),
+        ]
+        # Should record without raising ValueError
+        ledger.record_submission("pkg_bull_put", "STRAT_VERTICAL", "open", legs, limit_price=1.25)
+        baskets = ledger.open_baskets("STRAT_VERTICAL")
+        self.assertEqual(len(baskets), 1)
+        self.assertEqual(baskets[0].package_id, "pkg_bull_put")
+        self.assertEqual(len(baskets[0].legs), 2)
+
+        # Defined risk for $5 width 1-contract vertical spread = $5.00 * 100 = $500.00
+        risk = ledger.portfolio_defined_risk("STRAT_VERTICAL")
+        self.assertEqual(risk, 500.0)
+
+    def test_strategy_builds_and_submits_vertical_spread_legs(self) -> None:
+        """SPXIronCondor with structure='bull_put' submits 2 legs instead of 4."""
+        strat = iron_condor.SPXIronCondor()
+        strat.parameters = {
+            "strategy_name": "IC_V23_7DTE_BULL_PUT",
+            "symbol": "XSP",
+            "structure": "bull_put",
+            "quantity": 1,
+            "wing_width": 5.0,
+            "short_delta": 0.15,
+            "dte": 7,
+        }
+        strat.initialize()
+        self.assertEqual(strat.structure, "bull_put")
+
+        # Mock market data methods
+        strat.get_datetime = Mock(return_value=datetime(2026, 10, 27, 10, 30, tzinfo=timezone.utc))
+        strat._reconcile_broker_state = Mock(return_value=True)
+        strat._is_entry_window = Mock(return_value=True)
+        strat._check_allocation = Mock(return_value=True)
+        strat._find_expiration = Mock(return_value="2026-11-03")
+        strat._fetch_last_price = Mock(return_value=585.0)
+        strat._find_short_strikes = Mock(return_value=(575.0, 595.0))
+        strat._package_price = Mock(return_value=1.50)
+        submitted_legs = []
+
+        def fake_submit(legs, **kwargs):
+            nonlocal submitted_legs
+            submitted_legs = legs
+            return [Mock()]
+
+        strat._submit_package = Mock(side_effect=fake_submit)
+        strat._run_trading_iteration()
+
+        # Verify only 2 legs were submitted for the vertical spread
+        self.assertEqual(len(submitted_legs), 2)
+        quantities = [leg[1] for leg in submitted_legs]
+        self.assertIn(1, quantities)
+        self.assertIn(-1, quantities)
+
+    def test_incubator_specs_includes_vertical_spread_variants(self) -> None:
+        """Incubator includes IC_V23 (Bull Put) and IC_V24 (Bear Call) vertical spreads."""
+        specs = incubator.get_incubator_specs()
+        bull_put = next((s for s in specs if s.get("structure") == "bull_put"), None)
+        bear_call = next((s for s in specs if s.get("structure") == "bear_call"), None)
+        self.assertIsNotNone(bull_put, "Bull Put vertical spread should be in incubator specs")
+        self.assertIsNotNone(bear_call, "Bear Call vertical spread should be in incubator specs")
+        self.assertTrue(bull_put["strategy_name"].startswith("IC_V23"))
+        self.assertTrue(bear_call["strategy_name"].startswith("IC_V24"))
 
 
 if __name__ == "__main__":

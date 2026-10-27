@@ -191,11 +191,11 @@ class PositionLedger:
     ) -> None:
         """Atomically record a broker package before considering any leg owned."""
         normalized = tuple(self._coerce_leg(leg) for leg in legs)
-        if len(normalized) != 4:
-            raise ValueError("an iron-condor package must contain exactly four legs")
-        if len({leg.order_id for leg in normalized}) != 4:
+        if len(normalized) not in (2, 4):
+            raise ValueError("an option package must contain exactly two legs (vertical) or four legs (iron condor)")
+        if len({leg.order_id for leg in normalized}) != len(normalized):
             raise ValueError("package order identifiers must be unique")
-        if len({leg.asset_key for leg in normalized}) != 4:
+        if len({leg.asset_key for leg in normalized}) != len(normalized):
             raise ValueError("package assets must be unique")
         if not package_id or not strategy_id:
             raise ValueError("package_id and strategy_id are required")
@@ -606,7 +606,7 @@ class PositionLedger:
                         return None
                 opening_credit = self.active_opening_cash(owner) if len(groups) == 1 else 0.0
                 for legs in groups.values():
-                    basket_shape = self._condor_width_and_quantity(legs)
+                    basket_shape = self._package_width_and_quantity(legs)
                     if basket_shape is None:
                         return None
                     width, quantity = basket_shape
@@ -621,12 +621,41 @@ class PositionLedger:
                             )
                         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                             return None
-                    basket_shape = self._condor_width_and_quantity(pending_legs)
+                    basket_shape = self._package_width_and_quantity(pending_legs)
                     if basket_shape is None:
                         return None
                     width, quantity = basket_shape
                     total += max_defined_loss(width, quantity, 0.0)
         return total
+
+    @classmethod
+    def _package_width_and_quantity(
+        cls,
+        legs: list[tuple[dict[str, Any], int]],
+    ) -> tuple[float, int] | None:
+        if len(legs) == 4:
+            return cls._condor_width_and_quantity(legs)
+        if len(legs) == 2:
+            return cls._vertical_width_and_quantity(legs)
+        return None
+
+    @staticmethod
+    def _vertical_width_and_quantity(
+        legs: list[tuple[dict[str, Any], int]],
+    ) -> tuple[float, int] | None:
+        if len(legs) != 2:
+            return None
+        leg1, leg2 = legs[0], legs[1]
+        right1 = str(leg1[0].get("right", "")).lower()
+        right2 = str(leg2[0].get("right", "")).lower()
+        if ("put" in right1 and "put" not in right2) or ("call" in right1 and "call" not in right2):
+            return None
+        qty1 = int(leg1[1])
+        qty2 = int(leg2[1])
+        if abs(qty1) != abs(qty2) or abs(qty1) <= 0 or (qty1 > 0 and qty2 > 0) or (qty1 < 0 and qty2 < 0):
+            return None
+        width = abs(float(leg1[0]["strike"]) - float(leg2[0]["strike"]))
+        return (width, abs(qty1)) if width > 0 else None
 
     @staticmethod
     def _condor_width_and_quantity(

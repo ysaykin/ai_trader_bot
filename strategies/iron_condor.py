@@ -95,6 +95,7 @@ class SPXIronCondor(Strategy):
         "entry_time": "10:00",
         "max_allocation": 0.03,
         "max_position_risk": 5000.0,
+        "structure": "iron_condor",
     }
 
     def initialize(self) -> None:
@@ -123,6 +124,8 @@ class SPXIronCondor(Strategy):
         p["entry_time"] = _resolve_param("entry_time", "IC_ENTRY_TIME", str)
         p["max_allocation"] = _resolve_param("max_allocation", "IC_MAX_ALLOCATION", float)
         p["max_position_risk"] = _resolve_param("max_position_risk", "IC_MAX_POSITION_RISK", float)
+        p["structure"] = _resolve_param("structure", "IC_STRUCTURE", str) or "iron_condor"
+        self.structure = str(p["structure"]).lower()
         if "strategy_name" in p and p["strategy_name"]:
             try:
                 self.name = str(p["strategy_name"])
@@ -360,24 +363,48 @@ class SPXIronCondor(Strategy):
         long_call = self._make_option(long_call_strike, expiry, "call")
 
         qty = self.parameters["quantity"]
+        structure = getattr(self, "structure", "iron_condor").lower()
 
-        logger.info(
-            "ENTERING Iron Condor on %s (exp %s) @ price %.2f\n"
-            "  BUY  %d × P%.0f  |  SELL %d × P%.0f  |  "
-            "SELL %d × C%.0f  |  BUY  %d × C%.0f",
-            self.parameters["symbol"], expiry, underlying_price,
-            qty, long_put_strike, qty, short_put_strike,
-            qty, short_call_strike, qty, long_call_strike,
-        )
-
-        # --- SUBMIT ORDERS ---
-        try:
+        if structure in ("bull_put", "put_spread", "bull_put_vertical"):
+            legs = [
+                (long_put, int(qty)),
+                (short_put, -int(qty)),
+            ]
+            logger.info(
+                "ENTERING Bull Put Vertical Spread on %s (exp %s) @ price %.2f\n"
+                "  BUY  %d × P%.0f  |  SELL %d × P%.0f",
+                self.parameters["symbol"], expiry, underlying_price,
+                qty, long_put_strike, qty, short_put_strike,
+            )
+        elif structure in ("bear_call", "call_spread", "bear_call_vertical"):
+            legs = [
+                (short_call, -int(qty)),
+                (long_call, int(qty)),
+            ]
+            logger.info(
+                "ENTERING Bear Call Vertical Spread on %s (exp %s) @ price %.2f\n"
+                "  SELL %d × C%.0f  |  BUY  %d × C%.0f",
+                self.parameters["symbol"], expiry, underlying_price,
+                qty, short_call_strike, qty, long_call_strike,
+            )
+        else:
             legs = [
                 (long_put, int(qty)),
                 (short_put, -int(qty)),
                 (short_call, -int(qty)),
                 (long_call, int(qty)),
             ]
+            logger.info(
+                "ENTERING Iron Condor on %s (exp %s) @ price %.2f\n"
+                "  BUY  %d × P%.0f  |  SELL %d × P%.0f  |  "
+                "SELL %d × C%.0f  |  BUY  %d × C%.0f",
+                self.parameters["symbol"], expiry, underlying_price,
+                qty, long_put_strike, qty, short_put_strike,
+                qty, short_call_strike, qty, long_call_strike,
+            )
+
+        # --- SUBMIT ORDERS ---
+        try:
             package_price = self._package_price(legs, order_type="credit")
             if package_price is None or package_price <= 0:
                 logger.warning("Complete bid/ask quotes are required before entry submission.")
@@ -391,7 +418,7 @@ class SPXIronCondor(Strategy):
             self._last_pnl = 0.0
             self._entry_orders.extend(orders)
             self._position_open = True
-            logger.info("Iron Condor package submitted at a %.2f credit limit.", package_price)
+            logger.info("%s package submitted at a %.2f credit limit.", structure.upper(), package_price)
             self._publish_snapshot(pnl=0.0, status="SUBMITTED")
 
         except Exception as e:
@@ -664,7 +691,7 @@ class SPXIronCondor(Strategy):
             return "FLATTEN_NOW"
 
         owned_legs = list(getattr(self, "_owned_legs", []))
-        if len(owned_legs) != 4:
+        if len(owned_legs) not in (2, 4):
             self._last_action = "HOLD"
             return "HOLD"
         if any(
@@ -743,6 +770,9 @@ class SPXIronCondor(Strategy):
             self.parameters["wing_width"] = float(target_spec.get("wing_width", self.parameters["wing_width"]))
             self.parameters["dte"] = int(target_spec.get("dte", self.parameters["dte"]))
             self.parameters["stop_loss_mult"] = float(target_spec.get("stop_loss_mult", self.parameters["stop_loss_mult"]))
+            if "structure" in target_spec:
+                self.structure = str(target_spec["structure"]).lower()
+                self.parameters["structure"] = self.structure
             if "entry_time" in target_spec:
                 try:
                     h, m = map(int, str(target_spec["entry_time"]).split(":"))
@@ -1185,8 +1215,8 @@ class SPXIronCondor(Strategy):
     ) -> list:
         if not self._supports_atomic_multileg():
             raise RuntimeError("broker does not have a verified atomic multi-leg adapter")
-        if len(legs) != 4 or len({abs(quantity) for _, quantity in legs}) != 1:
-            raise ValueError("an atomic iron-condor package requires four balanced legs")
+        if len(legs) not in (2, 4) or len({abs(quantity) for _, quantity in legs}) != 1:
+            raise ValueError("an atomic package requires 2 or 4 balanced legs with matching quantity")
         package_id = uuid.uuid4().hex
         broker_tag = f"IC_{package_id[:20]}"
         owner = self._strategy_id()

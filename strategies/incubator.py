@@ -87,6 +87,7 @@ def get_testing_variant_spec() -> dict[str, Any]:
     except ValueError:
         sl = 2.0
     entry_time = os.getenv("TESTING_ENTRY_TIME", "10:30").strip() or "10:30"
+    structure = os.getenv("TESTING_STRUCTURE", "iron_condor").strip().lower()
     name = os.getenv(
         "TESTING_STRATEGY_NAME",
         f"IC_V21_{dte}DTE_D{int(delta*100):02d}_W{int(wing)}_PT{int(pt*100)}_T{entry_time.replace(':', '')}",
@@ -99,8 +100,35 @@ def get_testing_variant_spec() -> dict[str, Any]:
         "stop_loss_mult": sl,
         "entry_time": entry_time,
         "dte": dte,
+        "structure": structure,
         "is_testing_variant": True,
     }
+
+
+def get_vertical_specs() -> list[dict[str, Any]]:
+    """Return specifications for vertical spread test variants (Bull Put & Bear Call)."""
+    return [
+        {
+            "strategy_name": "IC_V23_7DTE_BULL_PUT_D15_W5",
+            "short_delta": 0.15,
+            "wing_width": 5.0,
+            "profit_target": 0.50,
+            "stop_loss_mult": 2.0,
+            "entry_time": "10:30",
+            "dte": 7,
+            "structure": "bull_put",
+        },
+        {
+            "strategy_name": "IC_V24_7DTE_BEAR_CALL_D15_W5",
+            "short_delta": 0.15,
+            "wing_width": 5.0,
+            "profit_target": 0.50,
+            "stop_loss_mult": 2.0,
+            "entry_time": "10:30",
+            "dte": 7,
+            "structure": "bear_call",
+        },
+    ]
 
 
 def get_neural_pure_spec() -> dict[str, Any]:
@@ -135,14 +163,20 @@ def get_incubator_specs(
     limit: int | None = None,
     include_testing: bool = True,
     include_neural: bool = True,
+    include_verticals: bool = True,
 ) -> list[dict[str, Any]]:
     """Return incubator parameter specifications including 20 benchmark variants,
-    the 25 DTE testing variant, and the purely neural network managed strategy."""
+    the 25 DTE testing variant, the pure neural strategy, and standalone vertical spreads."""
     specs = [dict(spec) for spec in INCUBATOR_GRID_20]
     if include_testing:
         specs.append(get_testing_variant_spec())
     if include_neural and os.getenv("NEURAL_STRATEGY_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
         specs.append(get_neural_pure_spec())
+    if include_verticals and os.getenv("VERTICAL_STRATEGIES_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
+        specs.extend(get_vertical_specs())
+    if limit is not None:
+        return specs[: max(0, int(limit))]
+    return specs
     if limit is not None:
         return specs[: max(0, int(limit))]
     return specs
@@ -257,6 +291,7 @@ def build_strategy_variant(
     strategy._market_data_hub = hub
     strategy.pure_neural_mode = bool(spec.get("pure_neural_mode", False))
     strategy.is_testing_variant = bool(spec.get("is_testing_variant", False))
+    strategy.structure = spec.get("structure", "iron_condor")
     if position_ledger is not None:
         strategy._position_ledger = position_ledger
     return strategy

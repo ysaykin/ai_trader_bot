@@ -259,6 +259,38 @@ def config_view() -> rx.Component:
                     align="start",
                     width="100%",
                 ),
+                # Testing Option Structure (Iron Condor vs Vertical Spreads)
+                rx.vstack(
+                    rx.text("Option Structure", size="2", weight="bold"),
+                    rx.select(
+                        ["iron_condor", "bull_put", "bear_call"],
+                        value=DashboardState.cfg_testing_structure,
+                        on_change=DashboardState.set_cfg_testing_structure,
+                        color_scheme="amber",
+                        size="2",
+                        width="100%",
+                    ),
+                    rx.text("Trade 4-leg condor, 2-leg bull put, or 2-leg bear call", size="1", color=TEXT_MUTED),
+                    spacing="1",
+                    align="start",
+                    width="100%",
+                ),
+                # Standalone Verticals Grid Toggle
+                rx.vstack(
+                    rx.text("Verticals Grid Inclusion", size="2", weight="bold"),
+                    rx.select(
+                        ["true", "false"],
+                        value=DashboardState.cfg_verticals_enabled,
+                        on_change=DashboardState.set_cfg_verticals_enabled,
+                        color_scheme="cyan",
+                        size="2",
+                        width="100%",
+                    ),
+                    rx.text("Include IC_V23 & IC_V24 standalone verticals in incubator", size="1", color=TEXT_MUTED),
+                    spacing="1",
+                    align="start",
+                    width="100%",
+                ),
                 columns={"initial": "1", "sm": "2", "md": "3"},
                 spacing="4",
                 width="100%",
