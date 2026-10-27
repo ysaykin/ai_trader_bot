@@ -70,17 +70,20 @@ def get_broker() -> Broker:
     # Prioritize an explicit broker selection; otherwise infer from credentials.
     if broker_type == "tradier" or (not broker_type and access_token):
         account_number = os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT")
-        if not access_token or access_token.startswith("your_") or not account_number:
+        token_str = (access_token or "").strip()
+        account_str = (account_number or "").strip()
+        if not token_str or token_str.startswith("your_") or not account_str or account_str.startswith("your_"):
             raise RuntimeError(
                 "Tradier requires TRADIER_ACCESS_TOKEN and TRADIER_ACCOUNT_NUMBER "
                 "(or TRADIER_API_KEY and TRADIER_ACCOUNT)."
             )
         from lumibot.brokers import Tradier
 
+        is_paper = _tradier_paper()
         tradier_config = {
-            "ACCESS_TOKEN": access_token,
-            "ACCOUNT_NUMBER": account_number,
-            "PAPER": _tradier_paper(),
+            "ACCESS_TOKEN": token_str,
+            "ACCOUNT_NUMBER": account_str,
+            "PAPER": is_paper,
         }
         logger.info(
             "Connecting to Tradier (account=%s, paper=%s)...",
@@ -129,7 +132,9 @@ def validate_runtime_configuration() -> None:
             f"Unsupported DATA_SOURCE: {data_source}. This runner supports Tradier data only."
         )
     if broker == "tradier":
-        if not os.getenv("TRADIER_ACCESS_TOKEN") or not os.getenv("TRADIER_ACCOUNT_NUMBER"):
+        access_token = (os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY") or "").strip()
+        account_number = (os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT") or "").strip()
+        if not access_token or access_token.startswith("your_") or not account_number or account_number.startswith("your_"):
             raise RuntimeError(
                 "TRADING_BROKER=tradier requires TRADIER_ACCESS_TOKEN and "
                 "TRADIER_ACCOUNT_NUMBER."

@@ -234,6 +234,15 @@ class SPXIronCondor(Strategy):
                 except Exception as err:
                     logger.error("Error in attached strategy %s iteration: %s", getattr(follower, "name", follower), err)
 
+    @property
+    def on_trading_iteration_count(self) -> int:
+        """Expose iteration count for lifecycle telemetry and backward compatibility."""
+        return int(getattr(self, "_iteration_count", 0))
+
+    @on_trading_iteration_count.setter
+    def on_trading_iteration_count(self, value: int) -> None:
+        self._iteration_count = int(value)
+
     def _record_trajectory(self, action: str, *, session_end: bool = False) -> None:
         """Keep telemetry failures independent of position management."""
         collector = getattr(self, "_trajectory_logger", None)
@@ -411,9 +420,24 @@ class SPXIronCondor(Strategy):
             return
 
         if not self._entry_credit_cash or self._entry_credit_cash <= 0:
-            logger.warning("Filled opening credit is unavailable; retaining contracts without P&L exits.")
-            self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
-            return
+            # Fallback: recover credit baseline from submitted package limit price
+            latest_open = self._position_ledger.latest_basket(self._strategy_id(), {"open", "add"})
+            if latest_open is not None and latest_open.limit_price and latest_open.limit_price > 0:
+                contract_qty = max((abs(int(q)) for _, q in self._owned_legs), default=1)
+                self._entry_credit_cash = float(latest_open.limit_price) * 100.0 * contract_qty
+                self._entry_credit = float(latest_open.limit_price)
+                logger.info(
+                    "Restored entry credit baseline from ledger limit price: $%.2f ($%.2f cash)",
+                    self._entry_credit, self._entry_credit_cash,
+                )
+            else:
+                logger.warning(
+                    "Filled opening credit is unavailable; retaining contracts without P&L exits."
+                )
+                self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
+                # CRITICAL: Do NOT set self._position_open = False or clear _owned_legs.
+                # Open positions remain active and will be caught by EOD close.
+                return
 
         marked_legs = []
         for asset, signed_quantity in self._owned_legs:

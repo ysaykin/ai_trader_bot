@@ -128,6 +128,11 @@ class BrokerSelectionTests(unittest.TestCase):
         }, clear=True), self.assertRaisesRegex(RuntimeError, "TRADIER_ACCESS_TOKEN"):
             entrypoint.validate_runtime_configuration()
         with patch.dict(os.environ, {
+            "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true",
+            "TRADIER_ACCESS_TOKEN": "your_token", "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
+        }, clear=True), self.assertRaisesRegex(RuntimeError, "TRADIER_ACCESS_TOKEN"):
+            entrypoint.validate_runtime_configuration()
+        with patch.dict(os.environ, {
             "TRADING_BROKER": "tradier", "TRADIER_PAPER": "maybe",
             "TRADIER_ACCESS_TOKEN": "token", "TRADIER_ACCOUNT_NUMBER": "VA-TEST",
         }, clear=True), self.assertRaises(RuntimeError):

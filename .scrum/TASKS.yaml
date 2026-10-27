@@ -82,7 +82,7 @@ tasks:
   # --- Pillar 5: Self-Improving Bot Loop (Continual Learning & Shadow Promotion Gate) ---
   - id: self-improving-continual-learner
     title: "Implement daily post-market continual learning pipeline with Purged Walk-Forward CV and Champion/Challenger shadow promotion gate"
-    status: planned
+    status: pending
     owner: antigravity
     deliverables:
       - ml/continual_learner.py
@@ -90,6 +90,16 @@ tasks:
       - dashboard/app.py
 
   # --- Follow-Up Tasks & Edge-Case Defects ---
+  - id: broker-config-and-ledger-credit-recovery
+    title: "Harden Tradier configuration binding, defensive credit recovery from limit price, partial-fill cash flow tracking, and attribute compatibility"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - main.py
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - tests/test_regressions.py
+      - tests/test_strike_selection_and_pnl.py
   - id: neural-policy-training-and-live-adapter
     title: "Implement offline trajectory trainer, live inference adapter, and robust state serialization for MultiHeadPolicyNetwork with isolated ledger tracking"
     status: completed

@@ -543,7 +543,7 @@ class PositionLedger:
         with self._lock:
             rows = self._connection.execute(
                 """SELECT * FROM packages WHERE strategy_id = ?
-                   AND intent IN ('open','add') AND state = 'open'
+                   AND intent IN ('open','add') AND state IN ('open', 'partial')
                    AND opening_cash_flow IS NOT NULL""",
                 (strategy_id,),
             ).fetchall()
