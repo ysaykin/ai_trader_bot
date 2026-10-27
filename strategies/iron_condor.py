@@ -129,6 +129,12 @@ class SPXIronCondor(Strategy):
             except AttributeError:
                 self._name = str(p["strategy_name"])
         self._market_data_hub = p.get("market_data_hub", getattr(self, "_market_data_hub", None))
+        self.pure_neural_mode = bool(
+            p.get("pure_neural_mode", getattr(self, "pure_neural_mode", False))
+        )
+        self.is_testing_variant = bool(
+            p.get("is_testing_variant", getattr(self, "is_testing_variant", False))
+        )
 
         # Parse entry time
         h, m = map(int, p["entry_time"].split(":"))

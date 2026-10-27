@@ -1,0 +1,166 @@
+/* Dark OLED Quantitative Trading Terminal Stylesheet */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+:root {
+  --terminal-bg: #080A10;
+  --terminal-surface: #10141E;
+  --terminal-surface-hover: #181E2E;
+  --terminal-border: #1F273D;
+  --terminal-cyan: #00D4B2;
+  --terminal-green: #10B981;
+  --terminal-red: #EF4444;
+  --terminal-amber: #F59E0B;
+  --terminal-indigo: #6366F1;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-sans: 'Inter', sans-serif;
+}
+
+body {
+  background-color: var(--terminal-bg) !important;
+  color: #F8FAFC !important;
+  font-family: var(--font-sans) !important;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+/* Tabular figures for numbers, currency, timestamps, and strikes */
+.tabular-nums, .font-mono {
+  font-family: var(--font-mono) !important;
+  font-variant-numeric: tabular-nums lining-nums !important;
+}
+
+/* Prevent text clipping and letter-by-letter wrapping in data cells */
+.nowrap, .no-wrap {
+  white-space: nowrap !important;
+}
+
+/* Horizontal scroll container for tables and tab bars on mobile */
+.table-responsive-container {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-radius: 6px;
+}
+
+.tabs-scroll-list {
+  display: flex !important;
+  overflow-x: auto !important;
+  -webkit-overflow-scrolling: touch;
+  white-space: nowrap !important;
+  scrollbar-width: none !important;
+  padding-bottom: 4px;
+}
+
+.tabs-scroll-list::-webkit-scrollbar {
+  display: none !important;
+}
+
+/* Pulsing Status Dot */
+.pulse-cyan {
+  width: 10px;
+  height: 10px;
+  min-width: 10px;
+  border-radius: 50%;
+  background-color: var(--terminal-cyan);
+  box-shadow: 0 0 8px var(--terminal-cyan);
+  animation: pulse-glow-cyan 2s infinite ease-in-out;
+}
+
+.pulse-green {
+  width: 10px;
+  height: 10px;
+  min-width: 10px;
+  border-radius: 50%;
+  background-color: var(--terminal-green);
+  box-shadow: 0 0 8px var(--terminal-green);
+  animation: pulse-glow-green 2s infinite ease-in-out;
+}
+
+.pulse-amber {
+  width: 10px;
+  height: 10px;
+  min-width: 10px;
+  border-radius: 50%;
+  background-color: var(--terminal-amber);
+  box-shadow: 0 0 8px var(--terminal-amber);
+  animation: pulse-glow-amber 2s infinite ease-in-out;
+}
+
+@keyframes pulse-glow-cyan {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 212, 178, 0.7); }
+  70% { transform: scale(1.05); box-shadow: 0 0 0 6px rgba(0, 212, 178, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(0, 212, 178, 0); }
+}
+
+@keyframes pulse-glow-green {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+  70% { transform: scale(1.05); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+}
+
+@keyframes pulse-glow-amber {
+  0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.7); }
+  70% { transform: scale(1.05); box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+  100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+
+/* Custom terminal scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #080A10;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1F273D;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #00D4B2;
+}
+
+/* Terminal log console */
+.terminal-console {
+  font-family: var(--font-mono);
+  background-color: #06080C;
+  border: 1px solid var(--terminal-border);
+  border-radius: 6px;
+  padding: 12px;
+  line-height: 1.5;
+  color: #E2E8F0;
+  overflow-y: auto;
+}
+
+/* High density table styles */
+.terminal-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.terminal-table th {
+  background-color: #0C101A;
+  color: #94A3B8;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--terminal-border);
+  white-space: nowrap;
+}
+
+.terminal-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(31, 39, 61, 0.5);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.terminal-table tr:hover {
+  background-color: var(--terminal-surface-hover);
+}

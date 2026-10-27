@@ -64,9 +64,85 @@ INCUBATOR_GRID_20: list[dict[str, Any]] = [
 ]
 
 
-def get_incubator_specs(limit: int | None = None) -> list[dict[str, Any]]:
-    """Return a copy of the 20-strategy incubator parameter specifications."""
+def get_testing_variant_spec() -> dict[str, Any]:
+    """Return spec for the experimental testing variant (25 DTE default, easily customizable)."""
+    try:
+        dte = int(os.getenv("TESTING_DTE", "25").strip())
+    except ValueError:
+        dte = 25
+    try:
+        delta = float(os.getenv("TESTING_DELTA", "0.15").strip())
+    except ValueError:
+        delta = 0.15
+    try:
+        wing = float(os.getenv("TESTING_WING", "5.0").strip())
+    except ValueError:
+        wing = 5.0
+    try:
+        pt = float(os.getenv("TESTING_PT", "0.50").strip())
+    except ValueError:
+        pt = 0.50
+    try:
+        sl = float(os.getenv("TESTING_SL", "2.0").strip())
+    except ValueError:
+        sl = 2.0
+    entry_time = os.getenv("TESTING_ENTRY_TIME", "10:30").strip() or "10:30"
+    name = os.getenv(
+        "TESTING_STRATEGY_NAME",
+        f"IC_V21_{dte}DTE_D{int(delta*100):02d}_W{int(wing)}_PT{int(pt*100)}_T{entry_time.replace(':', '')}",
+    )
+    return {
+        "strategy_name": name,
+        "short_delta": delta,
+        "wing_width": wing,
+        "profit_target": pt,
+        "stop_loss_mult": sl,
+        "entry_time": entry_time,
+        "dte": dte,
+        "is_testing_variant": True,
+    }
+
+
+def get_neural_pure_spec() -> dict[str, Any]:
+    """Return spec for the purely neural network managed strategy."""
+    try:
+        dte = int(os.getenv("NEURAL_STRATEGY_DTE", "7").strip())
+    except ValueError:
+        dte = 7
+    try:
+        delta = float(os.getenv("NEURAL_STRATEGY_DELTA", "0.15").strip())
+    except ValueError:
+        delta = 0.15
+    try:
+        wing = float(os.getenv("NEURAL_STRATEGY_WING", "5.0").strip())
+    except ValueError:
+        wing = 5.0
+    entry_time = os.getenv("NEURAL_STRATEGY_ENTRY_TIME", "10:00").strip() or "10:00"
+    name = os.getenv("NEURAL_STRATEGY_NAME", f"IC_V22_NEURAL_PURE_{dte}DTE").strip() or "IC_V22_NEURAL_PURE"
+    return {
+        "strategy_name": name,
+        "short_delta": delta,
+        "wing_width": wing,
+        "profit_target": 0.50,  # dynamic baseline, actively governed by policy net
+        "stop_loss_mult": 2.0,
+        "entry_time": entry_time,
+        "dte": dte,
+        "pure_neural_mode": True,
+    }
+
+
+def get_incubator_specs(
+    limit: int | None = None,
+    include_testing: bool = True,
+    include_neural: bool = True,
+) -> list[dict[str, Any]]:
+    """Return incubator parameter specifications including 20 benchmark variants,
+    the 25 DTE testing variant, and the purely neural network managed strategy."""
     specs = [dict(spec) for spec in INCUBATOR_GRID_20]
+    if include_testing:
+        specs.append(get_testing_variant_spec())
+    if include_neural and os.getenv("NEURAL_STRATEGY_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
+        specs.append(get_neural_pure_spec())
     if limit is not None:
         return specs[: max(0, int(limit))]
     return specs
@@ -179,6 +255,8 @@ def build_strategy_variant(
         strategy.__dict__["parameters"] = dict(merged_params)
     strategy._variant_overrides = variant_overrides
     strategy._market_data_hub = hub
+    strategy.pure_neural_mode = bool(spec.get("pure_neural_mode", False))
+    strategy.is_testing_variant = bool(spec.get("is_testing_variant", False))
     if position_ledger is not None:
         strategy._position_ledger = position_ledger
     return strategy

@@ -206,14 +206,32 @@ def build_strategies_for_mode(
         strategies = [strategy]
 
     controller = None
+    has_neural_strategy = any(
+        getattr(strategy, "pure_neural_mode", False)
+        or getattr(strategy, "parameters", {}).get("pure_neural_mode", False)
+        for strategy in strategies
+    )
+    model_path = Path(os.getenv("ML_MODEL_PATH", "logs/models/policy.json"))
     if _env_bool("ML_POLICY_ENABLED", default=False):
         from ml.inference import LivePolicyController
 
         controller = LivePolicyController(
-            Path(os.getenv("ML_MODEL_PATH", "logs/models/policy.json")),
+            model_path,
             {strategy.name: strategy for strategy in strategies},
             expected_sequence_length=_configured_sequence_length(),
         )
+    elif has_neural_strategy and model_path.is_file():
+        try:
+            from ml.inference import LivePolicyController
+
+            controller = LivePolicyController(
+                model_path,
+                {strategy.name: strategy for strategy in strategies},
+                expected_sequence_length=_configured_sequence_length(),
+            )
+            logger.info("Attached LivePolicyController to neural-managed strategy")
+        except Exception as exc:
+            logger.warning("Could not initialize LivePolicyController for neural strategy: %s", exc)
     if os.getenv("TRAJECTORY_LOGGING_ENABLED", "true").strip().lower() in ("true", "1", "yes"):
         from trade_logger import TrajectoryLogger
 

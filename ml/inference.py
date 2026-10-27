@@ -57,7 +57,13 @@ class LivePolicyController:
         self.strategies = dict(strategies or {})
         unknown = set(self.strategies) - set(names)
         if unknown:
-            raise ValueError(f"model does not define configured strategies: {sorted(unknown)}")
+            import logging
+            logging.getLogger("ml.inference").info(
+                "Model defines %d strategies; %d additional strategies %s will receive neural policy broadcasts",
+                len(names),
+                len(unknown),
+                sorted(unknown),
+            )
         self._sequence: deque[tuple[float, ...]] = deque(maxlen=self.sequence_length)
         self._session: str | None = None
         self.last_recommendation: PolicyRecommendation | None = None
@@ -87,6 +93,13 @@ class LivePolicyController:
                 recommendation.action,
                 recommendation.profit_target,
             )
+        # Always route neural actions & dynamic profit targets directly to pure neural managed strategies
+        for s in self.strategies.values():
+            if getattr(s, "pure_neural_mode", False) or getattr(s, "parameters", {}).get("pure_neural_mode", False):
+                s._queued_policy_action = (
+                    recommendation.action,
+                    recommendation.profit_target,
+                )
         return recommendation
 
     @staticmethod

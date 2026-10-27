@@ -504,7 +504,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
 
     def test_incubator_defines_20_distinct_strategy_variants(self) -> None:
         hub = market_data_hub.MarketDataHub(ttl_seconds=240)
-        strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub)
+        strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
         self.assertEqual(len(strategies), 20)
         names = {s.name for s in strategies}
         self.assertEqual(len(names), 20)
@@ -519,7 +519,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
 
     def test_market_data_hub_deduplicates_chains_and_prices_across_20_strategies(self) -> None:
         hub = market_data_hub.MarketDataHub(ttl_seconds=240)
-        strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub)
+        strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
         fixed_dt = datetime(2026, 10, 26, 14, 0, tzinfo=timezone.utc)
         chain_call_count = 0
         price_call_count = 0
@@ -849,6 +849,55 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
                 variant["strategy_name"].startswith(prefix),
                 f"Variant {idx} name {variant['strategy_name']} must start with {prefix}",
             )
+
+    def test_incubator_extended_with_25_dte_testing_and_pure_neural_variants(self) -> None:
+        """Incubator specs include 20 benchmarks + 25 DTE testing variant + pure neural strategy."""
+        specs = incubator.get_incubator_specs()
+        self.assertGreaterEqual(len(specs), 22)
+        testing = next((s for s in specs if s.get("is_testing_variant")), None)
+        self.assertIsNotNone(testing, "Testing variant should be present in incubator specs")
+        self.assertEqual(testing["dte"], 25)
+        self.assertTrue(testing["strategy_name"].startswith("IC_V21"))
+
+        neural = next((s for s in specs if s.get("pure_neural_mode")), None)
+        self.assertIsNotNone(neural, "Pure neural strategy should be present in incubator specs")
+        self.assertTrue(neural["strategy_name"].startswith("IC_V22"))
+
+    def test_testing_variant_env_overrides(self) -> None:
+        """Testing variant parameters can be easily updated via env/UI."""
+        with patch.dict(os.environ, {
+            "TESTING_DTE": "45",
+            "TESTING_DELTA": "0.18",
+            "TESTING_WING": "10.0",
+            "TESTING_PT": "0.40",
+            "TESTING_SL": "2.5",
+            "TESTING_ENTRY_TIME": "11:15",
+        }, clear=False):
+            spec = incubator.get_testing_variant_spec()
+            self.assertEqual(spec["dte"], 45)
+            self.assertEqual(spec["short_delta"], 0.18)
+            self.assertEqual(spec["wing_width"], 10.0)
+            self.assertEqual(spec["profit_target"], 0.40)
+            self.assertEqual(spec["stop_loss_mult"], 2.5)
+            self.assertEqual(spec["entry_time"], "11:15")
+
+    def test_pure_neural_strategy_management_and_routing(self) -> None:
+        """Pure neural strategy receives dynamic profit targets and policy actions."""
+        strat = iron_condor.SPXIronCondor()
+        strat.parameters = {
+            "strategy_name": "IC_V22_NEURAL_PURE",
+            "pure_neural_mode": True,
+            "profit_target": 0.50,
+            "quantity": 1,
+            "wing_width": 5.0,
+        }
+        strat.initialize()
+        self.assertTrue(strat.pure_neural_mode)
+
+        # Policy dynamic profit target update
+        action = strat.apply_policy_action("ADJUST_PROFIT_TARGET", dynamic_profit_target=0.42)
+        self.assertEqual(action, "ADJUST_PROFIT_TARGET")
+        self.assertAlmostEqual(strat.parameters["profit_target"], 0.42)
 
 
 if __name__ == "__main__":

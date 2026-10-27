@@ -15,15 +15,21 @@ services:
   lumibot-dashboard:
     build:
       context: .
-      dockerfile: Dockerfile.dashboard
-    image: lumibot-lumibot-dashboard:latest
+      dockerfile: Dockerfile.reflex
+    image: lumibot-lumibot-reflex-dashboard:latest
     container_name: lumibot-dashboard
     restart: unless-stopped
     ports:
-      - "8501:8501"
+      - "3000:3000"
+      - "8005:8000"
+      - "8501:3000"
     env_file: .env
+    environment:
+      - REFLEX_DIR=/tmp/reflex
+      - REFLEX_USE_NPM=true
     volumes:
-      - ./dashboard:/app/dashboard
+      - ./reflex_dashboard:/app/reflex_dashboard
+      - ./dashboard:/app/dashboard:ro
       - ./strategies:/app/strategies:ro
       - ./ml:/app/ml:ro
       - ./trade_logger.py:/app/trade_logger.py:ro

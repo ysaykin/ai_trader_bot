@@ -16,7 +16,7 @@ This document is the **single source of truth** for all user-facing features sup
 | **ENG-06** | Automated Profit Target | Strategy Execution | ✅ Active | Locks in gains (e.g. 30% or 50% credit) | Target P&L Line & Execution Alert |
 | **ENG-07** | Automated Stop Loss Multiplier | Strategy Execution | ✅ Active | Caps losses (e.g. 1.5x or 2.0x credit) | Stop Level Indicator & Panic Liquidation |
 | **ENG-08** | EOD Auto-Close Safety Net | Strategy Execution | ✅ Active | Avoids cash-settlement / pin risk | Market Close Countdown & Auto-Exit Badge |
-| **RSK-01** | $5,000 Global Open Position Cap | Risk Management | ✅ Active | Absolute portfolio drawdown protection | Global Exposure Gauge (Progress Bar/Dial) |
+| **RSK-01** | $5,000 Per-Strategy Open Position Cap | Risk Management | ✅ Active | Absolute drawdown protection per single strategy | Strategy Exposure Gauge (Progress Bar/Dial) |
 | **RSK-02** | Tiered Single-Trade Sizing (30% $\to$ 5%) | Risk Management | ✅ Active | Prevents outsized losses per trade | Single-Trade Risk Meter |
 | **RSK-03** | Intelligent Quantity Auto-Scaling | Risk Management | ✅ Active | Avoids rejected trades by scaling size | Auto-Scaled Quantity Notification |
 | **RSK-04** | Portfolio Allocation Check | Risk Management | ✅ Active | Caps capital committed per trade | Buying Power Headroom Bar |
@@ -93,12 +93,12 @@ This document is the **single source of truth** for all user-facing features sup
 
 ### 2. Capital & Risk Management
 
-#### `RSK-01`: $5,000 Global Open Position Cap
-* **User Story**: As a trader, I want an absolute dollar ceiling on the combined exposure of all open trades so that unforeseen market shocks can never threaten my account beyond \$5,000.
+#### `RSK-01`: $5,000 Per-Strategy Open Position Cap
+* **User Story**: As a trader, I want an absolute dollar ceiling on the defined risk of any individual strategy variant so that unforeseen market shocks can never threaten more than \$5,000 on any single strategy, while allowing multiple concurrent incubator variants to trade in parallel.
 * **Parameters**: `IC_MAX_POSITION_RISK` (default: `5000.0`).
 * **Behavior**:
-  $$\text{Total Exposure} = \text{Existing Position Exposure} + \text{New Trade Max Risk} \le \$5,000.00$$
-* **GUI Manifestation**: Global Risk Progress Bar with percentage utilization dial (e.g., "$1,400 / $5,000 Committed (28%)").
+  $$\text{Strategy Exposure} = \text{Existing Variant Exposure} + \text{New Trade Max Risk} \le \$5,000.00$$
+* **GUI Manifestation**: Per-Strategy Risk Progress Bar with percentage utilization dial (e.g., "$1,400 / $5,000 Committed (28%)").
 
 #### `RSK-02`: Tiered Single-Trade Sizing (Sliding Scale)
 * **User Story**: As a trader, I want single trades restricted to 30% of my risk cap when the account/cap is small ($5k), scaling down to 10% or 5% as capital grows, to prevent single-trade blowups.

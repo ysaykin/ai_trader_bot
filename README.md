@@ -15,7 +15,7 @@ contracts to a strategy only after confirmed fills.
   2. **Dynamic Profit Target Head**: Continuous take-profit threshold in `[0.15, 0.80]`
   3. **Contextual Strategy Selector Head**: Probability distribution across all 20 incubator variants
 - **Offline training and opt-in inference (`ml/train.py`, `ml/inference.py`)**: Trains JSON artifacts from labelled trajectories, stores feature imputation and normalization, and applies recommendations only when `ML_POLICY_ENABLED=true`.
-- **Real-Time Trading Cockpit (`dashboard/app.py`)**: Streamlit UI (`http://localhost:8501`) with live Tradier/Alpaca telemetry, visual risk gauges, interactive Plotly payoff curves, A/B comparative scorecards, and credential/parameter configuration.
+- **Real-Time Trading Cockpit (`dashboard/app.py`, `DASHBOARD.md`)**: Streamlit UI (`http://localhost:8501`) with live Tradier/Alpaca telemetry, visual risk gauges, 20-strategy incubator leaderboard, neural policy recommendations, interactive Plotly payoff curves, and in-browser config. For full UI documentation, see [DASHBOARD.md](DASHBOARD.md).
 
 ## Project Structure
 
@@ -43,6 +43,7 @@ lumibot/
 │   ├── test_policy_net.py       # Multi-head neural policy network unit tests
 │   ├── test_regressions.py      # Broker selection, risk caps, incubator & leg-isolation regressions
 │   └── test_trajectories.py     # Causal feature, trajectory logging & counterfactual evaluator tests
+├── DASHBOARD.md                 # UI architecture, mission, risk gauges, and feature user guide
 ├── USER_FEATURES.md             # Living single-source-of-truth User Features Catalog
 ├── Dockerfile                   # Trading bot container image
 ├── Dockerfile.dashboard         # Streamlit dashboard container image
