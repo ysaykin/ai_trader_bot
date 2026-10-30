@@ -15,4 +15,7 @@ Acceptance:
 - [x] **Policy Training & Inference Bridge**: Offline trajectory trainer (`ml/train.py`), live normalization/imputation bridge (`ml/inference.py`), and transactional position ledger (`strategies/position_ledger.py`).
 - [x] **Tradier Multileg Reconciliation & Ledger Rollover**: Durable SQLite parent/child order tracking, multi-day rollover persistence, close order repricing, and crash-recovery fault containment (`BRK-01`).
 - [x] **Local Import Hygiene & Packaging Isolation**: Relocated legacy prototype shim to prevent namespace shadowing, hardened configuration error exits, and established multi-package validation (`SYS-01`).
+- [x] **Confirmed Opening Credit Safety & Roll/DTE Exit Precedence**: Require finite confirmed entry credit without adopting limit prices, retain contract ownership during quote delays, and reach roll/DTE targets before valuation gates (`ENG-08`).
+- [x] **Tradier Credential Protection & Log Redaction**: Redact account numbers and sensitive tokens from connection logs, and support configurable polling intervals (`BRK-04`).
+- [x] **Jev-Bot Lifecycle & Isolated Subprocess Verification**: Comprehensive lifecycle step validation, signal cleanup, and isolated multi-entrypoint testing (`SYS-02`).
 - [ ] **Self-Improving Bot Loop**: Automated post-market continual learner with Purged Walk-Forward CV and Champion vs. Challenger shadow promotion gate (`ML-08`).

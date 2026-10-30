@@ -5,6 +5,8 @@ services:
     container_name: lumibot-bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      - TZ=America/New_York
     volumes:
       - ./main.py:/app/main.py:ro
       - ./trade_logger.py:/app/trade_logger.py:ro
@@ -27,6 +29,7 @@ services:
     environment:
       - REFLEX_DIR=/tmp/reflex
       - REFLEX_USE_NPM=true
+      - TZ=America/New_York
     volumes:
       - ./reflex_dashboard:/app/reflex_dashboard
       - ./dashboard:/app/dashboard:ro

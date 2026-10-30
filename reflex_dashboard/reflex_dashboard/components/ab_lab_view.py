@@ -160,7 +160,7 @@ def ab_lab_view() -> rx.Component:
                     rx.grid(
                         rx.box(
                             rx.text("Win Rate (Closed)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["win_rate"], size="3", weight="bold", color=GREEN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_a["win_rate"], size="3", weight="bold", color=DashboardState.ab_card_a["win_rate_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Closed Trades", size="1", color=TEXT_MUTED),
@@ -232,7 +232,7 @@ def ab_lab_view() -> rx.Component:
                     rx.grid(
                         rx.box(
                             rx.text("Win Rate (Closed)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["win_rate"], size="3", weight="bold", color=GREEN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_b["win_rate"], size="3", weight="bold", color=DashboardState.ab_card_b["win_rate_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Closed Trades", size="1", color=TEXT_MUTED),
@@ -332,10 +332,10 @@ def ab_lab_view() -> rx.Component:
                                     rx.table.cell(rx.text(strat["variant"], weight="bold", color=CYAN, class_name="font-mono nowrap")),
                                     rx.table.cell(rx.text(strat["config_desc"], size="1", color=TEXT_MUTED, class_name="nowrap")),
                                     rx.table.cell(rx.text(strat["closed_trades"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["win_rate"], weight="bold", color=GREEN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(strat["win_rate"], weight="bold", color=strat["win_rate_color"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(strat["gross_pnl_str"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(strat["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["net_pnl_str"], weight="bold", color=GREEN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(strat["net_pnl_str"], weight="bold", color=strat["status_color"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(strat["net_ror_pct"], weight="bold", color=CYAN, class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(strat["net_roc_pct"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(strat["profit_factor"], class_name="tabular-nums nowrap")),

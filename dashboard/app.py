@@ -293,17 +293,26 @@ def position_records(positions: list[dict[str, Any]], quotes: dict[str, dict[str
         quote = quotes.get(symbol, {})
         greeks = quote.get("greeks") or {}
         bid, ask = number(quote.get("bid")), number(quote.get("ask"))
-        mid = (bid + ask) / 2 if bid is not None and ask is not None and 0 <= bid <= ask and ask > 0 else None
+        mid = (bid + ask) / 2 if bid is not None and ask is not None and 0 <= bid <= ask and ask > 0 else number(quote.get("last"))
         strat = position.get("strategy") or position.get("tag")
         tag = strategy_tag(strat) or (str(strat) if strat else "Unattributed")
+        qty = number(position.get("quantity", position.get("qty")))
+        cost_basis = number(position.get("cost_basis"))
+        unrealized = number(position.get("unrealized_pl"))
+        market_val = number(position.get("market_value"))
+        if qty is not None and mid is not None:
+            market_val = qty * mid * 100.0
+            if unrealized is None and cost_basis is not None:
+                unrealized = market_val - cost_basis
+
         rows.append({
             "Strategy": tag,
-            "Symbol": symbol, "Contracts": position.get("quantity", position.get("qty")),
+            "Symbol": symbol, "Contracts": qty,
             "Strike": number(quote.get("strike")), "Expiration": quote.get("expiration_date"),
-            "Cost Basis": number(position.get("cost_basis")), "Market Mid": mid,
+            "Cost Basis": cost_basis, "Market Mid": mid, "Market Value": market_val,
             "Delta (Δ)": number(greeks.get("delta")), "Theta (Θ)": number(greeks.get("theta")),
             "IV": number(greeks.get("mid_iv")),
-            "Unrealized P&L": number(position.get("unrealized_pl")),
+            "Unrealized P&L": unrealized,
         })
     return rows
 
@@ -311,10 +320,14 @@ def position_records(positions: list[dict[str, Any]], quotes: dict[str, dict[str
 def get_incubator_summary(all_trades: list[dict[str, Any]]) -> dict[str, Any]:
     """Compile performance matrix and metrics for all 20 incubator variants."""
     try:
-        from strategies.incubator import INCUBATOR_GRID_20
-        specs = INCUBATOR_GRID_20
-    except ImportError:
-        specs = []
+        from strategies.incubator import get_incubator_specs
+        specs = get_incubator_specs()
+    except Exception:
+        try:
+            from strategies.incubator import INCUBATOR_GRID_20
+            specs = INCUBATOR_GRID_20
+        except ImportError:
+            specs = []
 
     rows = []
     total_gross_pnl = 0.0
@@ -330,11 +343,19 @@ def get_incubator_summary(all_trades: list[dict[str, Any]]) -> dict[str, Any]:
         closed = [t for t in v_trades if str(t.get("status", "")).upper() == "CLOSED"]
         open_t = [t for t in v_trades if str(t.get("status", "")).upper() == "OPEN"]
 
+        def _trade_net(t: dict[str, Any]) -> float:
+            n = number(t.get("net_pnl"))
+            if n is not None:
+                return n
+            g = number(t.get("gross_pnl", t.get("pnl"))) or 0.0
+            f = number(t.get("fees")) or 0.0
+            return g - f
+
         gross_pnl = sum(number(t.get("gross_pnl", t.get("pnl"))) or 0.0 for t in closed)
         fees = sum(number(t.get("fees")) or 0.0 for t in closed)
-        net_pnl = sum(number(t.get("net_pnl", t.get("pnl"))) or 0.0 for t in closed)
+        net_pnl = sum(_trade_net(t) for t in closed)
 
-        wins = sum(1 for t in closed if (number(t.get("net_pnl", t.get("pnl"))) or 0.0) > 0)
+        wins = sum(1 for t in closed if _trade_net(t) > 0)
         win_rate = (wins / len(closed) * 100) if closed else None
         credit = sum(
             number(t.get("credit_received_cash", t.get("credit_received"))) or 0.0
@@ -348,7 +369,7 @@ def get_incubator_summary(all_trades: list[dict[str, Any]]) -> dict[str, Any]:
         total_trades_count += len(closed)
         total_wins += wins
 
-        status = "OPEN POSITION" if open_t else ("PROFIT TAKEN" if closed else "MONITORING")
+        status = "OPEN POSITION" if open_t else ("PROFIT TAKEN" if (closed and net_pnl >= 0) else ("STOPPED OUT" if closed else "MONITORING"))
         rows.append({
             "Variant": short_id,
             "Strategy Name": name,

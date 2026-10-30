@@ -25,10 +25,14 @@ This document is the **single source of truth** for all user-facing features sup
 | **EXP-03** | Strategy Isolation & Order Tagging | A/B Testing | ✅ Active | Unambiguous order & position tracking | Color-coded Strategy Tags (A vs B) |
 | **EXP-04** | Side-by-Side Comparative Analytics | A/B Testing | ✅ Active | Clear performance winner selection | Comparative Win Rate & P&L Cards |
 | **EXP-05** | 20-Variant Strategy Incubator Grid | A/B Testing | ✅ Active | Forward-test 20 distinct parameter permutations concurrently | Multi-Variant Performance Matrix |
+| **EXP-06** | StrategyBro 90 DTE Dynamic Iron Condor vs Vertical | A/B Testing | ✅ Active | Dynamic SD-based structure selection (IC near mean vs Call/Put vertical when stretched) with 30 DTE roll | Dynamic Strategy & SD Zone Pill |
 | **BRK-01** | Tradier Sandbox & Live Execution | Broker Connectivity | ✅ Active | Zero-commission index options trading | Connection Status & Account Pill |
 | **BRK-02** | Alpaca Paper & Live Execution | Broker Connectivity | ✅ Active | Secondary multi-asset broker support | Broker Selector Dropdown |
 | **BRK-03** | OrbStack Native Containerization | DevOps / System | ✅ Active | Instant zero-config local deployment | Container Uptime & Health Indicator |
 | **SYS-01** | Upstream Package & Import Hygiene | DevOps / System | ✅ Active | Clean native Python invocation without local directory namespace shadowing | Import verification test suite |
+| **SYS-02** | Jev-Bot Multi-Entrypoint Lifecycle Verification | DevOps / System | ✅ Active | Isolated runner testing across CLI, module, and direct execution | Subprocess Lifecycle Test Suite |
+| **BRK-04** | Tradier Log Sanitization & Polling Interval | Broker Connectivity | ✅ Active | Zero credential leakage in logs & configurable polling cadence | Connection Log Output & Polling Interval |
+| **ENG-08** | Confirmed Opening Credit & Roll/DTE Priority | Core Engine | ✅ Active | Enforce confirmed cash credits & prioritize roll/DTE exits before valuation | Position State & Roll Status Pill |
 | **CFG-01** | Interactive Config & Credentials GUI | Configuration | ✅ Active | Edit and test API keys & risk boundaries live in GUI | Dedicated Broker & Strategy Config Tab |
 | **GUI-01** | Live Engine Status & Session Clock | Dashboard UI | ✅ Active | Know exactly what the bot is doing | Header Status Bar & Market Clock |
 | **GUI-02** | Interactive Visual Risk Dials | Dashboard UI | ✅ Active | At-a-glance capital & cap visibility | Dual Risk Gauges ($5k & Single-Trade) |
@@ -77,9 +81,9 @@ This document is the **single source of truth** for all user-facing features sup
 * **GUI Manifestation**: DTE dropdown/pill selector showing exact expiration date (`YYYY-MM-DD`) and days remaining.
 
 #### `ENG-05`: Timed Entry Window & Schedule Guard
-* **User Story**: As a trader, I want the bot to wait until opening market volatility settles (e.g. enter at 10:00 AM ET) and only enter within a defined window (e.g. 10:00 – 10:30 AM ET).
-* **Parameters**: `IC_ENTRY_TIME` (default: `"10:00"`).
-* **GUI Manifestation**: Live countdown clock showing time until entry window opens, and active status badge ("Waiting for 10:00 AM ET", "Entry Window Open", "Window Closed").
+* **User Story**: As a trader, I want the bot to support multi-window execution schedules throughout the trading day every 5 minutes from 9:45-10:00 AM and then every 15 minutes until 15:30 so all strategies continuously gather data and re-enter whenever positions are flat.
+* **Parameters**: `IC_ENTRY_TIME` (default: `"09:45, 09:50, 09:55, 10:00, 10:15, 10:30, 10:45, 11:00, 11:15, 11:30, 11:45, 12:00, 12:15, 12:30, 12:45, 13:00, 13:15, 13:30, 13:45, 14:00, 14:15, 14:30, 14:45, 15:00, 15:15, 15:30"`).
+* **GUI Manifestation**: Real-time entry schedule badge showing active window status (e.g. `09:45 - 15:30 ET (5m/15m)`) with hard cutoff guard at 15:31 to prevent end-of-day assignment or pin risk.
 
 #### `ENG-06` & `ENG-07`: Automated Profit Target & Stop Loss
 * **User Story**: As a trader, I want predefined exit rules to lock in profits early (e.g. 30% or 50% of credit) and cut losses if market moves sharply against a wing (e.g. 2.0x credit).
@@ -145,6 +149,24 @@ This document is the **single source of truth** for all user-facing features sup
   * **Shared `MarketDataHub` Cache**: Fetches underlying quotes, intraday bars, VIX term structure, and option chains once per 5-minute tick and fans them out in-memory to all 20 strategies + the neural network.
   * **Sizing**: 1 contract of `XSP` per variant ($\sim \$200$ risk each), requiring $\sim \$4,000$ margin total out of $\$100,000$ sandbox cash.
 * **GUI Manifestation**: Interactive 20-variant performance leaderboard table and multi-curve equity growth chart.
+
+#### `EXP-06`: StrategyBro 90 DTE Dynamic Iron Condor vs Vertical Spread
+* **User Story**: As an options quant, I want to trade a 90 DTE dynamic strategy that automatically selects an Iron Condor when price is near the mean (low SD) and dynamically switches to selling the stretched-side Vertical spread (Bear Call when positive stretched, Bull Put when negative stretched), with a 30 DTE roll trigger and quality filter.
+* **Core Logic & Preference Rules**:
+  * **Entry Quality Filter**: Evaluates the underlying spot Z-score (standard deviations from mean):
+    * `Abs SD <= 0.5`: Excellent
+    * `0.5 < Abs SD <= 1.0`: Good
+    * `1.0 < Abs SD <= 1.5`: Marginal
+    * `Abs SD > 1.5`: Avoid (entry suppressed)
+  * **Structure Preference**:
+    * `Abs SD <= 0.60` $\to$ Enter Iron Condor (neutral theta harvest near mean)
+    * `Abs SD > 0.60 & positive` $\to$ Sell Call Vertical (`bear_call`, short call + long protective call)
+    * `Abs SD > 0.60 & negative` $\to$ Sell Put Vertical (`bull_put`, short put + long protective put)
+  * **Parameters**: 90 DTE target, 15 pt wing width, 7% OTM put/call strikes (`otm_pct=0.07`), 50% profit target, 2.0x stop loss.
+  * **Staggered Playbook Management**:
+    * **Front (~30 DTE)**: Active roll/management trigger closes the position at 30 DTE remaining (or at 50% net profit target).
+    * **Middle (~60 DTE)**: Hold and monitor marked valuation.
+    * **Back (~90 DTE)**: Fresh entry only in verified good SD zone (`Abs SD <= 1.5`).
 
 ---
 
@@ -296,3 +318,46 @@ This document is the **single source of truth** for all user-facing features sup
 * **Problem Solved**: Untracked local mock directory `./lumibot` shadowed the real package during native `python` and `pytest` runs, causing import errors and broken class resolution.
 * **Resolution**: Relocated prototype code to `.legacy/mock_ui_lumibot_shim/` (ignored via `.gitignore`), and implemented `tests/test_import_hygiene.py` to prevent local directory shadowing.
 
+---
+
+### 8. Execution Robustness, Multi-Expiry Trading & Real-Time Telemetry
+
+#### `TRD-04`: Expanded 30-Minute Intraday Trading Schedule
+* **User Story**: As a trader, I want strategies to evaluate entry opportunities throughout the entire trading day up until 3:31 PM ET every 30 minutes, so we capture recurring intraday premium opportunities and collect rich performance data.
+* **Implementation**: Expanded execution times across all 25 variants to 15 slots (`09:45, 10:00, 10:15, 10:30, 11:00, 11:30, 12:00, 12:30, 13:00, 13:30, 14:00, 14:30, 15:00, 15:30, 15:31`) with a strict hard cutoff at 3:31 PM ET to eliminate late-day assignment risk.
+
+#### `RSK-05`: Per-Strategy Risk Isolation & Portfolio Exposure Cap
+* **User Story**: As a portfolio manager running 20+ concurrent variants, I want each strategy to enforce its defined risk cap ($15,000 default) independently against its own positions, so open exposure in one variant does not block unrelated variants, with an overarching $100,000 global portfolio cap.
+* **Implementation**: Scoped `portfolio_defined_risk(strategy_id)` per variant, decoupling peer exposure while maintaining global risk checks against `IC_MAX_PORTFOLIO_RISK`.
+
+#### `EXE-02`: Expiration-Specific Strike Filtering
+* **User Story**: As a trader running multi-day strategies (7DTE, 14DTE, 21DTE, 30DTE, 90DTE), I want strike selection to only choose strikes that physically exist for that exact expiration date, preventing invalid quote errors and aborted order placements.
+* **Implementation**: Updated `_fetch_strikes(chains, expiry=expiry)` to extract strikes directly from `chains["Chains"]["CALL"][exp_str]` and `["PUT"][exp_str]`, eliminating cross-expiration strike bleed from 0DTE union lists.
+
+#### `EXE-03`: Opposing-Leg Conflict Pre-Submission Gate
+* **User Story**: As a trader executing concurrent multi-leg strategies on Tradier, I want the bot to reject proposed order legs that directly conflict with open positions on the opposite side of the same contract, avoiding Tradier's "Buy order cannot be placed to cover short position" rejection.
+* **Implementation**: Added pre-submission cross-checks against `PositionLedger.all_owned_quantities()` before routing orders to the broker.
+
+#### `DASH-06`: Immediate Trade Inception Counting & Live Open Position Visibility
+* **User Story**: As a trader watching the dashboard, I want newly opened trades to appear immediately at the top of the trade log and be counted in strategy summary rows right when entered, without waiting for the trade to close.
+* **Implementation**: Formatted open trades with live status tokens (`status="OPEN"`, `net_pnl_str="OPEN"`, cyan styling), prepended them to `visible_trades_50 = (open_all + closed_all)[:50]`, and unified trade counts as `total_trades = open + closed`.
+
+#### `ANL-03`: Fee-Adjusted Net P&L Win Rate Integrity
+* **User Story**: As an analyst auditing performance, I want trades with negative net P&L after commission fees to be strictly classified as losses, ensuring win rates never show 100% on net unprofitable trades.
+* **Implementation**: Updated win rate and loss counters in `adapters.py` to evaluate strictly against `net_pnl > 0`, reflecting real financial performance.
+
+#### `STRAT-03`: StrategyBro 90 DTE Dynamic Iron Condor vs Vertical Spread Variant (`IC_V25`)
+* **User Story**: As a trader, I want a long-dated 90 DTE variant that dynamically shifts between an Iron Condor and a directional Vertical spread based on underlying price Z-score standard deviation, utilizing % OTM strikes and rolling at 30 DTE.
+* **Implementation**: Integrated `evaluate_strategybro_entry_quality`, `resolve_strategybro_structure`, `select_short_strikes_otm_pct`, and 30 DTE early roll trigger into `IC_V25_90DTE_STRATEGYBRO_DYNAMIC`.
+
+#### `BRK-04`: Tradier Log Sanitization & Polling Interval Configuration
+* **User Story**: As a security-conscious operator, I want Tradier connection logs to strictly redact account numbers and sensitive tokens, while allowing configurable polling cadence between live and paper modes.
+* **Implementation**: Redacted `ACCOUNT_NUMBER` from connection log output in `main.py`, logging only paper mode status and polling interval, and parsed `TRADIER_POLLING_INTERVAL` with a 1.0s floor (default 15.0s paper / 5.0s live).
+
+#### `ENG-08`: Confirmed Opening Credit Enforcement & Roll/DTE Exit Precedence
+* **User Story**: As an automated trader, I want exit management to require confirmed cash credits rather than falling back to limit prices, strictly retain contract ownership during quote delays, and evaluate roll/DTE targets before valuation checks.
+* **Implementation**: Eliminated limit-price credit fallback in `strategies/iron_condor.py`, ensuring only confirmed positive cash credits drive P&L exits while unconfirmed contracts remain open. Reordered `_manage_position` so `roll_dte` exits trigger even if quote marks or credit baselines are temporarily delayed.
+
+#### `SYS-02`: Jev-Bot Multi-Entrypoint Lifecycle Verification
+* **User Story**: As a systems engineer running multiple bot repositories, I want Jev-Bot to maintain deterministic lifecycle steps, signal cleanup, and verified invocation across script, module, and installed CLI entrypoints.
+* **Implementation**: Added isolated subprocess tests covering root `main.py`, module `-m jev_bot`, and installed console entrypoint `jev-bot`, verifying single-step iteration and graceful termination.

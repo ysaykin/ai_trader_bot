@@ -38,13 +38,104 @@ from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
 
 from strategies.iron_condor_math import (
+    calculate_realized_vol_ratio,
+    calculate_zscore,
     credit_strategy_pnl,
+    evaluate_mfe_ratchet,
+    evaluate_strategybro_entry_quality,
+    resolve_orb_structure,
+    resolve_skew_condor_deltas,
+    resolve_strategybro_structure,
+    resolve_trendflow_structure,
+    resolve_vol_crush_structure,
     select_short_strikes,
+    select_short_strikes_otm_pct,
+    select_short_strikes_skew,
     signed_basket_value,
 )
 from strategies.position_ledger import LedgerLeg, PositionLedger, asset_key
 
 logger = logging.getLogger(__name__)
+
+
+def parse_single_time(item: Any) -> time:
+    """Parse a single time representation (e.g. '09:45', '10', '1015', time(9, 45))."""
+    if isinstance(item, time):
+        return item
+    if isinstance(item, datetime):
+        return item.time()
+    s = str(item).strip().lower()
+    for noise in ("and", "at", "am"):
+        if s.startswith(noise + " "):
+            s = s[len(noise) + 1:].strip()
+        if s.endswith(" " + noise):
+            s = s[:-len(noise) - 1].strip()
+    s = s.replace("am", "").strip()
+    is_pm = "pm" in s
+    s = s.replace("pm", "").strip()
+
+    if ":" in s:
+        parts = s.split(":")
+        h, m = int(parts[0]), int(parts[1])
+    elif s.isdigit():
+        if len(s) <= 2:
+            h, m = int(s), 0
+        elif len(s) == 3:
+            h, m = int(s[0]), int(s[1:])
+        elif len(s) == 4:
+            h, m = int(s[:2]), int(s[2:])
+        else:
+            raise ValueError(f"Invalid time format: {item}")
+    else:
+        raise ValueError(f"Cannot parse time: {item}")
+
+    if is_pm and h < 12:
+        h += 12
+    return time(h, m)
+
+
+DEFAULT_RUN_TIMES_LIST: list[time] = [
+    time(9, 45), time(9, 50), time(9, 55), time(10, 0),
+    time(10, 15), time(10, 30), time(10, 45),
+    time(11, 0), time(11, 15), time(11, 30), time(11, 45),
+    time(12, 0), time(12, 15), time(12, 30), time(12, 45),
+    time(13, 0), time(13, 15), time(13, 30), time(13, 45),
+    time(14, 0), time(14, 15), time(14, 30), time(14, 45),
+    time(15, 0), time(15, 15), time(15, 30),
+]
+DEFAULT_RUN_TIMES_STR: str = ", ".join(t.strftime("%H:%M") for t in DEFAULT_RUN_TIMES_LIST)
+
+
+def parse_run_times(value: Any) -> list[time]:
+    """Parse one or multiple execution run times into a sorted list of unique datetime.time objects.
+
+    Supports comma/semicolon/and-separated strings, lists, tuples, or single times.
+    Example: '9:45, 10, 1015, and 1030' -> [time(9, 45), time(10, 0), time(10, 15), time(10, 30)]
+    """
+    if not value:
+        return list(DEFAULT_RUN_TIMES_LIST)
+    if isinstance(value, (list, tuple, set)):
+        times: list[time] = []
+        for v in value:
+            times.extend(parse_run_times(v))
+        return sorted(list(set(times)))
+    if isinstance(value, (time, datetime)):
+        return [parse_single_time(value)]
+
+    raw = str(value)
+    normalized = raw.replace(" and ", ",").replace(";", ",").replace("&", ",")
+    tokens = [tok.strip() for tok in normalized.split(",") if tok.strip()]
+    if not tokens:
+        tokens = [raw.strip()]
+
+    parsed: list[time] = []
+    for tok in tokens:
+        try:
+            parsed.append(parse_single_time(tok))
+        except (ValueError, TypeError) as err:
+            logger.warning("Could not parse run time '%s': %s", tok, err)
+
+    return sorted(list(set(parsed))) or list(DEFAULT_RUN_TIMES_LIST)
 
 
 def get_max_single_trade_pct(max_position_risk: float) -> float:
@@ -93,7 +184,7 @@ class SPXIronCondor(Strategy):
         "quantity": 1,
         "profit_target": 0.30,
         "stop_loss_mult": 2.0,
-        "entry_time": "10:00",
+        "entry_time": DEFAULT_RUN_TIMES_STR,
         "max_allocation": 0.03,
         "max_position_risk": 5000.0,
         "structure": "iron_condor",
@@ -139,10 +230,38 @@ class SPXIronCondor(Strategy):
         self.is_testing_variant = bool(
             p.get("is_testing_variant", getattr(self, "is_testing_variant", False))
         )
+        self.is_strategybro_variant = bool(
+            p.get("is_strategybro_variant", getattr(self, "is_strategybro_variant", False))
+        )
+        self.is_trendflow_variant = bool(
+            p.get("is_trendflow_variant", getattr(self, "is_trendflow_variant", False))
+        )
+        self.is_skew_dynamic_variant = bool(
+            p.get("is_skew_dynamic_variant", getattr(self, "is_skew_dynamic_variant", False))
+        )
+        self.is_vol_crush_variant = bool(
+            p.get("is_vol_crush_variant", getattr(self, "is_vol_crush_variant", False))
+        )
+        self.is_orb_dynamic_variant = bool(
+            p.get("is_orb_dynamic_variant", getattr(self, "is_orb_dynamic_variant", False))
+        )
+        self._active_put_delta: float | None = None
+        self._active_call_delta: float | None = None
+        self._session_anchor_date: date | None = None
+        self._session_anchor_price: float | None = None
+        if "roll_dte" in p and p["roll_dte"] is not None:
+            p["roll_dte"] = int(p["roll_dte"])
+        if "otm_pct" in p and p["otm_pct"] is not None:
+            p["otm_pct"] = float(p["otm_pct"])
+        if "otm_put_pct" in p and p["otm_put_pct"] is not None:
+            p["otm_put_pct"] = float(p["otm_put_pct"])
+        if "otm_call_pct" in p and p["otm_call_pct"] is not None:
+            p["otm_call_pct"] = float(p["otm_call_pct"])
 
-        # Parse entry time
-        h, m = map(int, p["entry_time"].split(":"))
-        self._entry_time = time(h, m)
+        # Parse entry and execution run times
+        raw_times = p.get("run_times") or p.get("entry_times") or p.get("entry_time") or DEFAULT_RUN_TIMES_STR
+        self._entry_times = parse_run_times(raw_times)
+        self._entry_time = self._entry_times[0] if self._entry_times else time(9, 45)
 
         # Check frequently so we don't miss the entry window
         try:
@@ -256,6 +375,29 @@ class SPXIronCondor(Strategy):
     def on_trading_iteration_count(self, value: int | None) -> None:
         self._iteration_count = int(value or 0)
 
+    @property
+    def run_times(self) -> list[time]:
+        """Configured execution run times for this strategy."""
+        return list(getattr(self, "_entry_times", None) or DEFAULT_RUN_TIMES_LIST)
+
+    @run_times.setter
+    def run_times(self, value: Any) -> None:
+        self._entry_times = parse_run_times(value)
+        if self._entry_times:
+            self._entry_time = self._entry_times[0]
+            time_str = ", ".join(t.strftime("%H:%M") for t in self._entry_times)
+            self.parameters["entry_time"] = time_str
+            self.parameters["run_times"] = time_str
+
+    @property
+    def run_times_str(self) -> str:
+        """Formatted string representation of configured run times."""
+        return ", ".join(t.strftime("%H:%M") for t in self.run_times)
+
+    def set_run_times(self, run_times: Any) -> None:
+        """Configure the execution run times for this strategy."""
+        self.run_times = run_times
+
     def _record_trajectory(self, action: str, *, session_end: bool = False) -> None:
         """Keep telemetry failures independent of position management."""
         collector = getattr(self, "_trajectory_logger", None)
@@ -344,6 +486,37 @@ class SPXIronCondor(Strategy):
             return
         underlying_price = float(underlying_price)
 
+        structure = getattr(self, "structure", "iron_condor").lower()
+        self._active_put_delta = None
+        self._active_call_delta = None
+
+        # --- PRE-STRIKE DYNAMIC ASYMMETRIC SKEW RESOLUTION (IC_V27) ---
+        if structure in ("skew_dynamic", "asymmetric_skew_ic") or getattr(self, "is_skew_dynamic_variant", False):
+            z_score, quality = self._calculate_underlying_sd()
+            if abs(z_score) > 2.0:
+                logger.info(
+                    "[%s] Skew Dynamic filter: Abs SD = %.2f > 2.0 (Extreme Blowoff). Skipping entry.",
+                    getattr(self, "name", "SkewDynamic"),
+                    abs(z_score),
+                )
+                return
+            base_p = float(self.parameters.get("put_delta", self.parameters.get("short_delta", 0.16)))
+            base_c = float(self.parameters.get("call_delta", 0.12))
+            put_delta, call_delta = resolve_skew_condor_deltas(
+                z_score, base_put_delta=base_p, base_call_delta=base_c
+            )
+            self._active_put_delta = put_delta
+            self._active_call_delta = call_delta
+            logger.info(
+                "[%s] Skew Dynamic IC: SD=%.2f (%s) -> Asymmetric Deltas Put=%.2f / Call=%.2f",
+                getattr(self, "name", "SkewDynamic"),
+                z_score,
+                quality,
+                put_delta,
+                call_delta,
+            )
+            structure = "iron_condor"
+
         # --- FIND SHORT STRIKES ---
         short_put_strike, short_call_strike = self._find_short_strikes(
             underlying_price, expiry
@@ -364,7 +537,96 @@ class SPXIronCondor(Strategy):
         long_call = self._make_option(long_call_strike, expiry, "call")
 
         qty = self.parameters["quantity"]
-        structure = getattr(self, "structure", "iron_condor").lower()
+
+        if structure in ("dynamic_sd", "strategybro_dynamic") or getattr(self, "is_strategybro_variant", False):
+            z_score, quality = self._calculate_underlying_sd()
+            if quality == "AVOID":
+                logger.info(
+                    "[%s] StrategyBro SD quality filter: Abs SD = %.2f > 1.5 (Quality: AVOID). Skipping entry.",
+                    getattr(self, "name", "StrategyBro"),
+                    abs(z_score),
+                )
+                return
+            resolved_structure = resolve_strategybro_structure(z_score)
+            if not resolved_structure:
+                logger.info(
+                    "[%s] StrategyBro SD quality filter: Abs SD = %.2f in Avoid zone. Skipping entry.",
+                    getattr(self, "name", "StrategyBro"),
+                    abs(z_score),
+                )
+                return
+            logger.info(
+                "[%s] StrategyBro preference: SD=%.2f (Quality: %s) -> Prefer %s",
+                getattr(self, "name", "StrategyBro"),
+                z_score,
+                quality,
+                resolved_structure,
+            )
+            structure = resolved_structure
+        elif structure in ("trendflow", "trendflow_dynamic") or getattr(self, "is_trendflow_variant", False):
+            z_score, quality = self._calculate_underlying_sd()
+            min_sd = float(self.parameters.get("min_trend_sd", 0.35))
+            resolved_structure = resolve_trendflow_structure(z_score, min_trend_sd=min_sd)
+            if not resolved_structure:
+                logger.info(
+                    "[%s] TrendFlow filter: SD=%.2f outside momentum band [%.2f, 2.50]. Skipping entry.",
+                    getattr(self, "name", "TrendFlow"),
+                    z_score,
+                    min_sd,
+                )
+                return
+            logger.info(
+                "[%s] TrendFlow momentum: SD=%.2f -> Riding trend with %s",
+                getattr(self, "name", "TrendFlow"),
+                z_score,
+                resolved_structure,
+            )
+            structure = resolved_structure
+        elif structure in ("vol_crush", "vol_crush_dynamic") or getattr(self, "is_vol_crush_variant", False):
+            z_score, _ = self._calculate_underlying_sd()
+            rv_ratio = self._calculate_realized_vol_ratio()
+            min_rv = float(self.parameters.get("min_rv_ratio", 1.15))
+            min_abs_z = float(self.parameters.get("min_abs_z", 0.90))
+            resolved_structure = resolve_vol_crush_structure(
+                z_score, rv_ratio, min_rv_ratio=min_rv, min_abs_z=min_abs_z
+            )
+            if not resolved_structure:
+                logger.info(
+                    "[%s] VolCrush filter: RV_ratio=%.2f (<%.2f) and |SD|=%.2f (<%.2f). Waiting for vol spike.",
+                    getattr(self, "name", "VolCrush"),
+                    rv_ratio,
+                    min_rv,
+                    abs(z_score),
+                    min_abs_z,
+                )
+                return
+            logger.info(
+                "[%s] VolCrush trigger: RV_ratio=%.2f, SD=%.2f -> Harvesting vol with %s",
+                getattr(self, "name", "VolCrush"),
+                rv_ratio,
+                z_score,
+                resolved_structure,
+            )
+            structure = resolved_structure
+        elif structure in ("orb_dynamic", "orb_1dte") or getattr(self, "is_orb_dynamic_variant", False):
+            intraday_ret = self._calculate_intraday_return_pct(underlying_price)
+            thresh = float(self.parameters.get("orb_threshold_pct", 0.0030))
+            resolved_structure = resolve_orb_structure(intraday_ret, threshold_pct=thresh)
+            if not resolved_structure:
+                logger.info(
+                    "[%s] ORB 1DTE filter: Session move %.2f%% exceeds runaway safety cap. Skipping entry.",
+                    getattr(self, "name", "ORB_1DTE"),
+                    intraday_ret * 100.0,
+                )
+                return
+            logger.info(
+                "[%s] ORB 1DTE session move %+.2f%% (thresh %.2f%%) -> Prefer %s",
+                getattr(self, "name", "ORB_1DTE"),
+                intraday_ret * 100.0,
+                thresh * 100.0,
+                resolved_structure,
+            )
+            structure = resolved_structure
 
         if structure in ("bull_put", "put_spread", "bull_put_vertical"):
             legs = [
@@ -409,6 +671,20 @@ class SPXIronCondor(Strategy):
             package_price = self._package_price(legs, order_type="credit")
             if package_price is None or package_price <= 0:
                 logger.warning("Complete bid/ask quotes are required before entry submission.")
+                return
+            min_credit = self.parameters.get("min_credit")
+            if min_credit is None and os.getenv("IC_MIN_CREDIT"):
+                try:
+                    min_credit = float(os.getenv("IC_MIN_CREDIT", "0"))
+                except ValueError:
+                    min_credit = None
+            if min_credit is not None and float(package_price) < float(min_credit):
+                logger.info(
+                    "[%s] Package credit $%.2f is below minimum threshold $%.2f (avoiding fee drag). Skipping entry.",
+                    getattr(self, "name", "SPXIronCondor"),
+                    float(package_price),
+                    float(min_credit),
+                )
                 return
             orders = self._submit_package(
                 legs, intent="open", order_type="credit", price=package_price
@@ -480,25 +756,28 @@ class SPXIronCondor(Strategy):
             self._close_all_options()
             return
 
-        if not self._entry_credit_cash or self._entry_credit_cash <= 0:
-            # Fallback: recover credit baseline from submitted package limit price
-            latest_open = self._position_ledger.latest_basket(self._strategy_id(), {"open", "add"})
-            if latest_open is not None and latest_open.limit_price and latest_open.limit_price > 0:
-                contract_qty = max((abs(int(q)) for _, q in self._owned_legs), default=1)
-                self._entry_credit_cash = float(latest_open.limit_price) * 100.0 * contract_qty
-                self._entry_credit = float(latest_open.limit_price)
-                logger.info(
-                    "Restored entry credit baseline from ledger limit price: $%.2f ($%.2f cash)",
-                    self._entry_credit, self._entry_credit_cash,
-                )
-            else:
-                logger.warning(
-                    "Filled opening credit is unavailable; retaining contracts without P&L exits."
-                )
-                self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
-                # CRITICAL: Do NOT set self._position_open = False or clear _owned_legs.
-                # Open positions remain active and will be caught by EOD close.
-                return
+        roll_dte = self.parameters.get("roll_dte")
+        remaining_dte = self._days_to_expiration()
+        if roll_dte is not None and remaining_dte is not None and remaining_dte <= int(roll_dte):
+            logger.info(
+                "🔄 ROLL / DTE TARGET HIT — closing position at %d DTE left (roll threshold: %d DTE)",
+                remaining_dte, int(roll_dte),
+            )
+            self._close_all_options(exit_reason="ROLL_DTE")
+            return
+
+        if (
+            self._entry_credit_cash is None
+            or not math.isfinite(self._entry_credit_cash)
+            or self._entry_credit_cash <= 0
+        ):
+            logger.warning(
+                "Filled opening credit is unavailable; retaining contracts without P&L exits."
+            )
+            self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
+            # CRITICAL: Do NOT set self._position_open = False or clear _owned_legs.
+            # Open positions remain active and will be caught by EOD close.
+            return
 
         marked_legs = []
         for asset, signed_quantity in self._owned_legs:
@@ -544,6 +823,23 @@ class SPXIronCondor(Strategy):
         elif net_pnl <= sl_threshold:
             logger.warning("🛑 STOP LOSS HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
             self._close_all_options(exit_reason="STOP_LOSS", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
+        elif bool(self.parameters.get("enable_mfe_ratchet", False)) or os.getenv("IC_MFE_RATCHET_ENABLED", "").strip().lower() in ("true", "1", "yes", "on"):
+            ratchet_reason = evaluate_mfe_ratchet(
+                self._entry_credit_cash,
+                self._mfe_pnl,
+                net_pnl,
+            )
+            if ratchet_reason is not None:
+                logger.info(
+                    "🔒 %s HIT — locking in profit/breakeven (MFE $%.2f -> Current Net $%.2f)",
+                    ratchet_reason, self._mfe_pnl, net_pnl,
+                )
+                self._close_all_options(
+                    exit_reason=ratchet_reason,
+                    gross_pnl=gross_pnl,
+                    fees=roundtrip_fees,
+                    net_pnl=net_pnl,
+                )
 
     def _record_exit_log(
         self,
@@ -616,7 +912,7 @@ class SPXIronCondor(Strategy):
         try:
             if not self._reconcile_broker_state() or self._recovery_lock:
                 return False
-            existing_exposure = self._position_ledger.portfolio_defined_risk()
+            existing_exposure = self._position_ledger.portfolio_defined_risk(self._strategy_id())
             if existing_exposure is None:
                 logger.warning("ADD_POSITION blocked: ledger contains incomplete defined-risk baskets.")
                 return False
@@ -987,6 +1283,124 @@ class SPXIronCondor(Strategy):
                 return True
         return False
 
+    def _days_to_expiration(self) -> int | None:
+        """Return the minimum days remaining to expiration across owned option legs."""
+        if not self._owned_legs:
+            return None
+        today = self.get_datetime().date()
+        min_days = None
+        for asset, _ in self._owned_legs:
+            raw_exp = getattr(asset, "expiration", None)
+            if raw_exp is None:
+                continue
+            if isinstance(raw_exp, datetime):
+                exp_date = raw_exp.date()
+            elif isinstance(raw_exp, date):
+                exp_date = raw_exp
+            else:
+                try:
+                    exp_date = datetime.strptime(str(raw_exp)[:10], "%Y-%m-%d").date()
+                except ValueError:
+                    continue
+            days = (exp_date - today).days
+            if min_days is None or days < min_days:
+                min_days = days
+        return min_days
+
+    def _fetch_historical_closes(self, lookback_bars: int = 30) -> list[float]:
+        """Fetch historical daily close prices for the underlying asset."""
+        prices: list[float] = []
+        fetch = getattr(self, "get_historical_prices", None)
+        if fetch is not None:
+            try:
+                bars = fetch(self._underlying, lookback_bars, timestep="day")
+                if bars is None:
+                    bars = fetch(self._underlying, lookback_bars, timestep="1 day")
+                if bars is not None:
+                    frame = getattr(bars, "pandas_df", None)
+                    if frame is None:
+                        frame = getattr(bars, "df", None)
+                    if frame is not None and "close" in frame:
+                        prices = [float(p) for p in frame["close"].dropna().values if p > 0]
+                    elif isinstance(bars, list):
+                        prices = [float(b["close"]) for b in bars if isinstance(b, dict) and "close" in b and float(b["close"]) > 0]
+            except Exception as err:
+                logger.debug("Could not fetch historical bars: %s", err)
+        return prices
+
+    def _calculate_underlying_sd(self, lookback_bars: int = 30) -> tuple[float, str]:
+        """Compute the Z-score and entry quality of the underlying asset relative to historical mean.
+
+        Returns:
+            (z_score, quality_label) where quality_label is one of:
+            "EXCELLENT" (<=0.5 SD), "GOOD" (0.5-1.0 SD), "MARGINAL" (1.0-1.5 SD), or "AVOID" (>1.5 SD).
+        """
+        forced = (
+            os.getenv("STRATEGYBRO_FORCE_SD")
+            or os.getenv("DYNAMIC_FORCE_SD")
+            or self.parameters.get("force_sd")
+        )
+        if forced is not None:
+            try:
+                z = float(forced)
+                return z, evaluate_strategybro_entry_quality(z)
+            except ValueError:
+                pass
+
+        current_price = self._fetch_last_price(self._underlying)
+        if current_price is None:
+            return 0.0, "EXCELLENT"
+
+        prices = self._fetch_historical_closes(lookback_bars)
+        if len(prices) >= 2:
+            z = calculate_zscore(prices, current_price)
+        else:
+            z = 0.0
+
+        return z, evaluate_strategybro_entry_quality(z)
+
+    def _calculate_realized_vol_ratio(self, lookback_bars: int = 25) -> float:
+        """Compute ratio of short-term (5d) to medium-term (20d) realized volatility."""
+        forced = os.getenv("VOL_CRUSH_FORCE_RV_RATIO") or self.parameters.get("force_rv_ratio")
+        if forced is not None:
+            try:
+                return float(forced)
+            except ValueError:
+                pass
+        prices = self._fetch_historical_closes(lookback_bars)
+        current_price = self._fetch_last_price(self._underlying)
+        if current_price is not None and float(current_price) > 0:
+            prices = [*prices, float(current_price)]
+        if len(prices) >= 6:
+            return calculate_realized_vol_ratio(prices)
+        return 1.0
+
+    def _calculate_intraday_return_pct(self, current_price: float | None = None) -> float:
+        """Compute current session return relative to session anchor or prior daily close."""
+        forced = os.getenv("ORB_FORCE_RETURN_PCT") or self.parameters.get("force_intraday_return_pct")
+        if forced is not None:
+            try:
+                return float(forced)
+            except ValueError:
+                pass
+        price = current_price if current_price is not None else self._fetch_last_price(self._underlying)
+        if price is None or float(price) <= 0:
+            return 0.0
+        spot = float(price)
+        try:
+            today = self.get_datetime().date()
+        except Exception:
+            today = None
+        if today is not None and getattr(self, "_session_anchor_date", None) != today:
+            prices = self._fetch_historical_closes(5)
+            ref = prices[-1] if prices else spot
+            self._session_anchor_date = today
+            self._session_anchor_price = float(ref)
+        anchor = getattr(self, "_session_anchor_price", None)
+        if anchor is None or anchor <= 0:
+            return 0.0
+        return (spot - anchor) / anchor
+
     def _asset_from_key(self, key: str) -> Asset:
         decoded = json.loads(key)
         return Asset(
@@ -1232,6 +1646,27 @@ class SPXIronCondor(Strategy):
         broker_tag = f"IC_{package_id[:20]}"
         owner = self._strategy_id()
         opening = intent in {"open", "add"}
+        if opening:
+            combined_positions: dict[str, int] = {}
+            if getattr(self, "_position_ledger", None) is not None:
+                combined_positions.update(self._position_ledger.all_owned_quantities())
+            try:
+                for p in (self.get_positions() or []):
+                    if getattr(getattr(p, "asset", None), "asset_type", None) == Asset.AssetType.OPTION:
+                        key = asset_key(p.asset)
+                        if key not in combined_positions and int(getattr(p, "quantity", 0)) != 0:
+                            combined_positions[key] = int(p.quantity)
+            except Exception:
+                pass
+
+            for asset, signed_quantity in legs:
+                key = asset_key(asset)
+                current_signed = combined_positions.get(key, 0)
+                if (current_signed < 0 and signed_quantity > 0) or (current_signed > 0 and signed_quantity < 0):
+                    raise RuntimeError(
+                        f"Atomic package rejected: leg {key} signed_qty={signed_quantity} conflicts "
+                        f"with existing account position ({current_signed})."
+                    )
         orders = []
         ledger_legs = []
         for index, (asset, signed_quantity) in enumerate(legs, start=1):
@@ -1510,7 +1945,19 @@ class SPXIronCondor(Strategy):
             return None
         unit_value = value / (100.0 * quantity)
         if order_type == "credit":
-            return -unit_value if unit_value < 0 else None
+            if unit_value >= 0:
+                return None
+            credit = -unit_value
+            # In paper / sandbox mode, discount the limit credit slightly (e.g. 10%)
+            # so Tradier Sandbox's 15-minute delayed matching simulator crosses and executes the order.
+            discount_pct_str = os.getenv("SANDBOX_CREDIT_DISCOUNT_PCT", "0.10" if os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1") else "0.0")
+            try:
+                discount_pct = float(discount_pct_str)
+            except ValueError:
+                discount_pct = 0.0
+            if discount_pct > 0:
+                credit = max(round(credit * (1.0 - discount_pct), 2), 0.05)
+            return round(credit, 2)
         if order_type == "debit":
             if unit_value > 0:
                 return max(unit_value, 0.01)
@@ -1654,8 +2101,43 @@ class SPXIronCondor(Strategy):
             return hub.get_expiration(self, self._underlying, chains=chains)
         return self.get_expiration(chains)
 
-    def _fetch_strikes(self, chains):
-        """Fetch option strikes via shared `MarketDataHub` when attached, else directly."""
+    def _fetch_strikes(self, chains, expiry=None):
+        """Fetch option strikes via shared `MarketDataHub` when attached, else directly.
+
+        When `expiry` is specified and `chains` contains expiration-keyed strike dictionaries,
+        filters strikes to those actually present on that specific expiration date.
+        """
+        if chains and isinstance(chains, dict) and "Chains" in chains and expiry:
+            exp_candidates = []
+            if hasattr(expiry, "strftime"):
+                exp_candidates.append(expiry.strftime("%Y-%m-%d"))
+                exp_candidates.append(expiry)
+            elif isinstance(expiry, str):
+                exp_candidates.append(expiry[:10])
+                exp_candidates.append(expiry)
+            else:
+                exp_candidates.append(str(expiry))
+                exp_candidates.append(expiry)
+
+            c = chains["Chains"]
+            call_map = c.get("CALL") or c.get("call") or {}
+            put_map = c.get("PUT") or c.get("put") or {}
+
+            call_strikes = set()
+            put_strikes = set()
+            for cand in exp_candidates:
+                if cand in call_map:
+                    call_strikes = set(call_map[cand])
+                    break
+            for cand in exp_candidates:
+                if cand in put_map:
+                    put_strikes = set(put_map[cand])
+                    break
+
+            valid = call_strikes & put_strikes if (call_strikes and put_strikes) else (call_strikes | put_strikes)
+            if valid:
+                return sorted(float(s) for s in valid)
+
         hub = getattr(self, "_market_data_hub", None)
         if hub is not None:
             return hub.get_strikes(self, self._underlying, chains=chains)
@@ -1686,22 +2168,33 @@ class SPXIronCondor(Strategy):
         )
 
     def _is_entry_window(self, now: datetime) -> bool:
-        """Allow entry within a 30-minute window starting at entry_time (or active market hours for neural mode)."""
+        """Allow entry within the configured execution window(s) through 15:31 (3:31 PM ET)."""
         current_time = now.time()
+
+        # Hard cutoff: no new entries allowed past 15:31 (3:31 PM ET)
+        if current_time > time(15, 31):
+            return False
+
         if getattr(self, "pure_neural_mode", False):
-            # Pure neural strategy trades dynamically during active market hours (10:00 - 15:30) once data is sufficient
-            return time(10, 0) <= current_time <= time(15, 30)
+            # Pure neural strategy trades dynamically during active market hours (09:45 - 15:31) once data is sufficient
+            return time(9, 45) <= current_time <= time(15, 31)
 
-        window_end = time(
-            self._entry_time.hour,
-            self._entry_time.minute + 30 if self._entry_time.minute + 30 < 60
-            else self._entry_time.minute + 30 - 60,
+        entry_times = getattr(self, "_entry_times", None) or [getattr(self, "_entry_time", time(9, 45))]
+        window_minutes = int(
+            self.parameters.get(
+                "entry_window_minutes",
+                4 if len(entry_times) > 1 else 30,
+            )
         )
-        # Handle hour rollover
-        if self._entry_time.minute + 30 >= 60:
-            window_end = time(self._entry_time.hour + 1, self._entry_time.minute + 30 - 60)
 
-        return self._entry_time <= current_time <= window_end
+        for target_time in entry_times:
+            total_end = target_time.hour * 60 + target_time.minute + window_minutes
+            window_end = time((total_end // 60) % 24, total_end % 60, 59)
+            effective_end = min(window_end, time(15, 31, 0)) if window_end > time(15, 31, 0) and target_time <= time(15, 31, 0) else window_end
+            if target_time <= current_time <= effective_end:
+                return True
+
+        return False
 
     def _check_allocation(self) -> bool:
         """Ensure we don't exceed max allocation, the hard position cap, or single-trade limits."""
@@ -1747,7 +2240,7 @@ class SPXIronCondor(Strategy):
         try:
             if not self._reconcile_broker_state() or self._recovery_lock:
                 return False
-            existing_exposure = self._position_ledger.portfolio_defined_risk()
+            existing_exposure = self._position_ledger.portfolio_defined_risk(self._strategy_id())
             if existing_exposure is None:
                 logger.warning("Ledger risk is unknown; blocking new exposure.")
                 return False
@@ -1759,10 +2252,25 @@ class SPXIronCondor(Strategy):
 
         if total_exposure > max_risk_cap:
             logger.warning(
-                "Total open exposure ($%.2f) exceeds $%.2f cap (new trade risk: $%.2f, existing: $%.2f). Skipping trade.",
-                total_exposure, max_risk_cap, new_trade_risk, existing_exposure,
+                "Strategy %s open exposure ($%.2f) exceeds per-strategy $%.2f cap (new trade risk: $%.2f, existing: $%.2f). Skipping trade.",
+                self._strategy_id(), total_exposure, max_risk_cap, new_trade_risk, existing_exposure,
             )
             return False
+
+        # Optional / configurable global portfolio risk cap across all strategies combined
+        global_cap_raw = self.parameters.get("max_portfolio_risk") or os.getenv("IC_MAX_PORTFOLIO_RISK")
+        if global_cap_raw is not None and str(global_cap_raw).strip():
+            try:
+                global_cap = float(global_cap_raw)
+                total_portfolio_exposure = self._position_ledger.portfolio_defined_risk()
+                if total_portfolio_exposure is not None and (total_portfolio_exposure + new_trade_risk) > global_cap:
+                    logger.warning(
+                        "Total account portfolio exposure ($%.2f) exceeds $%.2f global cap (new trade risk: $%.2f, existing: $%.2f). Skipping trade.",
+                        total_portfolio_exposure + new_trade_risk, global_cap, new_trade_risk, total_portfolio_exposure,
+                    )
+                    return False
+            except ValueError:
+                pass
 
         # 3. Portfolio percentage allocation check
         if portfolio_value is None or portfolio_value <= 0:
@@ -1832,20 +2340,45 @@ class SPXIronCondor(Strategy):
             if not chains:
                 return None, None
 
-            strikes = self._fetch_strikes(chains)
+            strikes = self._fetch_strikes(chains, expiry=expiry)
             if not strikes:
                 return None, None
 
-            put_strike, call_strike = select_short_strikes(
-                strikes,
-                underlying_price,
-                self.parameters["short_delta"],
-                self.parameters["dte"],
-                self.parameters["wing_width"],
-            )
+            otm_pct = self.parameters.get("otm_pct")
+            otm_put = self.parameters.get("otm_put_pct", otm_pct)
+            otm_call = self.parameters.get("otm_call_pct", otm_pct)
+            wing = float(self.parameters["wing_width"])
+
+            active_put_delta = getattr(self, "_active_put_delta", None)
+            active_call_delta = getattr(self, "_active_call_delta", None)
+
+            if otm_put is not None and otm_call is not None:
+                put_strike, call_strike = select_short_strikes_otm_pct(
+                    strikes,
+                    underlying_price,
+                    float(otm_put),
+                    float(otm_call),
+                    wing,
+                )
+            elif active_put_delta is not None and active_call_delta is not None:
+                put_strike, call_strike = select_short_strikes_skew(
+                    strikes,
+                    underlying_price,
+                    float(active_put_delta),
+                    float(active_call_delta),
+                    self.parameters.get("dte", 0),
+                    wing,
+                )
+            else:
+                put_strike, call_strike = select_short_strikes(
+                    strikes,
+                    underlying_price,
+                    self.parameters.get("short_delta", 0.15),
+                    self.parameters.get("dte", 0),
+                    wing,
+                )
 
             available = {float(strike) for strike in strikes}
-            wing = float(self.parameters["wing_width"])
             if (
                 put_strike is None
                 or call_strike is None

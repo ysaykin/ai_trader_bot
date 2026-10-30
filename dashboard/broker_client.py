@@ -127,7 +127,7 @@ class TradierClient:
         return {}
 
     def fetch_positions(self) -> List[Dict[str, Any]]:
-        """Fetch open positions."""
+        """Fetch open positions with real-time mark-to-market pricing and Greeks."""
         try:
             url = f"{self.base_url}/accounts/{self.account}/positions"
             res = requests.get(url, headers=self.headers, timeout=6)
@@ -138,16 +138,81 @@ class TradierClient:
                 position_list = pos_data.get("position", [])
                 if isinstance(position_list, dict):
                     position_list = [position_list]
+                if not position_list:
+                    return []
+
+                # Fetch real-time quotes and Greeks for all open option symbols
+                symbols = [str(p.get("symbol")) for p in position_list if p.get("symbol")]
+                quotes_map: Dict[str, Dict[str, Any]] = {}
+                if symbols:
+                    try:
+                        q_url = f"{self.base_url}/markets/quotes"
+                        q_res = requests.get(
+                            q_url,
+                            headers=self.headers,
+                            params={"symbols": ",".join(symbols), "greeks": "true"},
+                            timeout=6,
+                        )
+                        if q_res.status_code == 200:
+                            q_data = q_res.json().get("quotes", {}).get("quote", [])
+                            if isinstance(q_data, dict):
+                                q_data = [q_data]
+                            for q in q_data:
+                                if "symbol" in q:
+                                    quotes_map[q["symbol"]] = q
+                    except Exception as q_err:
+                        logger.warning(f"Tradier fetch_positions quotes error: {q_err}")
+
                 formatted = []
                 for p in position_list:
+                    sym = p.get("symbol")
+                    qty = float(p.get("quantity", 0))
+                    cost_basis = float(p.get("cost_basis", 0))
+                    q = quotes_map.get(sym, {})
+                    bid = q.get("bid")
+                    ask = q.get("ask")
+                    last = q.get("last")
+
+                    # Mark-to-market midpoint calculation
+                    mark: Optional[float] = None
+                    if bid is not None and ask is not None:
+                        try:
+                            b, a = float(bid), float(ask)
+                            if b >= 0 and a >= b:
+                                mark = (b + a) / 2.0
+                        except (TypeError, ValueError):
+                            pass
+                    if mark is None and last is not None:
+                        try:
+                            l = float(last)
+                            if l >= 0:
+                                mark = l
+                        except (TypeError, ValueError):
+                            pass
+                    if mark is None:
+                        # Fallback to unit cost basis if quote is completely unavailable
+                        mark = abs(cost_basis) / (100.0 * abs(qty)) if qty != 0 else 0.0
+
+                    market_value = qty * mark * 100.0
+                    # Gain/Loss = Market Value - Cost Basis (holds for both long and short per Tradier accounting)
+                    unrealized_pl = market_value - cost_basis
+
+                    greeks = q.get("greeks") or {}
+                    delta = float(greeks.get("delta")) if greeks.get("delta") is not None else None
+                    theta = float(greeks.get("theta")) if greeks.get("theta") is not None else None
+
                     formatted.append({
-                        "symbol": p.get("symbol"),
-                        "qty": float(p.get("quantity", 0)),
-                        "cost_basis": float(p.get("cost_basis", 0)),
-                        "current_price": float(p.get("cost_basis", 0)),
-                        "market_value": float(p.get("cost_basis", 0)),
-                        "unrealized_pl": 0.0,
-                        "side": "long" if float(p.get("quantity", 0)) > 0 else "short",
+                        "symbol": sym,
+                        "qty": qty,
+                        "quantity": qty,
+                        "cost_basis": cost_basis,
+                        "current_price": mark,
+                        "last_price": mark,
+                        "market_value": market_value,
+                        "unrealized_pl": unrealized_pl,
+                        "delta": delta,
+                        "theta": theta,
+                        "side": "long" if qty > 0 else "short",
                     })
                 return formatted
         except Exception as e:

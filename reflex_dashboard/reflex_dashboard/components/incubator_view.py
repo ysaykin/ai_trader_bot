@@ -287,7 +287,7 @@ def incubator_view() -> rx.Component:
                                     rx.table.cell(rx.text(row["profit_target"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["stop_loss"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["closed_trades"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["win_rate"], weight="bold", color=GREEN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(row["win_rate"], weight="bold", color=row["win_rate_color"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["gross_pnl_str"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["net_pnl_str"], weight="bold", color=row["status_color"], class_name="tabular-nums nowrap")),

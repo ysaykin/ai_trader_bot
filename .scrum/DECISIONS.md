@@ -68,3 +68,53 @@
   4. **Jev-Bot Hardening (`jev_bot/config.py`, `jev_bot/main.py`, `pyproject.toml`, `tests/test_entrypoint.py`, `tests/test_structure.py`)**: Added `math.isfinite` validation to prevent `NaN`/`inf` parameters, caught configuration `ValueError`s to log and exit with code 2, and added `[tool.setuptools.packages.find]` for package discovery.
   5. **Resilient Test Discovery (`tests/test_reflex_dashboard.py`)**: Added `pytest.importorskip("reflex")` to avoid test crashes when optional UI dependencies are not installed.
 - **Trade-offs**: Non-restarting fatal exit terminates the process on bad configuration rather than entering a backoff loop, requiring valid environment credentials before starting the trading loop. Relocating legacy prototypes ensures clean upstream package imports for developers and CLI tools.
+
+## ADR-07: StrategyBro 90 DTE Dynamic Iron Condor vs Vertical Spread (2026-10-28)
+- **Context**: To mimic StrategyBro's 90 DTE dynamic playbook, the system needed a variant capable of dynamically selecting between an Iron Condor and a single-side Vertical spread based on standard deviation (Z-score) of the underlying asset from its historical mean, with percentage OTM strike selection, a 30 DTE roll trigger, and an entry quality filter.
+- **Decision**:
+  1. **Dynamic Structure Resolution (`strategies/iron_condor_math.py`, `strategies/iron_condor.py`)**: Implemented `calculate_zscore`, `evaluate_strategybro_entry_quality`, and `resolve_strategybro_structure`:
+     - `Abs SD <= 0.60` $\to$ `iron_condor`
+     - `Abs SD > 0.60 & positive` $\to$ `bear_call` (Sell Call Vertical)
+     - `Abs SD > 0.60 & negative` $\to$ `bull_put` (Sell Put Vertical)
+     - `Abs SD > 1.50` $\to$ Avoid zone (entry skipped)
+  2. **Percentage-OTM Strike Selection (`strategies/iron_condor_math.py`, `strategies/iron_condor.py`)**: Added `select_short_strikes_otm_pct` selecting short put and call strikes at configurable target OTM distances (default 7% OTM), verifying outer wing availability.
+  3. **30 DTE Management & Roll Trigger (`strategies/iron_condor.py`)**: Added `_days_to_expiration` calculation; `_manage_position` triggers an early exit with `exit_reason="ROLL_DTE"` when remaining DTE reaches $\le 30$ (or upon reaching 50% profit target).
+  4. **Incubator Integration (`strategies/incubator.py`)**: Added `get_strategybro_spec()` registered into `get_incubator_specs()` as `IC_V25_90DTE_STRATEGYBRO_DYNAMIC` (`STRATEGYBRO_ENABLED=true`), fully isolated with shared `MarketDataHub`.
+- **Trade-offs**: Calculating Z-score uses historical daily closes with a 0.0 fallback (Iron Condor) if historical data is unavailable, ensuring safe execution even during broker data initialization.
+
+## ADR-08: Intraday Execution Schedule Expansion through 3:31 PM ET Every 30 Minutes (2026-10-28)
+- **Context**: Limiting strategy entries to static morning windows (09:45, 10:00, 10:15, 10:30) restricted data collection, trading observations, and opportunities to enter after morning positions closed at profit targets or stop losses.
+- **Decision**:
+  1. **Expanded 30-Minute Execution Schedule (`strategies/iron_condor.py`, `strategies/incubator.py`)**: Expanded default execution run times across all strategies to 15 slots spanning the trading day: `09:45, 10:00, 10:15, 10:30, 11:00, 11:30, 12:00, 12:30, 13:00, 13:30, 14:00, 14:30, 15:00, 15:30, 15:31`.
+  2. **Strict Hard Cutoff at 3:31 PM ET (`_is_entry_window`)**: Enforced a hard cutoff at 15:31 (`time(15, 31)`) so no new positions are entered after 3:31 PM, preventing pin risk or entering expiring contracts right before the 16:00 close.
+  3. **Pure Neural Active Window Expansion**: Expanded dynamic neural trading window from `10:00 - 15:30` to `09:45 - 15:31`.
+  4. **Grid-Wide Strategy Synchronization (`strategies/incubator.py`)**: Applied the expanded schedule across all 20 benchmark incubator variants (`IC_V01`..`IC_V20`), testing variant (`IC_V21`), pure neural strategy (`IC_V22`), standalone verticals (`IC_V23`, `IC_V24`), StrategyBro dynamic (`IC_V25`), and A/B lab strategies.
+  5. **Dashboard Presentation Formatting (`reflex_dashboard/reflex_dashboard/data/adapters.py`)**: Added `format_entry_schedule` helper rendering compact summaries (`09:45 - 15:31 ET (Every 30m)`) in table views with full timestamp lists preserved in `entry_time_full`.
+- **Trade-offs**: Staggered 30-minute intervals ensure continuous opportunity evaluation throughout the day whenever positions become flat, while the 15:31 cutoff preserves risk boundaries before 0DTE settlement.
+
+## ADR-09: Expiration-Specific Strike Filtering, Per-Strategy Risk Isolation & Immediate Trade Inception Visibility (2026-10-28)
+- **Context**: Operational monitoring revealed three live execution and reporting impediments:
+  1. Multi-day variants (7DTE, 14DTE, 21DTE, 30DTE, 90DTE) failed order submission because `_find_short_strikes` extracted strikes across all 44 expirations unioned by Tradier, selecting $1-increment strikes that only existed on 0DTE chains and triggering `Invalid symbol` quote errors.
+  2. Defined risk limit checks evaluated account-wide open risk against single-strategy parameters, causing active trades in one variant to block entries in unrelated variants.
+  3. The Reflex dashboard only counted and rendered closed trades, leaving open positions invisible in the primary trade stream and reporting 0 trades for newly active strategies.
+- **Decision**:
+  1. **Expiration-Specific Strike Filtering (`strategies/iron_condor.py`)**: Updated `_fetch_strikes(chains, expiry=expiry)` to filter strikes strictly from `chains["Chains"]["CALL"][exp_str]` and `["PUT"][exp_str]`, guaranteeing only quoteable strikes are selected.
+  2. **Per-Strategy Risk Cap Isolation (`strategies/iron_condor.py`, `.env`)**: Scoped `portfolio_defined_risk(self._strategy_id())` to enforce risk limits independently per strategy ($15,000 default) with an overarching $100,000 global portfolio cap.
+  3. **Opposing-Leg Conflict Prevention (`strategies/iron_condor.py`)**: Added pre-submission cross-check against `PositionLedger.all_owned_quantities()` to reject packages containing legs that oppose existing open positions, preventing broker "Buy to Cover" rejections.
+  4. **Immediate Trade Inception Visibility (`reflex_dashboard/reflex_dashboard/data/adapters.py`)**: Unified trade counts as `total_trades = open + closed`, formatted open trades with real-time tokens (`status="OPEN"`, cyan badges), and prepended them to `visible_trades_50 = (open_all + closed_all)[:50]`.
+  5. **Fee-Adjusted Net Win Rate (`reflex_dashboard/reflex_dashboard/data/adapters.py`)**: Classified trades with negative net P&L after fees as losses, maintaining accounting integrity.
+- **Trade-offs**: Expiration-specific filtering adds dictionary key lookups across chains, but eliminates invalid symbol rejections and ensures reliable execution across all maturities.
+
+## ADR-10: Confirmed Opening Credit Enforcement, Roll/DTE Exit Precedence & Tradier Log Redaction (2026-10-30)
+- **Context**: Operational audits and regression reviews identified two safety vulnerabilities in position lifecycle management and broker connectivity:
+  1. When opening credit was delayed or unconfirmed by broker fill events, `SPXIronCondor._manage_position` attempted fallback valuation using the submitted package limit price. This manufactured an unverified entry credit baseline that could trigger premature profit-taking or incorrect stop-loss actions when actual fill prices differed from the limit price.
+  2. The position lifecycle checked opening credit availability before evaluating roll/DTE exit targets. If opening credit marks were delayed or unavailable, the strategy bypassed `roll_dte` checks, leaving aging positions unmanaged past their roll threshold.
+  3. Tradier connection logs printed `ACCOUNT_NUMBER` in plain text during initialization, leaking sensitive identifiers in runtime logs.
+  4. Tradier polling cadence was hardcoded without configurability across paper and live environments.
+- **Decision**:
+  1. **Strict Confirmed Opening Credit Enforcement (`strategies/iron_condor.py`)**: Removed limit price credit recovery fallback. Required finite, positive confirmed cash (`_entry_credit_cash`). If opening credit is unconfirmed, the strategy publishes `VALUATION_UNAVAILABLE` and returns safely while strictly retaining open contracts (never resetting `_position_open = False` or clearing `_owned_legs`).
+  2. **Roll/DTE Exit Precedence Ahead of Valuation (`strategies/iron_condor.py`)**: Reordered `_manage_position` to evaluate `roll_dte` against `_days_to_expiration()` before checking opening credit availability or calculating option marks. When `remaining_dte <= roll_dte`, immediately triggers `_close_all_options(exit_reason="ROLL_DTE")`.
+  3. **Tradier Connection Log Sanitization (`main.py`)**: Redacted account numbers from startup logs, logging only paper mode status and polling interval (`Connecting to Tradier (paper=%s, polling_interval=%.1fs)...`).
+  4. **Configurable Polling Interval (`main.py`, `.env.example`)**: Added `TRADIER_POLLING_INTERVAL` parsing with a 1.0s minimum floor, defaulting to 15.0s for paper trading and 5.0s for live trading.
+  5. **Jev-Bot Lifecycle and Multi-Entrypoint Verification (`tests/test_config.py`, `tests/test_bot.py`, `tests/test_entrypoint.py`, `tests/test_structure.py`)**: Verified clean lifecycle termination, isolated test environments from local `.env`, and asserted single-step execution across root script, module (`python -m jev_bot`), and installed CLI command.
+- **Trade-offs**: Rejecting limit-price fallback prevents phantom P&L triggers but temporarily pauses profit/loss exit checks until fill credit confirms; capital safety is maintained by strict contract retention and subsequent EOD liquidation guards.

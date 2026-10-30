@@ -44,12 +44,12 @@ class DashboardState(rx.State):
     broker_name: str = "TRADIER"
     account_id: str = "VA21359019"
     is_paper: bool = True
-    equity: float = 99762.40
-    equity_str: str = "$99,762.40"
-    cash: float = 99762.40
-    cash_str: str = "$99,762.40"
-    buying_power: float = 99795.65
-    buying_power_str: str = "$99,795.65"
+    equity: float = 98098.00
+    equity_str: str = "$98,098.00"
+    cash: float = 98098.00
+    cash_str: str = "$98,098.00"
+    buying_power: float = 95385.00
+    buying_power_str: str = "$95,385.00"
     option_requirement: float = 0.0
     option_requirement_str: str = "$0.00"
     open_risk: float = 0.0
@@ -114,6 +114,7 @@ class DashboardState(rx.State):
         "config_desc": "Delta 0.15, Wing $5.0, PT 50%, SL 2.0x, 1DTE",
         "closed_trades": "1 Trade",
         "win_rate": "100.0%",
+        "win_rate_color": "#10B981",
         "gross_pnl_str": "+$28.00",
         "fees_str": "-$3.20",
         "net_pnl_str": "+$24.80",
@@ -128,6 +129,7 @@ class DashboardState(rx.State):
         "config_desc": "Delta 0.20, Wing $3.0, PT 50%, SL 2.0x, 0DTE",
         "closed_trades": "1 Trade",
         "win_rate": "100.0%",
+        "win_rate_color": "#10B981",
         "gross_pnl_str": "+$26.00",
         "fees_str": "-$3.20",
         "net_pnl_str": "+$22.80",
@@ -359,6 +361,7 @@ class DashboardState(rx.State):
                 "config_desc": match_a["config_desc"],
                 "closed_trades": match_a["closed_trades"],
                 "win_rate": match_a["win_rate"],
+                "win_rate_color": match_a.get("win_rate_color", "#10B981"),
                 "gross_pnl_str": match_a["gross_pnl_str"],
                 "fees_str": match_a["fees_str"],
                 "net_pnl_str": match_a["net_pnl_str"],
@@ -376,6 +379,7 @@ class DashboardState(rx.State):
                 "config_desc": match_b["config_desc"],
                 "closed_trades": match_b["closed_trades"],
                 "win_rate": match_b["win_rate"],
+                "win_rate_color": match_b.get("win_rate_color", "#10B981"),
                 "gross_pnl_str": match_b["gross_pnl_str"],
                 "fees_str": match_b["fees_str"],
                 "net_pnl_str": match_b["net_pnl_str"],

@@ -1,25 +1,54 @@
 version: 1
+dashboard_review:
+  date: "2026-10-30"
+  scope: "Running Reflex dashboard at localhost:8501, dashboard source, backlog and feature claims"
+  limitations:
+    - "Read-only UI and source review. New dashboard features and broker write tests were not executed."
+    - "Completed engine tasks outside the dashboard were checked for scope and evidence, not fully revalidated."
+  references:
+    - "https://toslc.thinkorswim.com/center/howToTos/thinkManual/Monitor/Activity-and-Positions/Position-Statement"
+    - "https://toslc.thinkorswim.com/center/howToTos/thinkManual/Analyze"
+    - "https://www.tastylive.com/news-insights/track-options-trades-automatically-with-order-chains"
 tasks:
   # --- Foundation & Risk Guardrails (Completed) ---
   - id: user-features-catalog
-    title: "Establish and maintain single-source-of-truth user features catalog"
-    status: completed
+    title: "Reconcile feature catalog, dashboard documentation and sprint claims with the running Reflex app"
+    status: pending
+    priority: P1
     owner: antigravity
+    review_notes:
+      - "Reopened 2026-10-30. GUI-04 is Active in both catalogs, but the Reflex positions view contains no payoff explorer."
+      - "DASHBOARD.md claims strategy tags, parsed contract fields and IV in the positions view; the current seven-column table lacks them."
+      - "README.md and dashboard/README.md still direct users to Streamlit although docker-compose.yml serves Reflex."
+      - "The catalogs, GOAL.md and SPRINT.yaml retain $5k global risk and fixed 20/25-variant claims after later per-strategy/global risk work and IC_V29 additions."
+    acceptance:
+      - "Mark delivered, partial, planned and legacy capabilities explicitly. GUI-04 remains pending for Reflex until the actual explorer is verified."
+      - "Document configured per-strategy and portfolio caps separately and distinguish the original 20 baseline variants from the current configured set."
+      - "Give startup instructions for the actual Docker services and keep the mirrored feature catalogs consistent."
     deliverables:
       - USER_FEATURES.md
       - dashboard/USER_FEATURES.md
+      - DASHBOARD.md
+      - README.md
+      - dashboard/README.md
+      - .scrum/GOAL.md
+      - .scrum/SPRINT.yaml
   - id: risk-single-trade-sliding-scale
-    title: "Implement sliding scale single-trade risk cap (30% down to 5%) and $5k global limit"
+    title: "Implement original sliding-scale single-trade guardrail and initial $5k risk limit"
     status: completed
     owner: antigravity
+    review_notes:
+      - "Historical implementation retained. Current cap policy is tracked by per-strategy-risk-isolation-and-portfolio-cap; dashboard synchronization is still pending."
     deliverables:
       - strategies/iron_condor.py
       - .env
       - .env.example
   - id: ui-trading-cockpit-redesign
-    title: "Redo trading overview dashboard with real-time status, risk dials, and A/B comparison"
+    title: "Implement legacy Streamlit trading overview, risk dials and A/B comparison"
     status: completed
     owner: antigravity
+    review_notes:
+      - "Completion covers dashboard/app.py, not parity in the active Reflex application. New Reflex position, comparison and payoff work is recorded below."
     deliverables:
       - dashboard/app.py
       - dashboard/broker_client.py
@@ -84,10 +113,13 @@ tasks:
     title: "Implement daily post-market continual learning pipeline with Purged Walk-Forward CV and Champion/Challenger shadow promotion gate"
     status: pending
     owner: antigravity
+    review_notes:
+      - "Still pending on 2026-10-30. ml/continual_learner.py does not exist. Offline training/inference completion does not complete scheduled retraining or promotion."
     deliverables:
       - ml/continual_learner.py
       - ml/models/
-      - dashboard/app.py
+      - reflex_dashboard/reflex_dashboard/components/neural_view.py
+      - reflex_dashboard/reflex_dashboard/state.py
 
   # --- Follow-Up Tasks & Edge-Case Defects ---
   - id: broker-config-and-ledger-credit-recovery
@@ -142,9 +174,11 @@ tasks:
       - ../jev-bot/tests/test_structure.py
 
   - id: tradier-live-multileg-reconciliation
-    title: "Verify end-to-end Tradier multileg order fills against live paper broker sandbox and test multi-day ledger rollover"
+    title: "Implement Tradier multileg reconciliation, ledger rollover and the opt-in sandbox verification harness"
     status: completed
     owner: antigravity
+    review_notes:
+      - "Narrowed the completion claim on 2026-10-30 to implementation and offline coverage. Live submission/cancellation and actual fill/rollover verification remain in tradier-sandbox-live-execution-opt-in."
     deliverables:
       - strategies/position_ledger.py
       - strategies/iron_condor.py
@@ -161,15 +195,482 @@ tasks:
       - README.md
 
   - id: tradier-sandbox-live-execution-opt-in
-    title: "Execute live state-changing multileg order submission and cancellation against Tradier paper sandbox with active contract symbols (RUN_TRADIER_SANDBOX_WRITE_TEST=1)"
+    title: "Verify Tradier paper submission/cancellation, confirmed multileg fills and restart/session rollover with recorded evidence"
     status: pending
     owner: antigravity
+    review_notes:
+      - "Existing opt-in test only submits and cancels a deliberately non-marketable order. Passing that test does not prove fills or multi-day position continuity."
+      - "No broker mutation was performed during the dashboard review."
+    acceptance:
+      - "Record the opted-in environment, date, redacted broker order identifiers and submission/cancellation outcome."
+      - "Separately reconcile confirmed parent/child fills, signed quantities and cash flows to the ledger."
+      - "Verify restart and session rollover preserve unexpired ownership; do not mark complete from offline mocks or submit/cancel alone."
     deliverables:
       - tests/test_tradier_sandbox.py
+      - strategies/position_ledger.py
 
   - id: verify-post-cs4d-specifications
     title: "Verify and implement downstream requirements succeeding CS-4d once the full specification is unblocked"
     status: pending
     owner: antigravity
+    review_notes:
+      - "Needs specification. The repository contains no linked CS-4d requirements or concrete acceptance criteria beyond this task title. Keep pending until the missing source is identified."
     deliverables:
       - tests/
+
+  # --- Execution Robustness, StrategyBro & Live Dashboard Visibility ---
+  - id: strategybro-90dte-dynamic-sd-structure
+    title: "Implement StrategyBro 90 DTE dynamic Iron Condor vs Vertical Spread strategy with historical Z-score regime trigger, % OTM strikes, and 30 DTE roll trigger"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/iron_condor_math.py
+      - strategies/iron_condor.py
+      - strategies/incubator.py
+      - tests/test_strategybro.py
+
+  - id: intraday-execution-schedule-expansion
+    title: "Expand configured intraday entry slots through the 3:31 PM ET cutoff"
+    status: completed
+    owner: antigravity
+    review_notes:
+      - "Corrected wording on 2026-10-30. The configured schedule includes 15-minute opening intervals and a final 15:31 slot, so it is not uniformly every 30 minutes."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/incubator.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_regressions.py
+
+  - id: per-strategy-risk-isolation-and-portfolio-cap
+    title: "Enforce per-strategy defined risk isolation ($15k default) decoupled from global portfolio cap ($100k) to prevent peer execution blocking"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/iron_condor.py
+      - .env
+      - .env.example
+      - tests/test_regressions.py
+
+  - id: expiration-specific-strike-filtering
+    title: "Filter option chain strikes strictly against target expiration date to prevent non-0DTE strategies from picking invalid strikes from 0DTE union"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/iron_condor.py
+      - tests/test_regressions.py
+
+  - id: opposing-leg-conflict-pre-submission-gate
+    title: "Add pre-submission cross-check in position ledger against all owned quantities to reject packages creating opposing short/long positions (preventing Tradier Buy-to-Cover rejection)"
+    status: completed
+    owner: antigravity
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - tests/test_regressions.py
+
+  - id: dashboard-live-open-trades-and-inception-counting
+    title: "Count trades immediately upon inception and display active open positions with live formatting at the top of the dashboard trade stream"
+    status: completed
+    owner: antigravity
+    review_notes:
+      - "Open trade rows and inception counts exist. An OPEN label is not a marked aggregate P&L. Grouped valuation and current-position comparison remain pending below."
+      - "test_incubator_data still assumes visible_trades_50 equals all closed trades, despite open rows and the 50-row limit. Covered by dashboard-regression-fixtures-and-browser-checks."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/components/incubator_view.py
+      - tests/test_reflex_dashboard.py
+
+  - id: net-pnl-loss-accounting-and-win-rate-integrity
+    title: "Enforce fee-adjusted net P&L win rate calculation so trades with negative net returns are strictly accounted as losses"
+    status: completed
+    owner: antigravity
+    review_notes:
+      - "Keep completed for numerical win/loss accounting. This does not cover display colors; dashboard-signed-value-formatting remains pending."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_reflex_dashboard.py
+
+  - id: confirmed-credit-safety-roll-exits-and-log-redaction
+    title: "Enforce confirmed opening credit safety, roll/DTE exit precedence, Tradier connection log redaction, and Jev-bot lifecycle verification"
+    status: completed
+    owner: antigravity
+    review_notes:
+      - "Removed submitted-limit credit recovery to prevent fabricated P&L baselines; requires finite positive confirmed cash while preserving contract ownership."
+      - "Moved roll/DTE target checks ahead of valuation gates to ensure timely expiration rolling even when quote marks are delayed."
+      - "Redacted Tradier account numbers from connection logs and added TRADIER_POLLING_INTERVAL."
+      - "Verified Jev-bot scaffold lifecycle and three entrypoints in isolated test subprocesses."
+    deliverables:
+      - main.py
+      - strategies/iron_condor.py
+      - .env.example
+      - tests/test_regressions.py
+      - tests/test_strike_selection_and_pnl.py
+      - ../jev-bot/tests/test_config.py
+      - ../jev-bot/tests/test_bot.py
+      - ../jev-bot/tests/test_entrypoint.py
+      - ../jev-bot/tests/test_structure.py
+      - ../jev-bot/README.md
+      - ../jev-bot/.env.example
+
+  # --- Dashboard review: position grouping, strategy comparison and display integrity ---
+  # P0: misleading displayed values. P1: requested position workflow. P2: supporting verification.
+  - id: dashboard-signed-value-formatting
+    title: "Render every negative numeric value red consistently across the dashboard"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "positions_view.py: unrealized_pl always uses GREEN; signed quantities, cost basis and Greeks use no sign-aware style."
+      - "ab_lab_view.py: both net P&L cards always use GREEN, return percentages use CYAN/AMBER and fees use AMBER."
+      - "benchmark_view.py: literal -0.19% drawdown uses GREEN. incubator_view.py colors net P&L by trade status and return percentages CYAN."
+    acceptance:
+      - "Use one numeric presentation rule for negative amounts, percentages, ratios, signed quantities and Greeks in all visible tables, cards, summaries, chart value labels and tooltips. Negative numbers are red with a visible minus sign."
+      - "Use green for positive P&L/returns and neutral for zero/unavailable. Avoid a displayed -0.00 after rounding. Status and strategy colors never override numeric sign."
+      - "Format currency as -$123.45 consistently; fee deductions have an explicit sign and red styling. A positive fee magnitude must be labeled as a cost."
+      - "Keep raw numeric values separate from display strings. Check positive, negative, zero, rounded zero and unavailable values in light and dark appearances."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/styles/
+      - reflex_dashboard/reflex_dashboard/components/
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_reflex_dashboard.py
+
+  - id: dashboard-telemetry-validity
+    title: "Distinguish loading, empty, stale and failed data without showing fabricated balances or zero P&L"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "adapters.py:get_broker_telemetry starts with fixed balances and empty positions; missing marks fall back to cost basis."
+      - "state.py starts with populated example account, A/B, market and model values. benchmark_view.py renders fixed performance numbers."
+      - "positions_view.py claims all 14 condors hit targets and the broker confirms zero positions whenever the list is empty."
+    acceptance:
+      - "Represent loading, successful empty results, stale last-known data and failures explicitly for each source. Show source and last successful quote/sync timestamp."
+      - "An unavailable leg mark makes that package's valuation unavailable or explicitly partial; never substitute entry cost to manufacture zero P&L."
+      - "Remove live-looking sample balances, fixed benchmark results and success narratives from live states. Label a separate demo mode clearly if retained."
+      - "Aggregate totals disclose excluded/unvalued positions and coverage. An API failure never implies zero exposure or no open trades."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/components/
+      - tests/test_reflex_dashboard.py
+
+  - id: dashboard-configured-risk-telemetry
+    title: "Display configured strategy and portfolio risk limits with matching live utilization"
+    status: pending
+    priority: P0
+    owner: unassigned
+    depends_on:
+      - dashboard-telemetry-validity
+    evidence:
+      - ".env.example configures $15k per strategy and $100k portfolio defaults; adapters.py and scanner labels still use $5k."
+      - "risk_gauges.py displays fixed 30% sizing and 100.0% Available text even when the progress value changes."
+    acceptance:
+      - "Read effective runtime limits and sizing policy instead of hardcoding $5k, 30% or fixed availability text."
+      - "Show per-strategy utilization separately from portfolio utilization, with the same denominator in the number, percentage and progress bar."
+      - "Risk from ledger ownership is reconciled with broker exposure. Unknown exposure stays unknown and is never shown as healthy zero."
+      - "Derive configured/active variant counts from runtime data, including optional neural and dynamic variants."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/components/risk_gauges.py
+      - reflex_dashboard/reflex_dashboard/components/header.py
+      - reflex_dashboard/reflex_dashboard/components/monitor_view.py
+
+  - id: dashboard-owned-position-model
+    title: "Attribute marked option legs to durable trade packages and strategy variants"
+    status: pending
+    priority: P1
+    owner: unassigned
+    depends_on:
+      - dashboard-telemetry-validity
+    evidence:
+      - "PositionLedger stores package_id, strategy_id, trade_id, broker order linkage and signed fills. Reflex positions currently read only broker-netted contract rows."
+    acceptance:
+      - "Join confirmed ledger ownership and fills to broker positions and quotes by account, contract and durable trade/package identity. Never infer ownership from ticker/expiry proximity alone."
+      - "Separate strategy variant from actual filled structure: iron condor, bull put vertical, bear call vertical, adjusted or incomplete package."
+      - "Allocate shared contracts and partial quantities without double counting; expose unmatched broker inventory as unattributed."
+      - "Track one logical trade across adds, trims, replacements and explicitly linked rolls. Do not equate an order package with an entire trade lifecycle."
+      - "Compute gross open P&L, realized P&L on closed portions, booked fees and total net lifecycle P&L without counting cash flows or fees twice. Label estimated exit fees separately."
+      - "Reconcile package, strategy and account totals with numerical tolerances and make reconciliation gaps visible."
+    deliverables:
+      - strategies/position_ledger.py
+      - reflex_dashboard/reflex_dashboard/data/
+      - tests/test_reflex_dashboard.py
+
+  - id: dashboard-grouped-position-overview
+    title: "Show each complete IC or vertical as one expandable position with combined P&L"
+    status: pending
+    priority: P1
+    owner: unassigned
+    depends_on:
+      - dashboard-owned-position-model
+      - dashboard-signed-value-formatting
+    acceptance:
+      - "Default to strategy > logical position > legs. Keep same-symbol trades distinct by trade identity."
+      - "Show underlying, actual structure, strategy variant, expiry/DTE, package quantity, entry credit/debit, close-value estimate, open P&L and net lifecycle P&L."
+      - "Expose booked fees, realized portions, max defined risk and return denominator on expansion. Aggregate Greeks using signed quantity and contract multiplier with explicit units."
+      - "Expand a position for leg details and select it for analysis without losing filters. Keep partial/closing/unattributed positions visible."
+      - "Make Positions the primary trading overview and compact account/risk chrome so current positions are visible without scrolling past operational panels."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/components/positions_view.py
+      - reflex_dashboard/reflex_dashboard/reflex_dashboard.py
+      - reflex_dashboard/reflex_dashboard/state.py
+
+  - id: dashboard-strategy-filters
+    title: "Filter positions immediately by strategy variant and actual option structure"
+    status: pending
+    priority: P1
+    owner: unassigned
+    depends_on:
+      - dashboard-grouped-position-overview
+    acceptance:
+      - "Provide multi-select strategy variant and structure filters, including IC, bull put and bear call verticals; also allow underlying, expiry/DTE and position status."
+      - "Keep selection stable through refreshes. Show filtered counts and totals clearly, alongside separately labeled account totals."
+      - "Support select-all/clear and a useful no-match state without making hidden positions look closed."
+      - "Allow comparison of variants within one structure and structures across variants, including strategies with zero open positions."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/components/positions_view.py
+
+  - id: dashboard-current-strategy-comparison
+    title: "Compare currently held positions across selected strategies on a consistent basis"
+    status: pending
+    priority: P1
+    owner: unassigned
+    depends_on:
+      - dashboard-strategy-filters
+      - dashboard-configured-risk-telemetry
+    acceptance:
+      - "Select two or more strategies from the same positions workflow and show their current grouped positions alongside aggregate results."
+      - "Separate current open P&L, realized P&L in the chosen period, booked fees, net total, open-position count and defined risk. Do not present closed-trade totals as current-position performance."
+      - "Offer dollars and return on clearly defined initial risk. Calculate aggregate return as summed P&L divided by summed eligible risk, not an average of percentages."
+      - "Use the same quote snapshot, filters, account scope and reporting period. Show sample size and unavailable data; closed-trade win rate excludes open trades."
+      - "Keep observed P&L over time distinct from projected payoff across underlying prices. Historical series require stored snapshots and use one common time axis."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/components/ab_lab_view.py
+      - reflex_dashboard/reflex_dashboard/components/positions_view.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/data/
+
+  - id: dashboard-position-payoff-analysis
+    title: "Graph actual position payoff and compare strategy shapes using filled legs"
+    status: pending
+    priority: P1
+    owner: unassigned
+    depends_on:
+      - dashboard-owned-position-model
+      - dashboard-current-strategy-comparison
+    acceptance:
+      - "Build the selected position's expiration payoff from actual fills, signed quantities, multipliers, strikes and booked cash flows. Support ICs and both vertical directions."
+      - "Show spot, strikes, breakevens, maximum profit/loss and a visible zero line; negative numeric labels and tooltip values follow the shared red formatting rule."
+      - "Distinguish actual marked open P&L from hypothetical payoff. A theoretical today curve requires an explicit pricing model, quote timestamp, IV, date, rates and dividend assumptions. Hide it when inputs are unavailable."
+      - "Overlay comparable positions with aligned axes and a common valuation date. For mixed expiries, value remaining options at that date rather than pretending all legs expire together."
+      - "Do not add dollar-price curves across different underlyings. Use separate plots or an explicitly labeled common percentage-shock scenario with its assumptions."
+      - "Keep a labeled example-strategy gallery separate from actual holdings; the legacy assumed-strike condor A/B chart is not a live position graph."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/components/
+      - reflex_dashboard/reflex_dashboard/data/
+      - dashboard/payoff_chart.py
+      - tests/test_iron_condor_math.py
+      - tests/test_reflex_dashboard.py
+
+  - id: dashboard-comparison-selection-integrity
+    title: "Prevent stale A/B cards and false tie messages when strategy selection changes"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "state.py initializes obsolete strategy names. _recompute_ab_comparison keeps old cards when selection lookup fails but computes missing sides as zero."
+      - "Observed A/B cards with different P&L values while the banner claimed equal Net P&L."
+    acceptance:
+      - "Validate selection against refreshed options. Choose valid defaults or display an explicit unavailable state and clear old cards."
+      - "Derive cards and comparison banner from the same numeric records. Missing data never participates as zero or produces a tie."
+      - "Use current configured parameters or actual fill parameters as labeled, with no retained example descriptions from a prior strategy."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_reflex_dashboard.py
+
+  - id: dashboard-regression-fixtures-and-browser-checks
+    title: "Verify dashboard grouping, sign colors, filters and data states with deterministic fixtures and browser checks"
+    status: pending
+    priority: P2
+    owner: unassigned
+    depends_on:
+      - dashboard-grouped-position-overview
+      - dashboard-current-strategy-comparison
+      - dashboard-position-payoff-analysis
+      - dashboard-comparison-selection-integrity
+    acceptance:
+      - "Replace tests that depend on changing local trade logs or exact nine-row curation with deterministic source fixtures and explicit behavioral expectations."
+      - "Correct visible_trades_50 assertions for open rows and the 50-row limit; keep separate assertions for open, closed and total counts."
+      - "Exercise shared contracts, partial closes, linked rolls, fees, missing/stale marks and unmatched broker inventory. Assert sum reconciliation and signed Greek units."
+      - "In the browser, verify negative values are red in every view, selection survives refresh, comparison banners match cards and loading/error states never show fabricated performance."
+      - "Check keyboard controls and layouts at mobile and desktop widths. Do not mark dashboard behavior complete solely from adapter tests."
+    deliverables:
+      - tests/test_reflex_dashboard.py
+      - tools/audit_dashboard_ui.py
+
+  - id: bug-01-panic-liquidation-import-and-flatten
+    title: "Fix emergency panic liquidation ImportError and implement broker position flattening"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "reflex_dashboard/reflex_dashboard/state.py:478 imports non-existent BrokerClient from dashboard.broker_client and calls client.close_all_positions(), raising ImportError on click."
+      - "dashboard/broker_client.py:256-260 TradierClient.emergency_flatten_positions() only cancels open orders and returns True without submitting closing orders for open positions."
+    acceptance:
+      - "Replace BrokerClient import in DashboardState.execute_panic_liquidation() with get_broker_client() and invoke a real position-closing routine."
+      - "Implement closing order submission in TradierClient.emergency_flatten_positions() and surface per-position failures in the UI."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/state.py
+      - dashboard/broker_client.py
+      - tests/test_reflex_dashboard.py
+
+  - id: bug-02-dynamic-leg-count-fee-accounting
+    title: "Scale commission and fee calculations by actual leg count instead of hardcoded 4/8 legs"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "strategies/iron_condor.py:800,871,1824,1900,1929 hardcode 4 or 8 legs when computing entry, addition, exit, and roundtrip fees, overcharging 2-leg bull_put/bear_call vertical spreads by 2x and distorting live net_pnl exit triggers."
+      - "trade_logger.py:467,566,645,670,674 similarly hardcode 4 or 8 legs for fee accounting."
+    acceptance:
+      - "Compute entry, addition, adjustment, exit, and live roundtrip fees using actual leg count (len(legs) or len(self._owned_legs))."
+      - "Add unit tests verifying 2-leg vertical and 4-leg iron condor fee calculations in both live management and trade logging."
+    deliverables:
+      - strategies/iron_condor.py
+      - trade_logger.py
+      - tests/test_iron_condor_execution_safety.py
+      - tests/test_trade_logger_win_rate.py
+
+  - id: bug-03-partial-fill-terminal-order-reconciliation
+    title: "Reconcile partially filled baskets when residual broker order is canceled, rejected, or expired"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "strategies/iron_condor.py:1600-1635 only transitions canceled/rejected/expired baskets out of inflight state when refreshed.state == 'submitted' and all leg fills are zero."
+      - "Baskets that partially fill and then cancel/expire remain in state 'partial' indefinitely, blocking _manage_position(), apply_policy_action(), and _reconcile_broker_state()."
+    acceptance:
+      - "Transition partially filled baskets whose broker orders reach a terminal state (canceled/rejected/expired/failed) to a resolved ledger state or trigger recovery reconciliation."
+      - "Add regression tests covering partial fill followed by cancellation for entry, scale-in, and exit baskets."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - tests/test_iron_condor_execution_safety.py
+
+  - id: bug-04-neural-strategy-switch-entry-times
+    title: "Parse multi-slot entry_time schedules and update _entry_times during neural strategy switch"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "strategies/iron_condor.py:1085-1090 splits target_spec['entry_time'] on ':' assuming a single HH:MM value, raising ValueError on comma-separated schedules and leaving self._entry_times stale."
+    acceptance:
+      - "Reuse the comma-separated schedule parser in _apply_neural_strategy_switch() to update both self._entry_times and self._entry_time."
+      - "Raise or log explicit parsing errors instead of silently swallowing exceptions."
+    deliverables:
+      - strategies/iron_condor.py
+      - tests/test_live_policy_integration.py
+
+  - id: bug-05-config-view-env-key-alignment
+    title: "Align dashboard configuration reader/writer with runtime .env keys"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "reflex_dashboard/reflex_dashboard/state.py:493-512 and data/adapters.py:1082-1091 read/write BROKER, TRADIER_ACCOUNT_ID, and GLOBAL_RISK_CAP instead of TRADING_BROKER, TRADIER_ACCOUNT_NUMBER, IC_MAX_POSITION_RISK, and IC_MAX_PORTFOLIO_RISK used by main.py."
+      - "TRADIER_PAPER has no UI control or persistence in save_configuration()."
+    acceptance:
+      - "Read and write the canonical .env keys consumed by main.py while preserving backward-compatible fallback reads."
+      - "Expose paper/sandbox toggle and both per-strategy and global portfolio risk caps in the config UI."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/components/config_view.py
+      - tests/test_reflex_dashboard.py
+
+  - id: bug-06-reflex-trade-event-aggregation-and-win-rate
+    title: "Aggregate ENTRY, ADDITION, ADJUSTMENT, and EXIT trade events in Reflex adapters and fix open-trade win-rate dilution"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "reflex_dashboard/reflex_dashboard/data/adapters.py:471-504 merges trade events via dict.update(), overwriting entry timestamps and entry fees on EXIT and ignoring ADDITION and ADJUSTMENT cash flows."
+      - "adapters.py:666,761 divides closed wins by (closed + open) trades when computing overall_win_rate."
+    acceptance:
+      - "Accumulate quantities, credits, fees, and realized adjustment P&L across ENTRY, ADDITION, ADJUSTMENT, and EXIT events consistently with trade_logger.load_all_trades()."
+      - "Compute win_rate strictly over closed trades while keeping open trade counts separate."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_reflex_dashboard.py
+
+  - id: bug-07-ledger-strike-keys-and-multi-package-attribution
+    title: "Standardize strike dictionary keys on ledger entry and isolate multi-package cash and risk attribution"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "strategies/iron_condor.py:1885-1888 records strikes as put_1/put_2/call_3/call_4, causing adapters.py:format_strikes() to render blank ' / | / ' strings."
+      - "strategies/position_ledger.py:607 drops opening_credit when multiple expirations are open, and _refresh_package (line 740) mutates all open packages."
+    acceptance:
+      - "Record canonical long_put, short_put, short_call, and long_call strike keys in _record_filled_entry() and support indexed fallback in format_strikes()."
+      - "Attribute opening cash and defined risk per package/expiration without zeroing credit across multi-expiry holdings."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_position_ledger.py
+
+  - id: bug-08-trajectory-logger-scaling-and-session-tick-count
+    title: "Fix TrajectoryLogger quantity scaling, hardcoded $5k cap, and neural session tick counter"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "trade_logger.py:274 caps max_position_risk at $5,000.0 instead of configured IC_MAX_POSITION_RISK, and line 298 omits book['quantity'] when converting per-contract credit to cash P&L."
+      - "reflex_dashboard/reflex_dashboard/data/adapters.py:1010-1018 counts all lines in trajectories.jsonl across all dates and event types as current session ticks."
+    acceptance:
+      - "Multiply per-contract credit and mark by quantity * 100 in TrajectoryLogger._strategy_state() and respect configured max_position_risk."
+      - "Filter trajectories.jsonl by current session date and SNAPSHOT event_type in get_neural_policy_data()."
+    deliverables:
+      - trade_logger.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_trajectory_logger.py
+      - tests/test_reflex_dashboard.py
+
+  - id: bug-09-ui-telemetry-fallbacks-and-sign-colors
+    title: "Eliminate fabricated cost-basis quote fallbacks, bind header/gauge telemetry, and enforce negative red styling"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "reflex_dashboard/reflex_dashboard/data/adapters.py:304 and dashboard/broker_client.py:194 fall back to cost_basis when mark quotes are missing, fabricating $0.00 P&L."
+      - "positions_view.py:62, ab_lab_view.py:171,243, and benchmark_view.py:106 hardcode GREEN on signed P&L/drawdown; risk_gauges.py:86,99,154 and header.py:63,83 hardcode static labels and badge colors."
+    acceptance:
+      - "Surface missing marks as unavailable rather than substituting cost basis."
+      - "Bind dynamic state properties in risk_gauges.py and header.py, and apply negative red formatting across all P&L and drawdown components."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - dashboard/broker_client.py
+      - reflex_dashboard/reflex_dashboard/components/positions_view.py
+      - reflex_dashboard/reflex_dashboard/components/ab_lab_view.py
+      - reflex_dashboard/reflex_dashboard/components/benchmark_view.py
+      - reflex_dashboard/reflex_dashboard/components/risk_gauges.py
+      - reflex_dashboard/reflex_dashboard/components/header.py
+
+  - id: bug-10-legacy-react-form-and-mock-backend-accounting
+    title: "Fix broken FormData bindings in legacy React dashboard and inverted cash/credit math in FastAPI mock backend"
+    status: pending
+    priority: P2
+    owner: unassigned
+    evidence:
+      - "dashboard/src/App.jsx:41-54 reads formData.get('symbol') etc. from inputs that only have id attributes and no name attributes; #runTradeBtn triggers native form submit reload and #closeBtn has no onClick handler."
+      - "backend/app.py:23,53,79 computes cash as balance - equity, double-multiplies credit by quantity, and subtracts credit received from account_equity."
+    acceptance:
+      - "Add name attributes or controlled React state to #tradeForm inputs, prevent default form submission, and wire #closeBtn to closeAll."
+      - "Fix cash, credit, and equity accounting in backend/app.py and add endpoint tests."
+    deliverables:
+      - dashboard/src/App.jsx
+      - backend/app.py

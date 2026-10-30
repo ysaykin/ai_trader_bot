@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import tempfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 import unittest
@@ -78,7 +78,7 @@ class BrokerSelectionTests(unittest.TestCase):
                 self.get_broker({"TRADING_BROKER": "tradier", **credentials})
                 entrypoint._test_brokers.Tradier.assert_called_once_with({
                     "ACCESS_TOKEN": "test-token", "ACCOUNT_NUMBER": "VA21359019", "PAPER": True,
-                })
+                }, polling_interval=15.0)
 
     def test_explicit_alpaca_selection_wins_over_tradier_credentials(self) -> None:
         self.get_broker({
@@ -89,10 +89,73 @@ class BrokerSelectionTests(unittest.TestCase):
         entrypoint._test_brokers.Alpaca.assert_called_once()
 
     def test_explicit_tradier_requires_credentials(self) -> None:
-        for credentials in ({}, {"TRADIER_API_KEY": "your_tradier_api_key_here"}):
+        for credentials in (
+            {},
+            {"TRADIER_API_KEY": "your_tradier_api_key_here"},
+            {"TRADIER_ACCESS_TOKEN": "", "TRADIER_ACCOUNT_NUMBER": "test-account"},
+            {"TRADIER_ACCESS_TOKEN": "your_token", "TRADIER_ACCOUNT_NUMBER": "test-account"},
+            {"TRADIER_ACCESS_TOKEN": "test-token", "TRADIER_ACCOUNT_NUMBER": "your_account"},
+            {"TRADIER_ACCESS_TOKEN": "test-token", "TRADIER_ACCOUNT_NUMBER": " "},
+        ):
             with self.subTest(credentials=credentials), self.assertRaises(RuntimeError):
                 self.get_broker({"TRADING_BROKER": "tradier", **credentials})
-        entrypoint._test_brokers.Tradier.assert_not_called()
+            entrypoint._test_brokers.Tradier.assert_not_called()
+
+    def test_canonical_sandbox_settings_and_explicit_selection_take_precedence(self) -> None:
+        self.get_broker({
+            "TRADING_BROKER": "tradier",
+            "TRADIER_ACCESS_TOKEN": "canonical-token", "TRADIER_ACCOUNT_NUMBER": "canonical-account",
+            "TRADIER_API_KEY": "alias-token", "TRADIER_ACCOUNT": "alias-account",
+            "TRADIER_PAPER": "true", "TRADIER_IS_PAPER": "false", "TRADIER_SANDBOX": "0",
+            "ALPACA_API_KEY": "alpaca-key", "ALPACA_API_SECRET": "alpaca-secret",
+        })
+        entrypoint._test_brokers.Tradier.assert_called_once_with({
+            "ACCESS_TOKEN": "canonical-token", "ACCOUNT_NUMBER": "canonical-account", "PAPER": True,
+        }, polling_interval=15.0)
+        entrypoint._test_brokers.Alpaca.assert_not_called()
+
+    def test_invalid_paper_settings_fail_before_broker_construction(self) -> None:
+        for name in ("TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX"):
+            with self.subTest(name=name), self.assertRaises(entrypoint.ConfigurationError):
+                self.get_broker({
+                    "TRADING_BROKER": "tradier", "TRADIER_ACCESS_TOKEN": "test-token",
+                    "TRADIER_ACCOUNT_NUMBER": "test-account", name: "maybe",
+                })
+            entrypoint._test_brokers.Tradier.assert_not_called()
+
+    def test_connection_log_excludes_credentials(self) -> None:
+        with self.assertLogs(entrypoint.logger, level="INFO") as captured:
+            self.get_broker({
+                "TRADING_BROKER": "tradier", "TRADIER_ACCESS_TOKEN": "private-test-token",
+                "TRADIER_ACCOUNT_NUMBER": "private-test-account", "TRADIER_PAPER": "true",
+            })
+        messages = "\n".join(captured.output)
+        self.assertNotIn("private-test-token", messages)
+        self.assertNotIn("private-test-account", messages)
+        self.assertIn("paper=True", messages)
+        self.assertIn("polling_interval=15.0s", messages)
+
+    def test_real_dotenv_loader_supplies_canonical_sandbox_configuration(self) -> None:
+        from dotenv import load_dotenv
+
+        brokers = entrypoint._test_brokers
+        brokers.Tradier.reset_mock()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env"
+            path.write_text(
+                "TRADING_BROKER=tradier\nTRADIER_ACCESS_TOKEN=dotenv-token\n"
+                "TRADIER_ACCOUNT_NUMBER=dotenv-account\nTRADIER_PAPER=true\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch.dict("sys.modules", {"lumibot.brokers": brokers}),
+            ):
+                self.assertTrue(load_dotenv(path))
+                entrypoint.get_broker()
+        brokers.Tradier.assert_called_once_with({
+            "ACCESS_TOKEN": "dotenv-token", "ACCOUNT_NUMBER": "dotenv-account", "PAPER": True,
+        }, polling_interval=15.0)
 
     def test_paper_setting_has_explicit_precedence(self) -> None:
         for settings in ({"TRADIER_IS_PAPER": "false"}, {"TRADIER_SANDBOX": "0"}):
@@ -110,6 +173,13 @@ class BrokerSelectionTests(unittest.TestCase):
             "TRADIER_PAPER": "false",
             "TRADIER_IS_PAPER": "true",
             "TRADIER_SANDBOX": "1",
+        })
+        self.assertFalse(entrypoint._test_brokers.Tradier.call_args.args[0]["PAPER"])
+
+        self.get_broker({
+            "TRADING_BROKER": "tradier", "TRADIER_API_KEY": "test-token",
+            "TRADIER_ACCOUNT": "VA21359019", "TRADIER_PAPER": "",
+            "TRADIER_IS_PAPER": "false", "TRADIER_SANDBOX": "1",
         })
         self.assertFalse(entrypoint._test_brokers.Tradier.call_args.args[0]["PAPER"])
 
@@ -252,6 +322,7 @@ class IronCondorTests(unittest.TestCase):
         quantity: int = 1,
         prices: tuple[float, float, float, float] = (0.25, 1.25, 1.25, 0.25),
         expiration: str = "2026-10-26",
+        limit_price: float | None = None,
     ) -> None:
         assets = [
             SimpleNamespace(
@@ -268,7 +339,7 @@ class IronCondorTests(unittest.TestCase):
             self.strategy._asset_registry[key] = asset
             legs.append(iron_condor.LedgerLeg(f"{package_id}:{index}", key, signed_quantity))
         self.strategy._position_ledger.record_submission(
-            package_id, self.strategy._strategy_id(), "open", legs
+            package_id, self.strategy._strategy_id(), "open", legs, limit_price=limit_price
         )
         for leg, price in zip(legs, prices):
             self.strategy._position_ledger.record_fill(
@@ -305,6 +376,8 @@ class IronCondorTests(unittest.TestCase):
         strategy._record_trajectory = Mock()
         strategy.on_trading_iteration()
         self.assertEqual(strategy.on_trading_iteration_count, 8)
+        strategy.on_trading_iteration()
+        self.assertEqual(strategy.on_trading_iteration_count, 9)
 
     def record_pending_close(self, age_seconds: float = 120.0) -> str:
         ledger = self.strategy._position_ledger
@@ -428,6 +501,8 @@ class IronCondorTests(unittest.TestCase):
 
     def test_retry_exhaustion_keeps_contracts_managed_until_closed(self) -> None:
         self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0))
+        ledger = self.strategy._position_ledger
+        owned = ledger.owned_quantities(self.strategy._strategy_id())
         self.assertEqual(self.strategy._entry_credit, 0.0)
         with patch("time.sleep"):
             for _ in range(7):
@@ -436,12 +511,14 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.submit_order.assert_not_called()
         self.strategy.before_market_closes()
         self.strategy.submit_order.assert_called_once()
+        self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
         for order in self.strategy._closing_orders:
             order.is_active.return_value = False
             self.strategy.on_filled_order(None, order, 1.0, order.quantity, 100)
         self.strategy.get_positions.return_value = []
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
+        self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), {})
 
     def test_close_submission_keeps_position_active_and_avoids_duplicates(self) -> None:
         self.open_filled_position()
@@ -452,20 +529,106 @@ class IronCondorTests(unittest.TestCase):
 
     def test_missing_quote_cannot_trigger_a_false_profit_target(self) -> None:
         self.open_filled_position()
+        ledger = self.strategy._position_ledger
+        owned = ledger.owned_quantities(self.strategy._strategy_id())
         self.strategy.get_quote.side_effect = None
         self.strategy.get_quote.return_value = None
         self.strategy._manage_position()
         self.strategy.submit_order.assert_not_called()
         self.assertTrue(self.strategy._position_open)
+        self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
 
     def test_missing_credit_is_not_replaced_with_an_estimate(self) -> None:
-        self.open_filled_position()
+        self.open_filled_position(limit_price=2.0)
         self.strategy._entry_credit = 0.0
+        self.strategy._entry_credit_cash = 0.0
         self.strategy._estimate_credit = Mock(return_value=0.5)
+        self.strategy._publish_snapshot = Mock()
         self.strategy._manage_position()
         self.assertEqual(self.strategy._entry_credit, 0.0)
+        self.assertEqual(self.strategy._entry_credit_cash, 0.0)
         self.strategy._estimate_credit.assert_not_called()
+        self.strategy._publish_snapshot.assert_called_once_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
+        self.strategy.submit_order.assert_not_called()
         self.assertTrue(self.strategy._position_open)
+
+    def test_unavailable_credit_ticks_preserve_ownership_and_prevent_reentry(self) -> None:
+        self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0), limit_price=2.0)
+        ledger = self.strategy._position_ledger
+        owned = ledger.owned_quantities(self.strategy._strategy_id())
+        baskets = ledger.open_baskets(self.strategy._strategy_id())
+        legs = list(self.strategy._owned_legs)
+        self.strategy._publish_snapshot = Mock()
+        for _ in range(3):
+            self.strategy.on_trading_iteration()
+            self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
+            self.assertEqual(ledger.open_baskets(self.strategy._strategy_id()), baskets)
+            self.assertEqual(self.strategy._owned_legs, legs)
+            self.assertTrue(self.strategy._position_open)
+            self.assertEqual(self.strategy._entry_credit_cash, 0.0)
+            self.strategy._publish_snapshot.assert_called_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
+        self.strategy.submit_order.assert_not_called()
+
+    def test_invalid_confirmed_credit_skips_valuation_and_mfe(self) -> None:
+        self.open_filled_position(limit_price=2.0)
+        self.strategy._publish_snapshot = Mock()
+        self.strategy._mfe_pnl = 12.0
+        self.strategy._mae_pnl = -15.0
+        self.strategy._last_pnl = 5.0
+        self.strategy._fetch_quote = Mock()
+        for credit in (None, 0.0, -1.0, float("nan"), float("inf"), -float("inf")):
+            with self.subTest(credit=credit):
+                self.strategy._entry_credit_cash = credit
+                self.strategy._entry_credit = 0.0
+                self.strategy._manage_position()
+                self.strategy._publish_snapshot.assert_called_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
+                self.assertEqual(self.strategy._entry_credit, 0.0)
+                self.assertEqual(self.strategy._mfe_pnl, 12.0)
+                self.assertEqual(self.strategy._mae_pnl, -15.0)
+                self.assertEqual(self.strategy._last_pnl, 5.0)
+        self.strategy._fetch_quote.assert_not_called()
+        self.strategy.submit_order.assert_not_called()
+
+    def test_ledger_hydration_restores_confirmed_credit_and_normal_valuation(self) -> None:
+        self.open_filled_position(limit_price=3.0)
+        self.strategy._entry_credit = self.strategy._entry_credit_cash = 0.0
+        self.strategy._publish_snapshot = Mock()
+        self.strategy._manage_position()
+        self.strategy._publish_snapshot.assert_called_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
+        self.strategy.on_trading_iteration()
+        self.assertEqual(self.strategy._entry_credit_cash, 200.0)
+        self.assertEqual(self.strategy._entry_credit, 2.0)
+        self.assertEqual(self.strategy._publish_snapshot.call_args.kwargs["status"], "OPEN")
+
+    def test_roll_exit_is_reachable_without_credit_or_quotes_and_retries(self) -> None:
+        self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0), limit_price=2.0)
+        self.strategy.parameters["roll_dte"] = 3
+        self.strategy.get_quote.side_effect = None
+        self.strategy.get_quote.return_value = None
+        owned = self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id())
+        self.strategy._manage_position()
+        self.assertTrue(self.strategy._exit_requested)
+        self.assertEqual(self.strategy._pending_exit_reason, "ROLL_DTE")
+        self.strategy.submit_order.assert_not_called()
+        self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), owned)
+        self.strategy.get_quote.return_value = {"bid": 0.9, "ask": 1.1}
+        self.strategy._manage_position()
+        self.strategy.submit_order.assert_called_once()
+        self.assertTrue(self.strategy._position_open)
+        self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), owned)
+
+    def test_unavailable_broker_responses_preserve_owned_contracts(self) -> None:
+        self.open_filled_position()
+        owned = self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id())
+        for method in (self.strategy.get_positions, self.strategy.get_orders):
+            with self.subTest(method=method):
+                previous = method.return_value
+                method.return_value = None
+                self.strategy._manage_position()
+                self.assertTrue(self.strategy._position_open)
+                self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), owned)
+                method.return_value = previous
+        self.strategy.submit_order.assert_not_called()
 
     def test_pending_entry_order_prevents_reset_when_no_positions_visible(self) -> None:
         self.strategy._position_open = True
@@ -597,7 +760,7 @@ class IronCondorTests(unittest.TestCase):
                 self.assertEqual(self.strategy.parameters["quantity"], quantity)
 
     def test_global_cap_blocks_additional_exposure(self) -> None:
-        self.strategy.parameters.update(wing_width=2, quantity=1)
+        self.strategy.parameters.update(wing_width=2, quantity=1, max_portfolio_risk=5000.0)
         peer_assets = [
             SimpleNamespace(
                 asset_type="option", symbol="XSP", expiration="2026-10-26",
@@ -618,6 +781,29 @@ class IronCondorTests(unittest.TestCase):
             for asset, qty in zip(peer_assets, (10, -10, -10, 10))
         ]
         self.assertFalse(self.strategy._check_allocation())
+
+    def test_per_strategy_cap_permits_independent_trades(self) -> None:
+        """Peer strategy exposure does not block this strategy when within per-strategy cap."""
+        self.strategy.parameters.update(wing_width=2, quantity=1, max_position_risk=5000.0)
+        peer_assets = [
+            SimpleNamespace(
+                asset_type="option", symbol="XSP", expiration="2026-10-26",
+                strike=strike, right=right,
+            )
+            for strike, right in ((95, "put"), (100, "put"), (110, "call"), (115, "call"))
+        ]
+        peer_legs = [
+            iron_condor.LedgerLeg(f"peer-{idx}", iron_condor.asset_key(asset), qty)
+            for idx, (asset, qty) in enumerate(zip(peer_assets, (10, -10, -10, 10)), start=1)
+        ]
+        self.strategy._position_ledger.record_submission("peer-pkg", "peer-strategy", "open", peer_legs)
+        for leg, price in zip(peer_legs, (0.20, 0.25, 0.25, 0.20)):
+            self.strategy._position_ledger.record_fill(leg.order_id, leg.requested_signed_quantity, price)
+        self.strategy.get_positions.return_value = [
+            SimpleNamespace(asset=asset, quantity=qty)
+            for asset, qty in zip(peer_assets, (10, -10, -10, 10))
+        ]
+        self.assertTrue(self.strategy._check_allocation())
 
     def test_unmanaged_broker_position_engages_recovery_lock(self) -> None:
         rogue = SimpleNamespace(
@@ -1169,6 +1355,90 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertIsNotNone(bear_call, "Bear Call vertical spread should be in incubator specs")
         self.assertTrue(bull_put["strategy_name"].startswith("IC_V23"))
         self.assertTrue(bear_call["strategy_name"].startswith("IC_V24"))
+
+    def test_fetch_strikes_filters_by_specific_expiration(self) -> None:
+        """Verify _fetch_strikes filters strikes to the specific target expiration, avoiding invalid strikes."""
+        strat = iron_condor.SPXIronCondor()
+        strat.parameters = dict(iron_condor.SPXIronCondor.parameters)
+        strat._underlying = Mock()
+        fake_chains = {
+            "Chains": {
+                "CALL": {
+                    "2026-10-28": [800.0, 801.0, 802.0, 803.0, 804.0, 805.0],
+                    "2026-11-28": [790.0, 800.0, 810.0, 820.0],
+                },
+                "PUT": {
+                    "2026-10-28": [800.0, 801.0, 802.0, 803.0, 804.0, 805.0],
+                    "2026-11-28": [790.0, 800.0, 810.0, 820.0],
+                },
+            }
+        }
+        # Without expiry parameter, fallback returns broker union or empty
+        strat.get_strikes = Mock(return_value=[790.0, 800.0, 801.0, 802.0, 803.0, 804.0, 805.0, 810.0, 820.0])
+        all_strikes = strat._fetch_strikes(fake_chains)
+        self.assertEqual(len(all_strikes), 9)
+
+        # With target expiration, only returns strikes that exist for that expiration
+        exp_strikes = strat._fetch_strikes(fake_chains, expiry="2026-11-28")
+        self.assertEqual(exp_strikes, [790.0, 800.0, 810.0, 820.0])
+        self.assertNotIn(801.0, exp_strikes)
+
+    def test_default_execution_run_times_schedule(self) -> None:
+        """Verify execution schedule is 5m from 09:45-10:00 and 15m until 15:30."""
+        expected_times = [
+            time(9, 45), time(9, 50), time(9, 55), time(10, 0),
+            time(10, 15), time(10, 30), time(10, 45),
+            time(11, 0), time(11, 15), time(11, 30), time(11, 45),
+            time(12, 0), time(12, 15), time(12, 30), time(12, 45),
+            time(13, 0), time(13, 15), time(13, 30), time(13, 45),
+            time(14, 0), time(14, 15), time(14, 30), time(14, 45),
+            time(15, 0), time(15, 15), time(15, 30),
+        ]
+        self.assertEqual(iron_condor.DEFAULT_RUN_TIMES_LIST, expected_times)
+        parsed_expanded = iron_condor.parse_run_times(incubator.DEFAULT_EXPANDED_RUN_TIMES)
+        self.assertEqual(parsed_expanded, expected_times)
+
+    def test_is_entry_window_active_slots_and_off_cycle_rejections(self) -> None:
+        """Verify _is_entry_window matches 5m open & 15m intraday ticks and rejects off-cycle intervals."""
+        strat = iron_condor.SPXIronCondor()
+        strat.parameters = dict(iron_condor.SPXIronCondor.parameters)
+        strat.initialize()
+
+        # All 26 expected execution slots should be accepted
+        expected_slots = [
+            (9, 45), (9, 50), (9, 55), (10, 0),
+            (10, 15), (10, 30), (10, 45),
+            (11, 0), (11, 15), (11, 30), (11, 45),
+            (12, 0), (12, 15), (12, 30), (12, 45),
+            (13, 0), (13, 15), (13, 30), (13, 45),
+            (14, 0), (14, 15), (14, 30), (14, 45),
+            (15, 0), (15, 15), (15, 30),
+        ]
+        base_date = datetime(2026, 10, 30, tzinfo=timezone.utc)
+        for h, m in expected_slots:
+            tick_time = base_date.replace(hour=h, minute=m, second=5)
+            self.assertTrue(
+                strat._is_entry_window(tick_time),
+                f"Tick at {h:02d}:{m:02d} should be within entry window",
+            )
+
+        # Off-cycle 5-minute ticks must be rejected
+        off_cycle_slots = [
+            (9, 40), (10, 5), (10, 10), (10, 20), (10, 25),
+            (10, 35), (10, 40), (10, 50), (10, 55),
+            (11, 5), (11, 10), (11, 20), (11, 25),
+            (12, 5), (12, 10), (12, 20), (12, 25),
+            (13, 5), (13, 10), (13, 20), (13, 25),
+            (14, 5), (14, 10), (14, 20), (14, 25),
+            (15, 5), (15, 10), (15, 20), (15, 25),
+            (15, 35), (15, 40), (16, 0),
+        ]
+        for h, m in off_cycle_slots:
+            tick_time = base_date.replace(hour=h, minute=m, second=0)
+            self.assertFalse(
+                strat._is_entry_window(tick_time),
+                f"Off-cycle tick at {h:02d}:{m:02d} should NOT be in entry window",
+            )
 
 
 if __name__ == "__main__":

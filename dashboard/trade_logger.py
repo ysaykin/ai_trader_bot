@@ -204,8 +204,20 @@ class TrajectoryLogger:
             str(getattr(asset, "strike", "")), str(getattr(asset, "right", "")),
         )
         if key not in self._cache:
-            callback = getattr(strategy, "_fetch_last_price" if kind == "price" else "get_greeks", None)
-            self._cache[key] = self._optional(callback, asset) if callback else None
+            if kind == "price":
+                price_val = None
+                fetch_quote = getattr(strategy, "_fetch_quote", getattr(strategy, "get_quote", None))
+                calc_mid = getattr(strategy, "_quote_midpoint", None)
+                if fetch_quote and calc_mid:
+                    quote = self._optional(fetch_quote, asset)
+                    price_val = calc_mid(quote) if quote else None
+                if price_val is None:
+                    fetch_price = getattr(strategy, "_fetch_last_price", getattr(strategy, "get_last_price", None))
+                    price_val = self._optional(fetch_price, asset) if fetch_price else None
+                self._cache[key] = price_val
+            else:
+                callback = getattr(strategy, "get_greeks", None)
+                self._cache[key] = self._optional(callback, asset) if callback else None
         return self._cache[key]
 
     def _market_state(self, strategy: Any, now: datetime) -> dict[str, Any]:
@@ -235,7 +247,7 @@ class TrajectoryLogger:
         credit = finite_number(getattr(strategy, "_entry_credit", None))
         entries = getattr(strategy, "_entry_orders", [])
         book = self._books.get(name)
-        if len(legs) == 4 and credit is not None and credit > 0:
+        if len(legs) in (2, 3, 4) and credit is not None and credit > 0:
             entry_token = (
                 entries[0]
                 if entries
@@ -457,7 +469,7 @@ def record_trade_entry(
     entry_data = {
         "event": "ENTRY",
         "trade_id": trade_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "strategy": strategy_name,
         "symbol": symbol,
         "expiry": str(expiry),
@@ -493,7 +505,7 @@ def record_trade_adjustment(
     adjustment = {
         "event": "ADJUSTMENT",
         "trade_id": trade_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "strategy": strategy_name,
         "opening_credit_cash": float(opening_credit_cash),
         "closing_cash": float(closing_cash),
@@ -521,7 +533,7 @@ def record_trade_addition(
     addition = {
         "event": "ADDITION",
         "trade_id": trade_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "strategy": strategy_name,
         "opening_credit_cash": float(opening_credit_cash),
         "fees": float(fees),
@@ -557,7 +569,7 @@ def record_trade_exit(
     exit_data: Dict[str, Any] = {
         "event": "EXIT",
         "trade_id": trade_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "strategy": strategy_name,
         "exit_reason": exit_reason,
         "gross_pnl": calc_gross,
@@ -667,8 +679,12 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
                     ) + float(
                         terminal.get("net_pnl", round(exit_gross - exit_fees, 2))
                     )
-                entry_dt = datetime.fromisoformat(entry["timestamp"])
-                exit_dt = datetime.fromisoformat(terminal["timestamp"])
+                entry_dt = datetime.fromisoformat(str(entry["timestamp"]).replace("Z", "+00:00"))
+                exit_dt = datetime.fromisoformat(str(terminal["timestamp"]).replace("Z", "+00:00"))
+                if entry_dt.tzinfo is None:
+                    entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                if exit_dt.tzinfo is None:
+                    exit_dt = exit_dt.replace(tzinfo=timezone.utc)
                 duration_mins = max(
                     round((exit_dt - entry_dt).total_seconds() / 60.0, 1), 0.0
                 )

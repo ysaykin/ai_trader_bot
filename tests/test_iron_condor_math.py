@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from strategies.iron_condor_math import (
     credit_strategy_pnl,
     max_defined_loss,
+    option_midpoint,
+    position_unrealized_pnl,
     select_short_strikes,
     signed_basket_value,
 )
@@ -39,6 +41,59 @@ class IronCondorMathTests(unittest.TestCase):
         self.assertLessEqual(put, 585)
         self.assertGreaterEqual(call, 585)
         self.assertEqual(max_defined_loss(5, 2, 200), 800)
+
+    def test_option_midpoint_pricing(self) -> None:
+        self.assertEqual(option_midpoint(0.50, 0.60), 0.55)
+        # Inverted bid/ask falls back to last trade
+        self.assertEqual(option_midpoint(0.60, 0.50, last=0.58), 0.58)
+        # Missing bid falls back to last trade
+        self.assertEqual(option_midpoint(None, 0.50, last=0.45), 0.45)
+        # Missing all quotes returns None
+        self.assertIsNone(option_midpoint(None, None, last=None))
+
+    def test_tradier_positions_accounting_and_basket_reconciliation(self) -> None:
+        """Verify leg-level and spread-level mark-to-market against Tradier accounting."""
+        # Long position: bought at $3.40 ($340 cost), mark is $5.04 -> MV $504, Gain +$164
+        mv_long, gl_long = position_unrealized_pnl(1, 5.04, 340.0)
+        self.assertEqual(mv_long, 504.0)
+        self.assertEqual(gl_long, 164.0)
+
+        # Short position: sold at $1.72 (-$172 cost basis), mark is $0.59 -> MV -$59, Gain +$113
+        mv_short_win, gl_short_win = position_unrealized_pnl(-1, 0.59, -172.0)
+        self.assertEqual(mv_short_win, -59.0)
+        self.assertEqual(gl_short_win, 113.0)
+
+        # Short position loss: sold at $3.93 (-$393 basis), mark is $5.81 -> MV -$581, Loss -$188
+        mv_short_loss, gl_short_loss = position_unrealized_pnl(-1, 5.81, -393.0)
+        self.assertEqual(mv_short_loss, -581.0)
+        self.assertEqual(gl_short_loss, -188.0)
+
+        # Multi-contract short: qty -2, sold at $1.265 (-$253 basis), mark $2.14 -> MV -$428, Loss -$175
+        mv_2qty, gl_2qty = position_unrealized_pnl(-2, 2.14, -253.0)
+        self.assertEqual(mv_2qty, -428.0)
+        self.assertEqual(gl_2qty, -175.0)
+
+        # Reconcile complete 22-leg portfolio from user's Tradier CSV
+        csv_records = [
+            (1, 5.04, 340.0), (1, 3.31, 191.0), (-1, 0.59, -172.0), (2, 1.39, 179.0),
+            (1, 1.97, 113.0), (-1, 0.08, -82.0), (1, 1.24, 51.0), (-1, 0.39, -76.0),
+            (-1, 0.03, -20.0), (-1, 0.04, -20.0), (-1, 0.03, -5.0), (1, 0.03, 4.0),
+            (1, 0.03, 8.0), (1, 0.03, 9.0), (1, 0.17, 39.0), (1, 0.04, 31.0),
+            (1, 0.36, 117.0), (-1, 1.56, -64.0), (-1, 3.01, -166.0), (-2, 2.14, -253.0),
+            (-1, 4.16, -237.0), (-1, 5.81, -393.0),
+        ]
+        total_mv = sum(position_unrealized_pnl(q, p, cb)[0] for q, p, cb in csv_records)
+        total_gl = sum(position_unrealized_pnl(q, p, cb)[1] for q, p, cb in csv_records)
+        self.assertAlmostEqual(total_mv, -498.0, places=2)
+        self.assertAlmostEqual(total_gl, -92.0, places=2)
+
+        # Basket-level P&L verification for Nov 27 Iron Condor:
+        # Opening credit = $108.00. Current marks: 736P @ 5.04, 741P @ 5.81, 805C @ 0.59, 810C @ 0.36
+        ic_legs = ((1, 5.04), (-1, 5.81), (-1, 0.59), (1, 0.36))
+        ic_basket_mv = signed_basket_value(ic_legs)
+        self.assertAlmostEqual(ic_basket_mv, -100.0, places=2)
+        ic_pnl = credit_strategy_pnl(108.0, ic_basket_mv)
+        self.assertAlmostEqual(ic_pnl, 8.0, places=2)
 
 
 class PositionLedgerTests(unittest.TestCase):

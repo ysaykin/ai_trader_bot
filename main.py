@@ -89,11 +89,16 @@ def get_broker() -> Broker:
             "ACCOUNT_NUMBER": account_str,
             "PAPER": is_paper,
         }
+        raw_poll = os.getenv("TRADIER_POLLING_INTERVAL", "15.0" if is_paper else "5.0").strip()
+        try:
+            polling_interval = max(float(raw_poll), 1.0)
+        except ValueError:
+            polling_interval = 15.0 if is_paper else 5.0
         logger.info(
-            "Connecting to Tradier (account=%s, paper=%s)...",
-            tradier_config["ACCOUNT_NUMBER"], tradier_config["PAPER"],
+            "Connecting to Tradier (paper=%s, polling_interval=%.1fs)...",
+            tradier_config["PAPER"], polling_interval,
         )
-        return Tradier(tradier_config)
+        return Tradier(tradier_config, polling_interval=polling_interval)
 
     # Alpaca fallback
     api_key = os.getenv("ALPACA_API_KEY")

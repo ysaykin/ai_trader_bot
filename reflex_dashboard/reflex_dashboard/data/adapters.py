@@ -21,6 +21,29 @@ if str(PROJECT_ROOT) not in sys.path:
 from dotenv import dotenv_values
 
 
+try:
+    from zoneinfo import ZoneInfo
+    EASTERN_TZ = ZoneInfo("America/New_York")
+except Exception:
+    EASTERN_TZ = timezone(timedelta(hours=-4))
+
+
+def format_trade_time_et(ts: Any) -> str:
+    """Format an ISO timestamp to US Eastern Time (ET) for display."""
+    if not ts:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            # Naive timestamps from bot logs were recorded in UTC
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_et = dt.astimezone(EASTERN_TZ)
+        return dt_et.strftime("%m/%d %H:%M")
+    except Exception:
+        raw = str(ts)[:16]
+        return raw if raw else "-"
+
+
 def number(value: Any) -> float | None:
     if value is None:
         return None
@@ -39,13 +62,7 @@ def money(value: Any) -> str:
 
 def get_market_clock() -> dict[str, Any]:
     """Calculate US Eastern market session state."""
-    try:
-        from zoneinfo import ZoneInfo
-        et = datetime.now(ZoneInfo("America/New_York"))
-    except Exception:
-        # Fallback to UTC-4
-        utc_now = datetime.now(timezone.utc)
-        et = utc_now - timedelta(hours=4)
+    et = datetime.now(EASTERN_TZ)
 
     is_weekday = et.weekday() < 5
     current_time = et.time()
@@ -156,20 +173,45 @@ def get_bot_status_from_log(log_path: str = "logs/trading.log") -> dict[str, str
 
 def get_broker_telemetry() -> dict[str, Any]:
     """Fetch live broker account telemetry, balances, positions, orders."""
+    import os
     env = dotenv_values(PROJECT_ROOT / ".env")
-    account_id = env.get("TRADIER_ACCOUNT_ID") or env.get("ALPACA_ACCOUNT_ID") or "VA21359019"
-    token = env.get("TRADIER_ACCESS_TOKEN") or env.get("ALPACA_API_KEY") or ""
-    is_paper = (env.get("TRADIER_PAPER", "true").lower() in ("true", "1", "yes"))
+    account_id = (
+        env.get("TRADIER_ACCOUNT_NUMBER")
+        or env.get("TRADIER_ACCOUNT_ID")
+        or env.get("ALPACA_ACCOUNT_ID")
+        or os.getenv("TRADIER_ACCOUNT_NUMBER")
+        or os.getenv("TRADIER_ACCOUNT_ID")
+        or "VA21359019"
+    )
+    token = (
+        env.get("TRADIER_ACCESS_TOKEN")
+        or env.get("TRADIER_API_KEY")
+        or env.get("ALPACA_API_KEY")
+        or os.getenv("TRADIER_ACCESS_TOKEN")
+        or os.getenv("TRADIER_API_KEY")
+        or ""
+    )
+    is_paper = (
+        env.get("TRADIER_PAPER", os.getenv("TRADIER_PAPER", "true")).lower()
+        in ("true", "1", "yes")
+    )
 
-    broker_type = "tradier" if "TRADIER" in env or env.get("BROKER", "").lower() == "tradier" else "alpaca"
+    raw_broker = (
+        env.get("TRADING_BROKER")
+        or env.get("BROKER")
+        or os.getenv("TRADING_BROKER")
+        or os.getenv("BROKER")
+        or ""
+    ).lower()
+    broker_type = "tradier" if (raw_broker == "tradier" or any("TRADIER" in k for k in env) or "TRADIER_ACCESS_TOKEN" in os.environ) else "alpaca"
 
     res = {
         "broker": broker_type.upper(),
         "account_id": account_id,
         "is_paper": is_paper,
-        "equity": 99762.40,
-        "cash": 99762.40,
-        "buying_power": 99795.65,
+        "equity": 98098.00 if is_paper else 100000.0,
+        "cash": 98098.00 if is_paper else 100000.0,
+        "buying_power": 95385.00 if is_paper else 100000.0,
         "option_requirement": 0.0,
         "open_exposure": 0.0,
         "unrealized_pnl": 0.0,
@@ -203,7 +245,87 @@ def get_broker_telemetry() -> dict[str, Any]:
                 pos_list = p_data.get("position", [])
                 if isinstance(pos_list, dict):
                     pos_list = [pos_list]
-                res["positions"] = pos_list or []
+                raw_positions = pos_list or []
+
+                symbols = [str(p.get("symbol")) for p in raw_positions if p.get("symbol")]
+                quotes_map = {}
+                if symbols:
+                    try:
+                        q_res = requests.get(
+                            f"{base_url}/markets/quotes",
+                            headers=headers,
+                            params={"symbols": ",".join(symbols), "greeks": "true"},
+                            timeout=4,
+                        )
+                        if q_res.status_code == 200:
+                            q_data = q_res.json().get("quotes", {}).get("quote", [])
+                            if isinstance(q_data, dict):
+                                q_data = [q_data]
+                            for q in q_data:
+                                if "symbol" in q:
+                                    quotes_map[q["symbol"]] = q
+                    except Exception:
+                        pass
+
+                formatted_positions = []
+                total_unrealized = 0.0
+                for p in raw_positions:
+                    sym = str(p.get("symbol", ""))
+                    try:
+                        qty = float(p.get("quantity", 0))
+                    except (ValueError, TypeError):
+                        qty = 0.0
+                    try:
+                        cost_basis = float(p.get("cost_basis", 0))
+                    except (ValueError, TypeError):
+                        cost_basis = 0.0
+
+                    q = quotes_map.get(sym, {})
+                    bid = q.get("bid")
+                    ask = q.get("ask")
+                    last = q.get("last")
+
+                    mark = None
+                    if bid is not None and ask is not None:
+                        try:
+                            b, a = float(bid), float(ask)
+                            if b >= 0 and a >= b:
+                                mark = (b + a) / 2.0
+                        except (ValueError, TypeError):
+                            pass
+                    if mark is None and last is not None:
+                        try:
+                            l = float(last)
+                            if l >= 0:
+                                mark = l
+                        except (ValueError, TypeError):
+                            pass
+                    if mark is None:
+                        mark = abs(cost_basis) / (100.0 * abs(qty)) if qty != 0 else 0.0
+
+                    market_value = qty * mark * 100.0
+                    unrealized_pl = market_value - cost_basis
+                    total_unrealized += unrealized_pl
+
+                    greeks = q.get("greeks") or {}
+                    delta_val = greeks.get("delta")
+                    theta_val = greeks.get("theta")
+
+                    formatted_positions.append({
+                        "symbol": sym,
+                        "quantity": f"{int(qty)}" if qty.is_integer() else f"{qty:.1f}",
+                        "cost_basis": f"${cost_basis:.2f}",
+                        "last_price": f"${mark:.2f}",
+                        "market_value": f"${market_value:.2f}",
+                        "unrealized_pl": f"{'+' if unrealized_pl >= 0 else ''}${unrealized_pl:.2f}",
+                        "delta": f"{float(delta_val):.2f}" if delta_val is not None else "-",
+                        "theta": f"{float(theta_val):.2f}" if theta_val is not None else "-",
+                        "unrealized_pl_num": unrealized_pl,
+                    })
+
+                res["positions"] = formatted_positions
+                res["unrealized_pnl"] = float(b.get("open_pl") or total_unrealized)
+                res["open_exposure"] = float(res["option_requirement"])
 
             # Orders
             r_ord = requests.get(f"{base_url}/accounts/{account_id}/orders", headers=headers, timeout=4)
@@ -212,7 +334,26 @@ def get_broker_telemetry() -> dict[str, Any]:
                 ord_list = o_data.get("order", [])
                 if isinstance(ord_list, dict):
                     ord_list = [ord_list]
-                res["orders"] = ord_list or []
+                formatted_orders = []
+                for o in (ord_list or []):
+                    order_id = str(o.get("id", ""))
+                    sym = str(o.get("symbol", "XSP"))
+                    side = str(o.get("side", o.get("order_type", ""))).upper()
+                    order_type = str(o.get("strategy", o.get("type", "LIMIT"))).upper()
+                    qty = str(o.get("quantity", "1"))
+                    status = str(o.get("status", "")).upper()
+                    price_val = o.get("price") or o.get("avg_fill_price") or o.get("stop_price")
+                    price_str = f"${float(price_val):.2f}" if price_val is not None else "MKT"
+                    formatted_orders.append({
+                        "id": order_id,
+                        "symbol": sym,
+                        "side": side,
+                        "type": order_type,
+                        "quantity": qty,
+                        "status": status,
+                        "price": price_str,
+                    })
+                res["orders"] = formatted_orders
         except Exception:
             pass
 
@@ -237,7 +378,30 @@ def format_structure(struct: str) -> str:
         return "Bull Put (Vertical)"
     elif "bear_call" in s:
         return "Bear Call (Vertical)"
+    elif "trendflow" in s:
+        return "TrendFlow Vertical (Dynamic)"
+    elif "skew_dynamic" in s or "asymmetric_skew" in s:
+        return "Asymmetric Skew IC (Dynamic)"
+    elif "vol_crush" in s:
+        return "VolCrush IC/Vert (Dynamic)"
+    elif "orb_dynamic" in s or "orb_1dte" in s:
+        return "ORB 1DTE IC/Vert (Dynamic)"
+    elif "dynamic_sd" in s or "strategybro" in s:
+        return "StrategyBro IC/Vert (Dynamic)"
     return "Iron Condor"
+
+
+def format_entry_schedule(entry_time_str: Any) -> str:
+    """Format entry schedule string cleanly for table display while preserving full detail."""
+    raw = str(entry_time_str or "").strip()
+    if not raw:
+        return "10:00 ET"
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if len(parts) > 4:
+        first = parts[0]
+        last = parts[-1]
+        return f"{first} - {last} ET (5m/15m)"
+    return f"{raw} ET"
 
 
 def format_strategy_label(strat_name: str) -> str:
@@ -250,6 +414,16 @@ def format_strategy_label(strat_name: str) -> str:
         return "IC_V24 (Bear Call 7DTE)"
     if "25DTE" in s:
         return "IC_V21 (25DTE Test)"
+    if "STRATEGYBRO" in s or "IC_V25" in s:
+        return "IC_V25 (StrategyBro Dynamic)"
+    if "TRENDFLOW" in s or "IC_V26" in s:
+        return "IC_V26 (TrendFlow Dynamic)"
+    if "SKEW_DYNAMIC" in s or "IC_V27" in s:
+        return "IC_V27 (Skew IC Dynamic)"
+    if "VOL_CRUSH" in s or "IC_V28" in s:
+        return "IC_V28 (VolCrush Dynamic)"
+    if "ORB_DYNAMIC" in s or "IC_V29" in s:
+        return "IC_V29 (ORB 1DTE Dynamic)"
     parts = s.split("_")
     if len(parts) >= 3:
         return f"{parts[0]}_{parts[1]} ({parts[2]})"
@@ -385,20 +559,37 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["strikes_display"] = format_strikes(strikes, struct)
             t["dte_str"] = f"{t.get('dte', 7)}DTE" if "dte" in t else "-"
 
-            ts = t.get("timestamp", "")
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                t["time_str"] = dt.strftime("%m/%d %H:%M")
-            except Exception:
-                t["time_str"] = ts[:16] if ts else "-"
+            t["time_str"] = format_trade_time_et(t.get("timestamp", ""))
 
             closed_trades.append(t)
         elif status == "OPEN":
             t["status"] = "OPEN"
+            t["gross_pnl"] = 0.0
+            t["gross_pnl_str"] = "$0.00 (OPEN)"
+            fees = number(t.get("fees"))
+            if fees is None:
+                fees = (2 if (struct in ("bull_put", "bear_call") or len(t.get("strikes") or {}) == 2) else 4) * fee_per_contract * qty
+            t["fees"] = fees
+            t["fees_str"] = money(-fees) if fees else "$0.00"
+            t["net_pnl"] = 0.0
+            t["net_pnl_str"] = "OPEN"
+            t["net_pnl_color"] = "cyan"
+            t["net_ror_str"] = "OPEN"
+            t["net_ror_pct"] = 0.0
+            t["net_roc_pct"] = 0.0
+            t["credit_str"] = money(credit_per_share) if credit_per_share else "-"
+            t["structure_label"] = format_structure(struct)
+            t["strategy_label"] = format_strategy_label(t.get("strategy", ""))
+            t["strikes_display"] = format_strikes(strikes, struct)
+            t["dte_str"] = f"{t.get('dte', 7)}DTE" if "dte" in t else "-"
+
+            t["time_str"] = format_trade_time_et(t.get("timestamp", ""))
+
             open_trades.append(t)
 
-    # Sort closed trades chronologically descending (latest first)
+    # Sort trades chronologically descending (latest first)
     closed_trades.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+    open_trades.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
 
     return trades_by_id, closed_trades, open_trades
 
@@ -435,6 +626,11 @@ def get_incubator_data() -> dict[str, Any]:
         spec_tag = extract_variant_tag(name)
         is_neural = bool(spec.get("pure_neural_mode", False))
         is_testing = bool(spec.get("is_testing_variant", False))
+        is_strategybro = bool(spec.get("is_strategybro_variant", False))
+        is_trendflow = bool(spec.get("is_trendflow_variant", False))
+        is_skew_dynamic = bool(spec.get("is_skew_dynamic_variant", False))
+        is_vol_crush = bool(spec.get("is_vol_crush_variant", False))
+        is_orb_dynamic = bool(spec.get("is_orb_dynamic_variant", False))
         struct = str(spec.get("structure", "iron_condor")).lower()
         if is_neural:
             short_id = f"IC_V22 (Neural Pure)"
@@ -444,6 +640,16 @@ def get_incubator_data() -> dict[str, Any]:
             short_id = f"IC_V23 (Bull Put {spec.get('dte', 7)}DTE)"
         elif struct == "bear_call":
             short_id = f"IC_V24 (Bear Call {spec.get('dte', 7)}DTE)"
+        elif is_strategybro:
+            short_id = f"IC_V25 (StrategyBro {spec.get('dte', 90)}DTE Dynamic)"
+        elif is_trendflow:
+            short_id = f"IC_V26 (TrendFlow {spec.get('dte', 10)}DTE Dynamic)"
+        elif is_skew_dynamic:
+            short_id = f"IC_V27 (Skew IC {spec.get('dte', 14)}DTE Dynamic)"
+        elif is_vol_crush:
+            short_id = f"IC_V28 (VolCrush {spec.get('dte', 21)}DTE Dynamic)"
+        elif is_orb_dynamic:
+            short_id = f"IC_V29 (ORB {spec.get('dte', 1)}DTE Dynamic)"
         else:
             short_id = spec_tag
 
@@ -457,12 +663,20 @@ def get_incubator_data() -> dict[str, Any]:
         total_gross_pnl += gross_pnl
         total_fees += fees
         total_net_pnl += net_pnl
-        total_trades_count += len(v_closed)
+        total_trades_count += len(v_closed) + len(v_open)
 
-        # Win rate is strictly calculated from closed trades
-        wins = sum(1 for t in v_closed if t.get("gross_pnl", 0.0) > 0)
+        # Win rate is strictly calculated from closed trades with positive net P&L
+        wins = sum(1 for t in v_closed if t.get("net_pnl", 0.0) > 0)
+        losses = sum(1 for t in v_closed if t.get("net_pnl", 0.0) < 0)
         total_wins += wins
         win_rate = (wins / len(v_closed) * 100.0) if v_closed else None
+
+        if win_rate is None:
+            win_rate_color = "#94A3B8"
+        elif win_rate >= 50.0:
+            win_rate_color = "#10B981"
+        else:
+            win_rate_color = "#EF4444"
 
         total_risk = sum(t.get("max_risk", spec["wing_width"] * 100.0) for t in v_closed)
         total_credit = sum(t.get("credit_cash", 0.0) for t in v_closed)
@@ -482,6 +696,21 @@ def get_incubator_data() -> dict[str, Any]:
         elif is_testing:
             status = "TEST SCANNING"
             status_color = "amber"
+        elif is_strategybro:
+            status = "DYNAMIC SD SCAN"
+            status_color = "teal"
+        elif is_trendflow:
+            status = "TRENDFLOW SCAN"
+            status_color = "teal"
+        elif is_skew_dynamic:
+            status = "SKEW IC SCAN"
+            status_color = "teal"
+        elif is_vol_crush:
+            status = "VOL CRUSH SCAN"
+            status_color = "teal"
+        elif is_orb_dynamic:
+            status = "ORB 1DTE SCAN"
+            status_color = "teal"
         else:
             status = "MONITORING"
             status_color = "gray"
@@ -490,16 +719,21 @@ def get_incubator_data() -> dict[str, Any]:
             "variant": short_id,
             "variant_code": spec_tag,
             "strategy_name": name,
-            "delta": f"{spec['short_delta']:.2f}",
+            "delta": f"{spec.get('short_delta', 0.15):.2f}",
             "wing": f"${spec['wing_width']:.1f}",
             "dte": f"{spec['dte']}DTE",
             "profit_target": "DYNAMIC (AI)" if is_neural else f"{spec['profit_target']*100:.0f}%",
             "stop_loss": f"{spec['stop_loss_mult']:.1f}x",
-            "entry_time": f"{spec['entry_time']} ET",
+            "entry_time": format_entry_schedule(spec.get("entry_time")),
+            "entry_time_full": f"{spec.get('entry_time', '')} ET",
             "closed_trades": len(v_closed),
+            "total_trades": len(v_closed) + len(v_open),
             "open_trades": len(v_open),
+            "wins": wins,
+            "losses": losses,
             "win_rate": f"{win_rate:.0f}%" if win_rate is not None else "-",
             "win_rate_num": win_rate if win_rate is not None else 0.0,
+            "win_rate_color": win_rate_color,
             "gross_pnl": gross_pnl,
             "gross_pnl_str": money(gross_pnl),
             "fees": fees,
@@ -578,13 +812,13 @@ def get_incubator_data() -> dict[str, Any]:
 
     top5_pnl = sum(r["net_pnl"] for r in top5_rows)
     top5_trades = sum(r["closed_trades"] for r in top5_rows)
-    top5_wins = sum(round(r["closed_trades"] * (r["win_rate_num"] / 100.0)) for r in top5_rows)
+    top5_wins = sum(r.get("wins", 0) for r in top5_rows)
     top5_wr = (top5_wins / top5_trades * 100.0) if top5_trades > 0 else 0.0
     top5_fees = sum(r["fees"] for r in top5_rows)
 
     bottom3_pnl = sum(r["net_pnl"] for r in bottom3_rows)
     bottom3_trades = sum(r["closed_trades"] for r in bottom3_rows)
-    bottom3_wins = sum(round(r["closed_trades"] * (r["win_rate_num"] / 100.0)) for r in bottom3_rows)
+    bottom3_wins = sum(r.get("wins", 0) for r in bottom3_rows)
     bottom3_wr = (bottom3_wins / bottom3_trades * 100.0) if bottom3_trades > 0 else 0.0
     bottom3_fees = sum(r["fees"] for r in bottom3_rows)
 
@@ -622,8 +856,9 @@ def get_incubator_data() -> dict[str, Any]:
         },
     }
 
-    # Per-Trade Highlight data: past 50 visible trades
+    # Per-Trade Highlight data: past 50 visible closed trades
     visible_trades_50 = closed_all[:50]
+    all_combined_trades = open_all + closed_all
 
     return {
         "all_rows": all_rows,
@@ -635,6 +870,7 @@ def get_incubator_data() -> dict[str, Any]:
         "strategy_aggregates": strategy_aggregates,
         "visible_trades_50": visible_trades_50,
         "all_closed_trades": closed_all,
+        "all_combined_trades": all_combined_trades,
         "traded_rows": traded_rows,
         "monitored_rows": monitored_rows,
         "total_variants": len(specs),
@@ -701,14 +937,24 @@ def get_ab_lab_data() -> dict[str, Any]:
     """Compile isolated ledger performance stats for all strategies that have actual trades."""
     inc = get_incubator_data()
     traded = inc["traded_rows"]
+    closed_all = inc.get("all_closed_trades", [])
 
     # Sort by Net P&L descending
     sorted_traded = sorted(traded, key=lambda r: r["net_pnl"], reverse=True)
 
     formatted_strategies: list[dict[str, Any]] = []
     for r in sorted_traded:
-        losses = 0  # In current dataset, all closed trades were wins
-        pf = "∞ (0 losses)" if losses == 0 else "1.0"
+        v_closed = [t for t in closed_all if t.get("strategy") == r["strategy_name"] or extract_variant_tag(str(t.get("strategy", ""))) == r["variant_code"]]
+        wins = sum(1 for t in v_closed if t.get("net_pnl", 0.0) > 0)
+        losses = sum(1 for t in v_closed if t.get("net_pnl", 0.0) < 0)
+        gross_profit = sum(t.get("net_pnl", 0.0) for t in v_closed if t.get("net_pnl", 0.0) > 0)
+        gross_loss = abs(sum(t.get("net_pnl", 0.0) for t in v_closed if t.get("net_pnl", 0.0) < 0))
+        if gross_loss > 0:
+            pf = f"{(gross_profit / gross_loss):.2f}"
+        elif gross_profit > 0:
+            pf = "∞ (0 losses)"
+        else:
+            pf = "0.00" if losses > 0 else "N/A"
         avg_trade = (r["net_pnl"] / r["closed_trades"]) if r["closed_trades"] > 0 else 0.0
         
         formatted_strategies.append({
@@ -718,7 +964,10 @@ def get_ab_lab_data() -> dict[str, Any]:
             "config_desc": f"Delta {r['delta']}, Wing {r['wing']}, PT {r['profit_target']}, SL {r['stop_loss']}, {r['dte']}",
             "closed_trades": f"{r['closed_trades']} Trade" if r["closed_trades"] == 1 else f"{r['closed_trades']} Trades",
             "closed_trades_num": r["closed_trades"],
+            "wins": wins,
+            "losses": losses,
             "win_rate": r["win_rate"],
+            "win_rate_color": r.get("win_rate_color", "#10B981"),
             "gross_pnl_str": r["gross_pnl_str"],
             "fees_str": r["fees_str"],
             "net_pnl_str": r["net_pnl_str"],
@@ -830,8 +1079,8 @@ def get_config_settings() -> dict[str, str]:
     """Read .env configuration parameters."""
     env = dotenv_values(PROJECT_ROOT / ".env")
     return {
-        "broker": env.get("BROKER", "tradier"),
-        "tradier_account_id": env.get("TRADIER_ACCOUNT_ID", ""),
+        "broker": env.get("TRADING_BROKER") or env.get("BROKER", "tradier"),
+        "tradier_account_id": env.get("TRADIER_ACCOUNT_NUMBER") or env.get("TRADIER_ACCOUNT_ID", ""),
         "tradier_access_token": env.get("TRADIER_ACCESS_TOKEN", ""),
         "tradier_paper": env.get("TRADIER_PAPER", "true"),
         "alpaca_api_key": env.get("ALPACA_API_KEY", ""),
