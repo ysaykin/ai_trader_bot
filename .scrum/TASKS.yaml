@@ -312,6 +312,21 @@ tasks:
       - ../jev-bot/README.md
       - ../jev-bot/.env.example
 
+  - id: tradier-host-routing-and-closing-package-retention
+    title: "Route Tradier multileg packages using normalized host strategy tags, recover via unique order IDs or legacy tags, and retain uncertain closing packages"
+    status: completed
+    owner: antigravity
+    review_notes:
+      - "Derived broker routing tags from normalized host strategy names, preserving distinct package IDs and ledger owners across sub-strategies."
+      - "Restricted _find_order_by_tag to unique legacy package tags (IC_<20-hex>) or confirmed broker parent/child IDs, eliminating collisions from shared host tags."
+      - "Set _recovery_lock = True and prevented marking close packages failed or resubmitting when orders are unresolved or missing during query timeouts, preventing duplicate exit submissions."
+      - "Added contract tests for Tradier multileg submission, serialization, polling intervals, and host callback routing."
+    deliverables:
+      - strategies/iron_condor.py
+      - tests/test_regressions.py
+      - tests/test_tradier_order_routing.py
+      - TASK_PLAN.md
+
   # --- Dashboard review: position grouping, strategy comparison and display integrity ---
   # P0: misleading displayed values. P1: requested position workflow. P2: supporting verification.
   - id: dashboard-signed-value-formatting
@@ -674,3 +689,16 @@ tasks:
     deliverables:
       - dashboard/src/App.jsx
       - backend/app.py
+
+  - id: dev-env-python312-container-alignment
+    title: "Align container Python 3.12 runtime and compiled NumPy dependencies for full test suite execution"
+    status: pending
+    priority: P2
+    owner: unassigned
+    evidence:
+      - "The project's virtual environment (.venv) was built against Python 3.12 with compiled NumPy C-extensions that fail under the container's Python 3.11 environment, preventing complete pytest collection for tests/test_tradier_order_routing.py without Python 3.12 installed."
+    acceptance:
+      - "Ensure container execution environments include Python 3.12 or compatible wheel binaries so all test suites collect and pass cleanly in any test container context."
+    deliverables:
+      - Dockerfile
+      - pyproject.toml

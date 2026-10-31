@@ -18,4 +18,5 @@ Acceptance:
 - [x] **Confirmed Opening Credit Safety & Roll/DTE Exit Precedence**: Require finite confirmed entry credit without adopting limit prices, retain contract ownership during quote delays, and reach roll/DTE targets before valuation gates (`ENG-08`).
 - [x] **Tradier Credential Protection & Log Redaction**: Redact account numbers and sensitive tokens from connection logs, and support configurable polling intervals (`BRK-04`).
 - [x] **Jev-Bot Lifecycle & Isolated Subprocess Verification**: Comprehensive lifecycle step validation, signal cleanup, and isolated multi-entrypoint testing (`SYS-02`).
+- [x] **Tradier Host Routing & Resilient Closing Order Recovery**: Route atomic packages using normalized host strategy tags, recover exclusively via confirmed parent/child IDs or unique legacy tags, and retain uncertain closing packages under recovery locks to prevent duplicate submissions (`BRK-05`).
 - [ ] **Self-Improving Bot Loop**: Automated post-market continual learner with Purged Walk-Forward CV and Champion vs. Challenger shadow promotion gate (`ML-08`).

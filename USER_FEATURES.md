@@ -33,6 +33,7 @@ This document is the **single source of truth** for all user-facing features sup
 | **SYS-02** | Jev-Bot Multi-Entrypoint Lifecycle Verification | DevOps / System | ✅ Active | Isolated runner testing across CLI, module, and direct execution | Subprocess Lifecycle Test Suite |
 | **BRK-04** | Tradier Log Sanitization & Polling Interval | Broker Connectivity | ✅ Active | Zero credential leakage in logs & configurable polling cadence | Connection Log Output & Polling Interval |
 | **ENG-08** | Confirmed Opening Credit & Roll/DTE Priority | Core Engine | ✅ Active | Enforce confirmed cash credits & prioritize roll/DTE exits before valuation | Position State & Roll Status Pill |
+| **BRK-05** | Tradier Host Routing & Resilient Close Package Retention | Broker Connectivity | ✅ Active | Atomic package routing with host tags, unique ID/legacy tag recovery & uncertain close locks | Order Routing & Package Recovery |
 | **CFG-01** | Interactive Config & Credentials GUI | Configuration | ✅ Active | Edit and test API keys & risk boundaries live in GUI | Dedicated Broker & Strategy Config Tab |
 | **GUI-01** | Live Engine Status & Session Clock | Dashboard UI | ✅ Active | Know exactly what the bot is doing | Header Status Bar & Market Clock |
 | **GUI-02** | Interactive Visual Risk Dials | Dashboard UI | ✅ Active | At-a-glance capital & cap visibility | Dual Risk Gauges ($5k & Single-Trade) |
@@ -361,3 +362,7 @@ This document is the **single source of truth** for all user-facing features sup
 #### `SYS-02`: Jev-Bot Multi-Entrypoint Lifecycle Verification
 * **User Story**: As a systems engineer running multiple bot repositories, I want Jev-Bot to maintain deterministic lifecycle steps, signal cleanup, and verified invocation across script, module, and installed CLI entrypoints.
 * **Implementation**: Added isolated subprocess tests covering root `main.py`, module `-m jev_bot`, and installed console entrypoint `jev-bot`, verifying single-step iteration and graceful termination.
+
+#### `BRK-05`: Tradier Host Routing & Resilient Close Package Retention
+* **User Story**: As an automated trader executing atomic multileg packages across multiple strategy variants on Tradier, I want packages to route using the registered host strategy tag while maintaining discrete package identities and ledger owners, resolving orders by verified parent/child IDs rather than shared tags, and locking uncertain closing orders to prevent duplicate submissions during broker latency or timeouts.
+* **Implementation**: Added normalized `_broker_routing_tag()` derived from the registered host name in `strategies/iron_condor.py`. Restricted `_find_order_by_tag` to unique legacy package tags (`IC_<hex>`) or verified broker IDs, preventing cross-strategy order collisions. When closing package orders are unresolved or missing from active broker queries, set `_recovery_lock = True` to retain contract ownership and prevent duplicate exit order submissions until broker state confirms terminal status.
