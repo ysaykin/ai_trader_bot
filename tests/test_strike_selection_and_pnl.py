@@ -11,10 +11,24 @@ from unittest.mock import Mock
 from strategies.iron_condor_math import (
     credit_strategy_pnl,
     max_defined_loss,
+    option_execution_fees,
     select_short_strikes,
     signed_basket_value,
 )
 from strategies.position_ledger import LedgerLeg, PositionLedger, asset_key
+
+
+class TestOptionExecutionFees(unittest.TestCase):
+    def test_contract_counts_and_quantities(self) -> None:
+        for legs, quantity, expected in ((2, 1, 0.8), (4, 1, 1.6), (2, 3, 2.4), (4, 3, 4.8)):
+            with self.subTest(legs=legs, quantity=quantity):
+                self.assertEqual(option_execution_fees([quantity] * legs, 0.4), expected)
+        self.assertEqual(option_execution_fees([-1, 1], 0), 0)
+
+    def test_invalid_inputs(self) -> None:
+        for quantities, rate in (([1.5], 0.4), ([True], 0.4), ([1], -1), ([1], float("nan"))):
+            with self.subTest(quantities=quantities, rate=rate), self.assertRaises(ValueError):
+                option_execution_fees(quantities, rate)
 
 
 class TestStrikeSelection(unittest.TestCase):

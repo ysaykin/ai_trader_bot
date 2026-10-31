@@ -44,6 +44,8 @@ from strategies.iron_condor_math import (
     credit_strategy_pnl,
     evaluate_mfe_ratchet,
     evaluate_strategybro_entry_quality,
+    option_execution_fees,
+    option_fee_per_contract,
     resolve_orb_structure,
     resolve_skew_condor_deltas,
     resolve_strategybro_structure,
@@ -410,6 +412,9 @@ class SPXIronCondor(Strategy):
 
     def _run_trading_iteration(self) -> None:
         """Execute the trading tick before publishing its trajectory observation."""
+        if self._position_ledger.is_panic_halted():
+            logger.warning("[%s] Execution blocked: durable panic halt is active.", self._strategy_id())
+            return
         now = self.get_datetime()
 
         if not self._reconcile_broker_state():
@@ -799,9 +804,10 @@ class SPXIronCondor(Strategy):
             logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
             self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
             return
-        fee_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
-        qty = max((abs(int(quantity)) for _, quantity in self._owned_legs), default=1)
-        roundtrip_fees = round(8 * qty * fee_rate, 2)
+        fee_rate = option_fee_per_contract()
+        roundtrip_fees = round(
+            2 * option_execution_fees((quantity for _, quantity in self._owned_legs), fee_rate), 2
+        )
         gross_pnl = float(pnl)
         net_pnl = round(gross_pnl - roundtrip_fees, 2)
 
@@ -855,9 +861,12 @@ class SPXIronCondor(Strategy):
             trade_id = getattr(self, "_current_trade_id", None)
             if trade_id:
                 from trade_logger import record_trade_exit
-                fee_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
-                qty = self.parameters.get("quantity", 1)
-                calc_fees = float(fees if fees is not None else round(8 * qty * fee_rate, 2))
+                fee_rate = option_fee_per_contract()
+                calc_fees = float(
+                    fees if fees is not None else option_execution_fees(
+                        (quantity for _, quantity in self._owned_legs), fee_rate
+                    )
+                )
                 calc_gross = float(gross_pnl if gross_pnl is not None else pnl)
                 calc_net = float(net_pnl if net_pnl is not None else (calc_gross - calc_fees))
                 mfe = max(float(getattr(self, "_mfe_pnl", 0.0)), calc_net)
@@ -972,6 +981,10 @@ class SPXIronCondor(Strategy):
           - FLATTEN_NOW: Immediately close all owned option legs.
         """
         normalized = (action or "HOLD").strip().upper()
+        if self._position_ledger.is_panic_halted():
+            logger.warning("[%s] Policy action blocked: durable panic halt is active.", self._strategy_id())
+            self._last_action = "HOLD"
+            return "HOLD"
         if dynamic_profit_target is not None:
             clamped_pt = max(0.15, min(0.80, float(dynamic_profit_target)))
             self.parameters["profit_target"] = clamped_pt
@@ -1054,6 +1067,8 @@ class SPXIronCondor(Strategy):
     def _apply_neural_strategy_switch(self, target_strategy_name: str) -> None:
         """Dynamically adapt parameters to match the variant selected by the neural network
         based on real-time market regime, volatility, and cross-strategy signals."""
+        if self._position_ledger.is_panic_halted():
+            return
         from strategies.incubator import get_incubator_specs
         specs = {s["strategy_name"]: s for s in get_incubator_specs(include_neural=False)}
         target_spec = specs.get(target_strategy_name)
@@ -1071,12 +1086,9 @@ class SPXIronCondor(Strategy):
             if "structure" in target_spec:
                 self.structure = str(target_spec["structure"]).lower()
                 self.parameters["structure"] = self.structure
-            if "entry_time" in target_spec:
-                try:
-                    h, m = map(int, str(target_spec["entry_time"]).split(":"))
-                    self._entry_time = time(h, m)
-                except Exception:
-                    pass
+            entry_time_val = target_spec.get("entry_time") or target_spec.get("run_times") or target_spec.get("entry_times")
+            if entry_time_val:
+                self.set_run_times(entry_time_val)
             logger.info(
                 "[%s] Neural network dynamically switched strategy: %s -> %s (DTE=%d, Δ=%.2f, Wing=$%.1f)",
                 getattr(self, "name", "IC_V22_NEURAL_PURE"),
@@ -1625,25 +1637,30 @@ class SPXIronCondor(Strategy):
                                 filled_basket, opening_cash_before, quantity_before
                             )
             refreshed = self._position_ledger.get_basket(basket.package_id)
-            if (
-                refreshed.state == "submitted"
-                and len(leg_statuses) == len(refreshed.legs)
-                and all(status in terminal_map for status in leg_statuses)
-                and all(int(leg["filled_signed_quantity"]) == 0 for leg in refreshed.legs)
+            if len(leg_statuses) == len(refreshed.legs) and all(
+                status in terminal_map for status in leg_statuses
             ):
-                self._position_ledger.record_terminal_status(
-                    refreshed.package_id, terminal_map[leg_statuses[0]]
-                )
+                term_status = terminal_map[leg_statuses[0]]
+                if all(int(leg["filled_signed_quantity"]) == 0 for leg in refreshed.legs):
+                    self._position_ledger.record_terminal_status(refreshed.package_id, term_status)
+                else:
+                    resolved = self._position_ledger.resolve_partial_package(refreshed.package_id, term_status)
+                    if resolved.state == "open" and resolved.intent == "open":
+                        self._record_filled_entry(resolved)
+                    elif resolved.state == "open" and resolved.intent == "add":
+                        self._record_filled_addition(resolved)
                 continue
             parent_status = str(getattr(parent, "status", "") or "").lower()
-            if (
-                refreshed.state == "submitted"
-                and parent_status in terminal_map
-                and all(int(leg["filled_signed_quantity"]) == 0 for leg in refreshed.legs)
-            ):
-                self._position_ledger.record_terminal_status(
-                    refreshed.package_id, terminal_map[parent_status]
-                )
+            if parent_status in terminal_map:
+                term_status = terminal_map[parent_status]
+                if all(int(leg["filled_signed_quantity"]) == 0 for leg in refreshed.legs):
+                    self._position_ledger.record_terminal_status(refreshed.package_id, term_status)
+                else:
+                    resolved = self._position_ledger.resolve_partial_package(refreshed.package_id, term_status)
+                    if resolved.state == "open" and resolved.intent == "open":
+                        self._record_filled_entry(resolved)
+                    elif resolved.state == "open" and resolved.intent == "add":
+                        self._record_filled_addition(resolved)
                 continue
             if parent is None or refreshed.package_id in stale_ids:
                 # A missing order or a DAY rollover is not a terminal broker result.
@@ -1834,12 +1851,14 @@ class SPXIronCondor(Strategy):
         try:
             from trade_logger import record_trade_adjustment, record_trade_exit
             closing_cash = float(basket.closing_cash_flow or 0.0)
-            fee_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+            fee_rate = option_fee_per_contract()
             closed_qty = max(
                 (abs(int(leg["filled_signed_quantity"])) for leg in basket.legs),
                 default=0,
             )
-            close_fees = round(4 * closed_qty * fee_rate, 2)
+            close_fees = option_execution_fees(
+                (leg["filled_signed_quantity"] for leg in basket.legs), fee_rate
+            )
             realized_opening = (
                 opening_cash_before * min(closed_qty / quantity_before, 1.0)
                 if quantity_before > 0
@@ -1853,7 +1872,14 @@ class SPXIronCondor(Strategy):
 
             remaining = self._position_ledger.owned_quantities(self._strategy_id())
             remaining_qty = max((abs(value) for value in remaining.values()), default=0)
-            if basket.intent == "trim" and remaining_qty > 0:
+            if getattr(self, "_journaled_adjustments", None) is None:
+                self._journaled_adjustments = set()
+
+            if remaining_qty > 0:
+                adj_key = (basket.package_id, closed_qty, remaining_qty)
+                if adj_key in self._journaled_adjustments:
+                    return
+                self._journaled_adjustments.add(adj_key)
                 record_trade_adjustment(
                     trade_id=trade_id,
                     strategy_name=self._strategy_id(),
@@ -1872,6 +1898,10 @@ class SPXIronCondor(Strategy):
                 )
                 return
 
+            exit_key = (basket.package_id, trade_id, "EXIT")
+            if exit_key in self._journaled_adjustments:
+                return
+            self._journaled_adjustments.add(exit_key)
             record_trade_exit(
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
@@ -1897,6 +1927,9 @@ class SPXIronCondor(Strategy):
     def _record_filled_entry(self, basket) -> None:
         if getattr(self, "_current_trade_id", None):
             return
+        if getattr(basket, "trade_id", None):
+            self._current_trade_id = basket.trade_id
+            return
         try:
             from trade_logger import record_trade_entry
 
@@ -1914,11 +1947,11 @@ class SPXIronCondor(Strategy):
                 quantity=quantity,
                 credit=opening_cash / (100.0 * quantity),
                 opening_credit_cash=opening_cash,
-                entry_fees=round(
-                    4 * quantity * float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40")),
-                    2,
+                entry_fees=option_execution_fees(
+                    (leg["filled_signed_quantity"] for leg in basket.legs),
+                    option_fee_per_contract(),
                 ),
-                max_risk=self.parameters["wing_width"] * 100 * self.parameters["quantity"],
+                max_risk=self.parameters["wing_width"] * 100 * quantity,
             )
             self._position_ledger.set_trade_id(
                 basket.package_id, self._current_trade_id
@@ -1927,6 +1960,8 @@ class SPXIronCondor(Strategy):
             logger.warning("Could not persist filled trade entry: %s", error)
 
     def _record_filled_addition(self, basket) -> None:
+        if getattr(basket, "trade_id", None):
+            return
         trade_id = getattr(self, "_current_trade_id", None)
         if not trade_id:
             trade_id = self._position_ledger.active_trade_id(self._strategy_id())
@@ -1943,9 +1978,9 @@ class SPXIronCondor(Strategy):
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
                 opening_credit_cash=float(basket.opening_cash_flow or 0.0),
-                fees=round(
-                    4 * quantity * float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40")),
-                    2,
+                fees=option_execution_fees(
+                    (leg["filled_signed_quantity"] for leg in basket.legs),
+                    option_fee_per_contract(),
                 ),
                 added_quantity=quantity,
             )

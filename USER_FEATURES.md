@@ -230,9 +230,9 @@ This document is the **single source of truth** for all user-facing features sup
 * Prominent, guarded action buttons:
   * **Flatten Strategy A**: Liquidates only Strategy A's open legs.
   * **Flatten Strategy B**: Liquidates only Strategy B's open legs.
-  * **Emergency Flatten All**: Liquidates all open positions across all strategies immediately.
+  * **Emergency Flatten All**: Liquidates all open positions across all strategies immediately via verified broker liquidation (canceling working orders, closing short option legs before protective longs, and polling until flat).
   * **Cancel All Orders**: Cancels any unfilled/working orders.
-  * **Trading Pause / Resume**: Temporarily prevents new entries while maintaining active position management.
+  * **Trading Pause / Resume & Durable Panic Halt**: Temporarily prevents new entries while maintaining active position management. Emergency liquidation engages a durable SQLite panic halt (`set_panic_halt(True)`) that blocks subsequent trading iterations and policy actions until explicitly resolved.
 
 ---
 

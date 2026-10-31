@@ -3,6 +3,8 @@
 Supports both Tradier (Sandbox/Live) and Alpaca (Paper/Live).
 """
 import os
+import re
+import time
 import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
@@ -11,6 +13,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
+
+
+def _env_bool(*names: str, default: bool = True) -> bool:
+    """Parse environment boolean with canonical precedence, matching main.py."""
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None or not raw.strip():
+            continue
+        normalized = raw.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+        raise ValueError(f"{name} must be true, false, 1, 0, yes, no, on, or off.")
+    return default
 
 
 class TradierClient:
@@ -25,6 +42,7 @@ class TradierClient:
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
         }
+        self.flatten_failures: Dict[str, str] = {}
 
     def fetch_account_info(self) -> Optional[Dict[str, Any]]:
         """Fetch balances, equity, cash, and option buying power."""
@@ -236,28 +254,220 @@ class TradierClient:
             logger.warning(f"Tradier fetch_recent_orders exception: {e}")
         return []
 
+    def _fetch_all_orders(self) -> List[Dict[str, Any]]:
+        """Strict order reader with pagination that raises on non-200 HTTP status."""
+        all_orders: List[Dict[str, Any]] = []
+        page = 1
+        seen_ids = set()
+        while True:
+            url = f"{self.base_url}/accounts/{self.account}/orders"
+            res = requests.get(url, headers=self.headers, params={"page": page}, timeout=6)
+            if res.status_code != 200:
+                raise RuntimeError(f"Failed to fetch orders from Tradier (status {res.status_code}): {res.text}")
+            data = res.json()
+            orders_data = data.get("orders")
+            if not orders_data or orders_data == "null":
+                break
+            order_list = orders_data.get("order", [])
+            if isinstance(order_list, dict):
+                order_list = [order_list]
+            if not order_list:
+                break
+            new_orders = [o for o in order_list if o.get("id") not in seen_ids]
+            if not new_orders:
+                break
+            for o in new_orders:
+                seen_ids.add(o.get("id"))
+                all_orders.append(o)
+            if len(order_list) < 25:
+                break
+            page += 1
+        return all_orders
+
+    def _fetch_all_positions(self) -> List[Dict[str, Any]]:
+        """Strict position reader that raises on non-200 HTTP status."""
+        url = f"{self.base_url}/accounts/{self.account}/positions"
+        res = requests.get(url, headers=self.headers, timeout=6)
+        if res.status_code != 200:
+            raise RuntimeError(f"Failed to fetch positions from Tradier (status {res.status_code}): {res.text}")
+        data = res.json()
+        pos_data = data.get("positions")
+        if not pos_data or pos_data == "null":
+            return []
+        pos_list = pos_data.get("position", [])
+        if isinstance(pos_list, dict):
+            pos_list = [pos_list]
+        return pos_list
+
     def emergency_cancel_orders(self) -> bool:
-        """Cancel all working/open orders."""
-        orders = self.fetch_recent_orders(limit=50)
+        """Cancel all working/open orders and confirm termination."""
+        try:
+            orders = self._fetch_all_orders()
+        except Exception as e:
+            logger.error(f"Tradier emergency_cancel_orders fetch failure: {e}")
+            return False
+
+        working_statuses = {"open", "pending", "partially_filled", "submitted", "calculated", "accepted"}
+        working_orders = [o for o in orders if str(o.get("status", "")).lower() in working_statuses]
+        if not working_orders:
+            return True
+
         success = True
-        for o in orders:
-            status = o.get("status", "").lower()
-            if status in ["open", "pending", "partially_filled"]:
-                order_id = o.get("id")
-                try:
-                    url = f"{self.base_url}/accounts/{self.account}/orders/{order_id}"
-                    r = requests.delete(url, headers=self.headers, timeout=5)
-                    if r.status_code not in [200, 204]:
-                        success = False
-                except Exception:
+        for o in working_orders:
+            order_id = o.get("id")
+            try:
+                url = f"{self.base_url}/accounts/{self.account}/orders/{order_id}"
+                r = requests.delete(url, headers=self.headers, timeout=5)
+                if r.status_code not in [200, 204]:
+                    logger.warning(f"Failed to cancel order {order_id} (status {r.status_code}): {r.text}")
                     success = False
+            except Exception as e:
+                logger.warning(f"Exception canceling order {order_id}: {e}")
+                success = False
+
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                current_orders = self._fetch_all_orders()
+                still_working = [o for o in current_orders if str(o.get("status", "")).lower() in working_statuses]
+                if not still_working:
+                    return success
+            except Exception:
+                pass
+            time.sleep(0.5)
+
         return success
 
-    def emergency_flatten_positions(self) -> bool:
-        """Emergency liquidate all open positions."""
-        # Safety net logic - cancel all orders first
-        self.emergency_cancel_orders()
-        return True
+    def emergency_flatten_positions(self, timeout_seconds: float = 10.0) -> bool:
+        """Emergency liquidate all open positions with verified order acceptance and polling."""
+        self.flatten_failures = {}
+
+        # 1. Cancel working orders first
+        if not self.emergency_cancel_orders():
+            logger.warning("Emergency cancel orders encountered non-fatal failure; proceeding to positions.")
+
+        # 2. Re-read positions to capture fills during cancellation
+        try:
+            positions = self._fetch_all_positions()
+        except Exception as e:
+            self.flatten_failures["__global__"] = f"Failed to fetch positions: {e}"
+            logger.error(f"Tradier emergency_flatten_positions error: {e}")
+            return False
+
+        if not positions:
+            return True
+
+        occ_pattern = re.compile(r"^([A-Za-z]{1,6})\d{6}[CP]\d{8}$")
+        equity_pattern = re.compile(r"^[A-Za-z]{1,6}$")
+
+        short_options = []
+        long_options = []
+        short_equities = []
+        long_equities = []
+
+        for p in positions:
+            sym = str(p.get("symbol", "")).strip()
+            qty = float(p.get("quantity", 0))
+            if qty == 0:
+                continue
+
+            occ_match = occ_pattern.match(sym)
+            if occ_match:
+                underlying = occ_match.group(1).upper()
+                if qty < 0:
+                    short_options.append((sym, underlying, abs(int(qty)), "buy_to_close"))
+                else:
+                    long_options.append((sym, underlying, abs(int(qty)), "sell_to_close"))
+            elif equity_pattern.match(sym):
+                if qty < 0:
+                    short_equities.append((sym, sym, abs(int(qty)), "buy_to_cover"))
+                else:
+                    long_equities.append((sym, sym, abs(int(qty)), "sell"))
+            else:
+                self.flatten_failures[sym] = "Unsupported instrument format"
+                logger.error(f"Unsupported instrument in emergency flatten: {sym}")
+
+        if self.flatten_failures:
+            return False
+
+        # Close short legs first, then long protective legs
+        close_batches = [
+            ("option", short_options),
+            ("equity", short_equities),
+            ("option", long_options),
+            ("equity", long_equities),
+        ]
+
+        for instrument_type, batch in close_batches:
+            for item in batch:
+                sym, underlying_or_sym, abs_qty, side = item
+                if instrument_type == "option":
+                    data = {
+                        "class": "option",
+                        "symbol": underlying_or_sym,
+                        "option_symbol": sym,
+                        "side": side,
+                        "quantity": str(abs_qty),
+                        "type": "market",
+                        "duration": "day",
+                    }
+                else:
+                    data = {
+                        "class": "equity",
+                        "symbol": underlying_or_sym,
+                        "side": side,
+                        "quantity": str(abs_qty),
+                        "type": "market",
+                        "duration": "day",
+                    }
+                try:
+                    url = f"{self.base_url}/accounts/{self.account}/orders"
+                    res = requests.post(url, headers=self.headers, data=data, timeout=6)
+                    if res.status_code not in (200, 201):
+                        self.flatten_failures[sym] = f"Order rejected (status {res.status_code})"
+                        logger.error(f"Tradier reject for {sym}: {res.status_code} {res.text}")
+                    else:
+                        res_json = res.json()
+                        if "errors" in res_json:
+                            self.flatten_failures[sym] = f"Broker errors: {res_json['errors']}"
+                except Exception as exc:
+                    self.flatten_failures[sym] = f"Order exception: {exc}"
+                    logger.error(f"Exception submitting close order for {sym}: {exc}")
+
+        if self.flatten_failures:
+            return False
+
+        # Poll until verified flat with zero working orders
+        working_statuses = {"open", "pending", "partially_filled", "submitted", "calculated", "accepted"}
+        deadline = time.monotonic() + max(timeout_seconds, 1.0)
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                remaining_positions = [
+                    p for p in self._fetch_all_positions()
+                    if float(p.get("quantity", 0)) != 0
+                ]
+                working_orders = [
+                    o for o in self._fetch_all_orders()
+                    if str(o.get("status", "")).lower() in working_statuses
+                ]
+                if not remaining_positions and not working_orders:
+                    return True
+            except Exception as poll_err:
+                logger.warning(f"Polling verification exception: {poll_err}")
+
+        try:
+            final_positions = [
+                p for p in self._fetch_all_positions()
+                if float(p.get("quantity", 0)) != 0
+            ]
+            for p in final_positions:
+                sym = str(p.get("symbol", "unknown"))
+                self.flatten_failures[sym] = f"Position still open: qty {p.get('quantity')}"
+        except Exception as e:
+            self.flatten_failures["__verification__"] = f"Verification failed: {e}"
+
+        return len(self.flatten_failures) == 0
 
 
 def get_broker_client():
@@ -265,25 +475,21 @@ def get_broker_client():
     broker_type = os.getenv("TRADING_BROKER", "").strip().lower()
     if broker_type not in ("", "tradier", "alpaca"):
         return None
+
     # 1. Check Tradier
-    tradier_key = os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY")
-    if (broker_type == "tradier" or not broker_type) and tradier_key and not tradier_key.startswith("your_"):
-        account = os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT", "VA21359019")
-        paper_value = next(
-            (
-                raw.strip()
-                for name in ("TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX")
-                if (raw := os.getenv(name)) is not None and raw.strip()
-            ),
-            "true",
-        )
-        sandbox = paper_value.lower() in ("true", "1", "yes", "on")
+    tradier_key = (os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY") or "").strip()
+    account = (os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT") or "").strip()
+
+    if broker_type == "tradier" or (not broker_type and tradier_key):
+        if not tradier_key or tradier_key.startswith("your_") or not account or account.startswith("your_"):
+            return None
+        sandbox = _env_bool("TRADIER_PAPER", "TRADIER_IS_PAPER", "TRADIER_SANDBOX", default=True)
         return TradierClient(api_key=tradier_key, account=account, sandbox=sandbox)
 
     # 2. Check Alpaca
-    alpaca_key = os.getenv("ALPACA_API_KEY")
-    alpaca_secret = os.getenv("ALPACA_API_SECRET")
-    if (broker_type == "alpaca" or not broker_type) and alpaca_key and alpaca_secret and alpaca_key != "your_paper_api_key_here":
+    alpaca_key = (os.getenv("ALPACA_API_KEY") or "").strip()
+    alpaca_secret = (os.getenv("ALPACA_API_SECRET") or "").strip()
+    if (broker_type == "alpaca" or not broker_type) and alpaca_key and alpaca_secret and not alpaca_key.startswith("your_"):
         try:
             from alpaca_client import get_client
             client = get_client()
@@ -292,5 +498,4 @@ def get_broker_client():
         except ImportError:
             pass
 
-    # 3. Fallback mock client
-    return TradierClient(api_key="mock", account="VA-MOCK", sandbox=True)
+    return None

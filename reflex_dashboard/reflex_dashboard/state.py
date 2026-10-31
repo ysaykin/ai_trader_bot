@@ -5,8 +5,12 @@ Manages live telemetry polling, user interactions, tabs, and broker controls.
 
 from __future__ import annotations
 
+import logging
+import os
 import reflex as rx
 from typing import Any
+
+logger = logging.getLogger(__name__)
 from .data.adapters import (
     get_market_clock,
     get_bot_status_from_log,
@@ -476,17 +480,33 @@ class DashboardState(rx.State):
         """Execute emergency position flattening."""
         self.panic_in_progress = True
         try:
-            from dashboard.broker_client import BrokerClient
-            client = BrokerClient()
-            client.close_all_positions()
+            from dashboard.broker_client import get_broker_client
+
+            client = get_broker_client()
+            if client is None or not callable(getattr(client, "emergency_flatten_positions", None)):
+                return rx.toast.error("Panic liquidation is unavailable for the configured broker.")
+
+            try:
+                from strategies.position_ledger import PositionLedger
+                ledger_path = os.getenv("POSITION_LEDGER_PATH", "logs/position_ledger.sqlite3")
+                ledger = PositionLedger(ledger_path)
+                ledger.set_panic_halt(True, reason="dashboard_panic_liquidation")
+            except Exception as e:
+                logger.exception("Failed to persist durable panic halt: %s", e)
+
+            success = client.emergency_flatten_positions()
+            failures = getattr(client, "flatten_failures", {})
+            if not success or failures:
+                failed_syms = ", ".join(failures.keys()) if failures else "broker unverified"
+                return rx.toast.error(f"Panic liquidation incomplete: {failed_syms}. Check broker immediately.")
             self.load_all()
-            self.panic_modal_open = False
-            self.panic_in_progress = False
-            return rx.toast.success("🚨 Emergency Panic Liquidation Completed! All positions flattened.")
+            return rx.toast.success("Emergency liquidation verified. All positions are flat.")
         except Exception as exc:
+            logger.exception("Unexpected error during panic liquidation: %s", exc)
+            return rx.toast.error("Panic liquidation failed. Check the broker account immediately.")
+        finally:
             self.panic_in_progress = False
             self.panic_modal_open = False
-            return rx.toast.error(f"Panic liquidation failed: {exc}")
 
     def save_configuration(self):
         """Save form values to .env file."""

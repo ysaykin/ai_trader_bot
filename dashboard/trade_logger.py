@@ -22,6 +22,7 @@ if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
 from ml.features import GREEKS, MARKET_TZ, finite_number, grid_features, market_features
+from strategies.iron_condor_math import option_fee_per_contract
 
 DEFAULT_LOG_PATH = Path("logs/trades.jsonl")
 DEFAULT_TRAJECTORY_PATH = Path("logs/trajectories.jsonl")
@@ -461,10 +462,11 @@ def record_trade_entry(
         if opening_credit_cash is not None
         else credit_per_contract * 100.0 * quantity_value
     )
+    f_rate = option_fee_per_contract()
     fees = float(
         entry_fees
         if entry_fees is not None
-        else 4 * quantity_value * float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+        else (len(strikes) or 4) * quantity_value * f_rate
     )
     entry_data = {
         "event": "ENTRY",
@@ -558,12 +560,33 @@ def record_trade_exit(
     opening_credit_cash: Optional[float] = None,
     closing_cash: Optional[float] = None,
     log_path: Path = DEFAULT_LOG_PATH,
+    quantity: Optional[int] = None,
+    legs: Optional[int] = None,
 ) -> None:
     """Record a trade exit event to logs/trades.jsonl with fee and net P&L tracking."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    f_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+    f_rate = option_fee_per_contract()
     calc_gross = float(gross_pnl if gross_pnl is not None else pnl)
-    calc_fees = float(fees if fees is not None else (8 * f_rate))
+    if fees is not None:
+        calc_fees = float(fees)
+    else:
+        eff_legs = legs if legs is not None else 4
+        eff_qty = quantity if quantity is not None else 1
+        if (legs is None or quantity is None) and log_path.exists():
+            try:
+                with open(log_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            record = json.loads(line)
+                            if record.get("event") == "ENTRY" and record.get("trade_id") == trade_id:
+                                if legs is None:
+                                    eff_legs = len(record.get("strikes") or {}) or 4
+                                if quantity is None:
+                                    eff_qty = int(record.get("quantity", 1))
+                                break
+            except Exception:
+                pass
+        calc_fees = round(float(eff_legs * eff_qty * f_rate), 2)
     calc_net = float(net_pnl if net_pnl is not None else (calc_gross - calc_fees))
 
     exit_data: Dict[str, Any] = {
@@ -630,7 +653,7 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
             qty = entry_qty + sum(
                 int(item.get("added_quantity", 0)) for item in trade_additions
             )
-            f_rate = float(os.getenv("OPTION_FEE_PER_CONTRACT", "0.40"))
+            f_rate = option_fee_per_contract()
             new_schema = "opening_credit_cash" in entry or "entry_fees" in entry
             opening_cash = float(
                 entry.get(
@@ -642,7 +665,7 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
                 for item in trade_additions
             )
             entry_fees = float(
-                entry.get("entry_fees", round(4 * entry_qty * f_rate, 2))
+                entry.get("entry_fees", round((len(entry.get("strikes") or {}) or 4) * entry_qty * f_rate, 2))
             ) + sum(float(item.get("fees", 0.0)) for item in trade_additions)
             partials = adjustments.get(t_id, [])
             partial_gross = sum(
@@ -667,11 +690,11 @@ def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:
                 )
                 gross_pnl = partial_gross + exit_gross
                 if new_schema:
-                    exit_fees = float(terminal.get("fees", 4 * qty * f_rate))
+                    exit_fees = float(terminal.get("fees", (len(entry.get("strikes") or {}) or 4) * int(partials[-1].get("remaining_quantity", qty) if partials else qty) * f_rate))
                     fees = entry_fees + partial_fees + exit_fees
                     net_pnl = round(gross_pnl - fees, 2)
                 else:
-                    exit_fees = float(terminal.get("fees", round(8 * qty * f_rate, 2)))
+                    exit_fees = float(terminal.get("fees", round(2 * (len(entry.get("strikes") or {}) or 4) * qty * f_rate, 2)))
                     fees = partial_fees + exit_fees
                     net_pnl = sum(
                         float(item.get("net_pnl", item.get("pnl", 0.0)))

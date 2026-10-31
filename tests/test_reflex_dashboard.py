@@ -109,6 +109,59 @@ class TestReflexDashboard(unittest.TestCase):
         self.assertEqual(fields["broker_name"].default, "TRADIER")
         self.assertGreaterEqual(fields["open_risk_cap"].default, 5000.0)
 
+    def test_execute_panic_liquidation_no_broker(self):
+        import reflex as rx
+        from unittest.mock import patch
+        state = DashboardState()
+        with patch("dashboard.broker_client.get_broker_client", return_value=None):
+            result = state.execute_panic_liquidation()
+            self.assertFalse(state.panic_in_progress)
+            self.assertFalse(state.panic_modal_open)
+
+    def test_execute_panic_liquidation_success_sets_durable_halt(self):
+        import tempfile
+        import os
+        from unittest.mock import Mock, patch
+        from strategies.position_ledger import PositionLedger
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_path = os.path.join(tmpdir, "test_ledger.sqlite3")
+            mock_client = Mock()
+            mock_client.emergency_flatten_positions.return_value = True
+            mock_client.flatten_failures = {}
+
+            state = DashboardState()
+            with patch.dict(os.environ, {"POSITION_LEDGER_PATH": ledger_path}), \
+                 patch("dashboard.broker_client.get_broker_client", return_value=mock_client), \
+                 patch.object(DashboardState, "load_all"):
+                result = state.execute_panic_liquidation()
+                self.assertFalse(state.panic_in_progress)
+                self.assertFalse(state.panic_modal_open)
+
+                # Confirm durable panic halt is persisted
+                ledger = PositionLedger(ledger_path)
+                self.assertTrue(ledger.is_panic_halted())
+                ledger._connection.close()
+
+    def test_execute_panic_liquidation_failures_surfaced(self):
+        import tempfile
+        import os
+        from unittest.mock import Mock, patch
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ledger_path = os.path.join(tmpdir, "test_ledger.sqlite3")
+            mock_client = Mock()
+            mock_client.emergency_flatten_positions.return_value = False
+            mock_client.flatten_failures = {"SPXW241031C05800000": "Order rejected"}
+
+            state = DashboardState()
+            with patch.dict(os.environ, {"POSITION_LEDGER_PATH": ledger_path}), \
+                 patch("dashboard.broker_client.get_broker_client", return_value=mock_client), \
+                 patch.object(DashboardState, "load_all"):
+                result = state.execute_panic_liquidation()
+                self.assertFalse(state.panic_in_progress)
+                self.assertFalse(state.panic_modal_open)
+
 
 if __name__ == "__main__":
     unittest.main()

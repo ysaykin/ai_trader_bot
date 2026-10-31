@@ -64,6 +64,17 @@ Dashboard implementation belongs to the pending tasks recorded there.
 5. Add and run a read-only source audit, validate the backlog, and preview the
    proposed position and strategy comparison workflow with sample data.
 
+Review completed on 2026-10-31. Ten dashboard implementation tasks are pending
+in `.scrum/TASKS.yaml`, and feature-catalog reconciliation is reopened. The
+follow-up audit separates overlapping legacy telemetry work and links package
+valuation to the existing fee, event-aggregation, and ownership fixes.
+The source audit runs without importing the app or contacting a broker:
+`python3 tools/audit_dashboard_ui.py`.
+The sample preview was checked for grouped totals, strategy filtering, leg
+expansion, expiration scenarios, risk-normalized comparison, red negative
+values, and layout at 320px and 1024px. These checks verify the proposal, not
+the pending production dashboard features.
+
 ## Top 10 Prioritized Bug Backlog (Frontend & Backend), 2026-10-30
 
 1. **[P0] `bug-01-panic-liquidation-import-and-flatten` — Emergency Panic Liquidation crashes with `ImportError` and `TradierClient.emergency_flatten_positions()` is a no-op stub**
@@ -210,3 +221,11 @@ transitions, and duplicated journaling remain outside this bounded change.
 
 Package these four files in one isolated commit. While that commit remains HEAD,
 rollback with `git -C /workspace/lumibot revert --no-edit HEAD`.
+
+### Implementation progress & verification summary
+
+- **`bug-01-panic-liquidation-import-and-flatten`**: Completed and verified. Resolved `BrokerClient` import error in `DashboardState.execute_panic_liquidation()`. Implemented real execution logic in `TradierClient.emergency_flatten_positions()` canceling working orders, closing short option legs before protective longs with bounded polling until flat, exposing per-symbol failure errors, and enforcing a durable SQLite panic halt (`PositionLedger.set_panic_halt(True)` / `is_panic_halted()`) across strategy iterations and policy actions.
+- **`bug-02-dynamic-leg-count-fee-accounting`**: Completed and verified. Implemented resilient fee environment parsing via `option_fee_per_contract()`. Scaled entry, addition, exit, and roundtrip fee accounting dynamically by leg count (`len(legs)` / `len(strikes)`) across `SPXIronCondor`, `trade_logger.py`, and `dashboard/trade_logger.py`, preventing vertical spreads from being overcharged 2x. Scaled entry max risk by confirmed filled quantity.
+- **`bug-03-partial-fill-terminal-order-reconciliation`**: Completed and verified. Implemented `PositionLedger.resolve_partial_package()` transitioning partially filled packages with terminal broker orders (`canceled`, `rejected`, `expired`, `failed`) to active `"open"` (for entry/add) or `"canceled"` (for close/trim), unblocking position management and closing submissions. Fixed cumulative fill pricing in `PositionLedger.record_fill` and deduplicated trade journal events.
+- **`bug-04-neural-strategy-switch-entry-times`**: Completed and verified. Integrated `self.set_run_times()` into `SPXIronCondor._apply_neural_strategy_switch()` to parse multi-slot comma-separated entry schedules, safely synchronizing `self._entry_times` and `self._entry_time`.
+- **Verification**: Complete test suite passed (198 passed, 1 skipped, 76 subtests passed) in `tests/test_reflex_dashboard.py`, `tests/test_iron_condor_execution_safety.py`, `tests/test_trade_logger_win_rate.py`, `tests/test_neural_strategy_switch.py`, and the rest of the test suite. All modified Python files passed `python3 -m py_compile`, and `git diff --check` passed cleanly.

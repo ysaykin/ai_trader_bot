@@ -3,8 +3,35 @@
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable, Sequence
 from numbers import Real
+
+
+def option_fee_per_contract(default: float = 0.40) -> float:
+    """Return configured fee per option contract with safe fallback on missing/malformed input."""
+    raw = os.getenv("OPTION_FEE_PER_CONTRACT")
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        val = float(raw)
+        return val if val >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def option_execution_fees(signed_quantities: Iterable[Real], fee_rate: Real) -> float:
+    """Calculate commissions for confirmed option contract executions."""
+    rate = _finite_number(fee_rate, "fee_rate")
+    if rate < 0:
+        raise ValueError("fee_rate must be nonnegative")
+    total = 0
+    for quantity in signed_quantities:
+        value = _finite_number(quantity, "quantity")
+        if not value.is_integer():
+            raise ValueError("contract quantities must be integers")
+        total += abs(int(value))
+    return round(total * rate, 2)
 
 
 def select_short_strikes(
@@ -157,6 +184,8 @@ __all__ = [
     "evaluate_mfe_ratchet",
     "evaluate_strategybro_entry_quality",
     "max_defined_loss",
+    "option_execution_fees",
+    "option_fee_per_contract",
     "option_midpoint",
     "position_unrealized_pnl",
     "resolve_orb_structure",

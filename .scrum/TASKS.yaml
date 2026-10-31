@@ -1,6 +1,7 @@
 version: 1
 dashboard_review:
   date: "2026-10-30"
+  follow_up_date: "2026-10-31"
   scope: "Running Reflex dashboard at localhost:8501, dashboard source, backlog and feature claims"
   limitations:
     - "Read-only UI and source review. New dashboard features and broker write tests were not executed."
@@ -10,7 +11,7 @@ dashboard_review:
     - "https://toslc.thinkorswim.com/center/howToTos/thinkManual/Analyze"
     - "https://www.tastylive.com/news-insights/track-options-trades-automatically-with-order-chains"
 tasks:
-  # --- Foundation & Risk Guardrails (Completed) ---
+  # --- Foundation, risk guardrails and catalog upkeep ---
   - id: user-features-catalog
     title: "Reconcile feature catalog, dashboard documentation and sprint claims with the running Reflex app"
     status: pending
@@ -376,6 +377,7 @@ tasks:
     owner: unassigned
     depends_on:
       - dashboard-telemetry-validity
+      - bug-05-config-view-env-key-alignment
     evidence:
       - ".env.example configures $15k per strategy and $100k portfolio defaults; adapters.py and scanner labels still use $5k."
       - "risk_gauges.py displays fixed 30% sizing and 100.0% Available text even when the progress value changes."
@@ -398,6 +400,9 @@ tasks:
     owner: unassigned
     depends_on:
       - dashboard-telemetry-validity
+      - bug-02-dynamic-leg-count-fee-accounting
+      - bug-06-reflex-trade-event-aggregation-and-win-rate
+      - bug-07-ledger-strike-keys-and-multi-package-attribution
     evidence:
       - "PositionLedger stores package_id, strategy_id, trade_id, broker order linkage and signed fills. Reflex positions currently read only broker-netted contract rows."
     acceptance:
@@ -528,7 +533,7 @@ tasks:
 
   - id: bug-01-panic-liquidation-import-and-flatten
     title: "Fix emergency panic liquidation ImportError and implement broker position flattening"
-    status: pending
+    status: completed
     priority: P0
     owner: unassigned
     evidence:
@@ -540,11 +545,14 @@ tasks:
     deliverables:
       - reflex_dashboard/reflex_dashboard/state.py
       - dashboard/broker_client.py
+      - strategies/position_ledger.py
+      - strategies/iron_condor.py
       - tests/test_reflex_dashboard.py
+      - tests/test_iron_condor_execution_safety.py
 
   - id: bug-02-dynamic-leg-count-fee-accounting
     title: "Scale commission and fee calculations by actual leg count instead of hardcoded 4/8 legs"
-    status: pending
+    status: completed
     priority: P0
     owner: unassigned
     evidence:
@@ -555,13 +563,15 @@ tasks:
       - "Add unit tests verifying 2-leg vertical and 4-leg iron condor fee calculations in both live management and trade logging."
     deliverables:
       - strategies/iron_condor.py
+      - strategies/iron_condor_math.py
       - trade_logger.py
+      - dashboard/trade_logger.py
       - tests/test_iron_condor_execution_safety.py
       - tests/test_trade_logger_win_rate.py
 
   - id: bug-03-partial-fill-terminal-order-reconciliation
     title: "Reconcile partially filled baskets when residual broker order is canceled, rejected, or expired"
-    status: pending
+    status: completed
     priority: P0
     owner: unassigned
     evidence:
@@ -577,7 +587,7 @@ tasks:
 
   - id: bug-04-neural-strategy-switch-entry-times
     title: "Parse multi-slot entry_time schedules and update _entry_times during neural strategy switch"
-    status: pending
+    status: completed
     priority: P0
     owner: unassigned
     evidence:
@@ -587,6 +597,7 @@ tasks:
       - "Raise or log explicit parsing errors instead of silently swallowing exceptions."
     deliverables:
       - strategies/iron_condor.py
+      - tests/test_neural_strategy_switch.py
       - tests/test_live_policy_integration.py
 
   - id: bug-05-config-view-env-key-alignment
@@ -656,24 +667,28 @@ tasks:
       - tests/test_reflex_dashboard.py
 
   - id: bug-09-ui-telemetry-fallbacks-and-sign-colors
-    title: "Eliminate fabricated cost-basis quote fallbacks, bind header/gauge telemetry, and enforce negative red styling"
+    title: "Bring legacy Streamlit telemetry and signed values into parity with the shared dashboard rules"
     status: pending
     priority: P1
     owner: unassigned
+    depends_on:
+      - dashboard-telemetry-validity
+      - dashboard-signed-value-formatting
+      - dashboard-configured-risk-telemetry
+    review_notes:
+      - "Deduplicated 2026-10-31. The Reflex fallback, sign-color and header/gauge defects in the original evidence are owned by the three dashboard tasks above."
+      - "Keep this task for the distinct legacy dashboard/broker_client.py and dashboard/app.py paths. Do not implement a second Reflex formatting policy here."
     evidence:
       - "reflex_dashboard/reflex_dashboard/data/adapters.py:304 and dashboard/broker_client.py:194 fall back to cost_basis when mark quotes are missing, fabricating $0.00 P&L."
       - "positions_view.py:62, ab_lab_view.py:171,243, and benchmark_view.py:106 hardcode GREEN on signed P&L/drawdown; risk_gauges.py:86,99,154 and header.py:63,83 hardcode static labels and badge colors."
     acceptance:
-      - "Surface missing marks as unavailable rather than substituting cost basis."
-      - "Bind dynamic state properties in risk_gauges.py and header.py, and apply negative red formatting across all P&L and drawdown components."
+      - "In dashboard/broker_client.py, surface missing marks as unavailable rather than substituting cost basis. Preserve quote source and freshness information."
+      - "Apply the same signed-value, empty/error and configured-risk rules to the retained Streamlit view, including red negative values and no fabricated zero P&L."
+      - "Use deterministic legacy-adapter fixtures and verify the Streamlit view only if it remains a supported entry point."
     deliverables:
-      - reflex_dashboard/reflex_dashboard/data/adapters.py
       - dashboard/broker_client.py
-      - reflex_dashboard/reflex_dashboard/components/positions_view.py
-      - reflex_dashboard/reflex_dashboard/components/ab_lab_view.py
-      - reflex_dashboard/reflex_dashboard/components/benchmark_view.py
-      - reflex_dashboard/reflex_dashboard/components/risk_gauges.py
-      - reflex_dashboard/reflex_dashboard/components/header.py
+      - dashboard/app.py
+      - tests/test_dashboard.py
 
   - id: bug-10-legacy-react-form-and-mock-backend-accounting
     title: "Fix broken FormData bindings in legacy React dashboard and inverted cash/credit math in FastAPI mock backend"

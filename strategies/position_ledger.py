@@ -106,6 +106,11 @@ class PositionLedger:
                     status TEXT NOT NULL,
                     UNIQUE(package_id, asset_key)
                 );
+                CREATE TABLE IF NOT EXISTS system_state (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             self._add_columns(
@@ -384,15 +389,18 @@ class PositionLedger:
                 return self.get_basket(str(leg["package_id"]))
             previous_price = leg["fill_price"]
             delta = abs(filled) - abs(previous_quantity)
-            weighted_price = (
-                price
-                if previous_quantity == 0
-                else (
-                    abs(previous_quantity) * float(previous_price)
-                    + delta * price
+            if cumulative:
+                weighted_price = price
+            else:
+                weighted_price = (
+                    price
+                    if previous_quantity == 0
+                    else (
+                        abs(previous_quantity) * float(previous_price)
+                        + delta * price
+                    )
+                    / abs(filled)
                 )
-                / abs(filled)
-            )
             now = datetime.now(timezone.utc).isoformat()
             self._connection.execute(
                 """UPDATE legs SET filled_signed_quantity = ?, fill_price = ?,
@@ -423,6 +431,63 @@ class PositionLedger:
             )
             if result.rowcount != 1:
                 raise KeyError(f"unknown package_id: {package_id}")
+
+    def resolve_partial_package(self, package_id: str, terminal_status: str) -> BasketRecord:
+        """Resolve a partially filled package whose broker order reached terminal status."""
+        normalized = terminal_status.strip().lower()
+        if normalized not in TERMINAL_STATES:
+            raise ValueError(f"non-terminal package state: {terminal_status}")
+        with self._lock, self._connection:
+            package = self._connection.execute(
+                "SELECT * FROM packages WHERE package_id = ?", (package_id,)
+            ).fetchone()
+            if package is None:
+                raise KeyError(f"unknown package_id: {package_id}")
+            intent = str(package["intent"])
+            now = datetime.now(timezone.utc).isoformat()
+            if intent in {"close", "trim"}:
+                self._connection.execute(
+                    "UPDATE packages SET state = ?, updated_at = ? WHERE package_id = ?",
+                    (normalized, now, package_id),
+                )
+            elif intent in {"open", "add"}:
+                legs = self._connection.execute(
+                    "SELECT * FROM legs WHERE package_id = ?", (package_id,)
+                ).fetchall()
+                any_fill = any(int(leg["filled_signed_quantity"]) for leg in legs)
+                balanced = sum(int(leg["filled_signed_quantity"]) for leg in legs) == 0
+                if any_fill and balanced:
+                    self._connection.execute(
+                        "UPDATE packages SET state = 'open', updated_at = ? WHERE package_id = ?",
+                        (now, package_id),
+                    )
+                else:
+                    self._connection.execute(
+                        "UPDATE packages SET state = ?, updated_at = ? WHERE package_id = ?",
+                        (normalized, now, package_id),
+                    )
+            return self.get_basket(package_id)
+
+    def set_panic_halt(self, halted: bool = True, reason: str = "panic_liquidation") -> None:
+        """Persist a durable panic halt to block subsequent entries and trading iterations."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            val = "1" if halted else "0"
+            self._connection.execute(
+                """INSERT INTO system_state (key, value, updated_at) VALUES ('panic_halt', ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+                (val, now),
+            )
+
+    def is_panic_halted(self) -> bool:
+        """Check if durable panic halt is active."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM system_state WHERE key = 'panic_halt'"
+            ).fetchone()
+            if row is None:
+                return False
+            return str(row["value"]).strip() in ("1", "true", "True")
 
     def set_trade_id(self, package_id: str, trade_id: str) -> None:
         """Attach the durable journal identity to a package."""
