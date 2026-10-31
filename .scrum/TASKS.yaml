@@ -332,9 +332,9 @@ tasks:
   # P0: misleading displayed values. P1: requested position workflow. P2: supporting verification.
   - id: dashboard-signed-value-formatting
     title: "Render every negative numeric value red consistently across the dashboard"
-    status: pending
+    status: completed
     priority: P0
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "positions_view.py: unrealized_pl always uses GREEN; signed quantities, cost basis and Greeks use no sign-aware style."
       - "ab_lab_view.py: both net P&L cards always use GREEN, return percentages use CYAN/AMBER and fees use AMBER."
@@ -348,13 +348,15 @@ tasks:
       - reflex_dashboard/reflex_dashboard/styles/
       - reflex_dashboard/reflex_dashboard/components/
       - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - dashboard/presentation.py
+      - tests/test_dashboard_integrity.py
       - tests/test_reflex_dashboard.py
 
   - id: dashboard-telemetry-validity
     title: "Distinguish loading, empty, stale and failed data without showing fabricated balances or zero P&L"
-    status: pending
+    status: completed
     priority: P0
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "adapters.py:get_broker_telemetry starts with fixed balances and empty positions; missing marks fall back to cost basis."
       - "state.py starts with populated example account, A/B, market and model values. benchmark_view.py renders fixed performance numbers."
@@ -368,13 +370,16 @@ tasks:
       - reflex_dashboard/reflex_dashboard/data/adapters.py
       - reflex_dashboard/reflex_dashboard/state.py
       - reflex_dashboard/reflex_dashboard/components/
+      - dashboard/broker_client.py
+      - dashboard/alpaca_client.py
+      - tests/test_dashboard_integrity.py
       - tests/test_reflex_dashboard.py
 
   - id: dashboard-configured-risk-telemetry
     title: "Display configured strategy and portfolio risk limits with matching live utilization"
-    status: pending
+    status: completed
     priority: P0
-    owner: unassigned
+    owner: antigravity
     depends_on:
       - dashboard-telemetry-validity
       - bug-05-config-view-env-key-alignment
@@ -392,6 +397,7 @@ tasks:
       - reflex_dashboard/reflex_dashboard/components/risk_gauges.py
       - reflex_dashboard/reflex_dashboard/components/header.py
       - reflex_dashboard/reflex_dashboard/components/monitor_view.py
+      - tests/test_dashboard_integrity.py
 
   - id: dashboard-owned-position-model
     title: "Attribute marked option legs to durable trade packages and strategy variants"
@@ -602,9 +608,9 @@ tasks:
 
   - id: bug-05-config-view-env-key-alignment
     title: "Align dashboard configuration reader/writer with runtime .env keys"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "reflex_dashboard/reflex_dashboard/state.py:493-512 and data/adapters.py:1082-1091 read/write BROKER, TRADIER_ACCOUNT_ID, and GLOBAL_RISK_CAP instead of TRADING_BROKER, TRADIER_ACCOUNT_NUMBER, IC_MAX_POSITION_RISK, and IC_MAX_PORTFOLIO_RISK used by main.py."
       - "TRADIER_PAPER has no UI control or persistence in save_configuration()."
@@ -651,9 +657,9 @@ tasks:
 
   - id: bug-08-trajectory-logger-scaling-and-session-tick-count
     title: "Fix TrajectoryLogger quantity scaling, hardcoded $5k cap, and neural session tick counter"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "trade_logger.py:274 caps max_position_risk at $5,000.0 instead of configured IC_MAX_POSITION_RISK, and line 298 omits book['quantity'] when converting per-contract credit to cash P&L."
       - "reflex_dashboard/reflex_dashboard/data/adapters.py:1010-1018 counts all lines in trajectories.jsonl across all dates and event types as current session ticks."

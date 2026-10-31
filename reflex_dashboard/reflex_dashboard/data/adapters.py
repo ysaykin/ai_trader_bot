@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import dotenv_values
+from dashboard.presentation import finite_number, format_numeric, option_mark
 
 
 try:
@@ -45,19 +46,11 @@ def format_trade_time_et(ts: Any) -> str:
 
 
 def number(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (ValueError, TypeError):
-        return None
+    return finite_number(value)
 
 
 def money(value: Any) -> str:
-    n = number(value)
-    if n is None:
-        return "$0.00"
-    return f"${n:,.2f}"
+    return format_numeric(value, currency=True)
 
 
 def get_market_clock() -> dict[str, Any]:
@@ -181,7 +174,7 @@ def get_broker_telemetry() -> dict[str, Any]:
         or env.get("ALPACA_ACCOUNT_ID")
         or os.getenv("TRADIER_ACCOUNT_NUMBER")
         or os.getenv("TRADIER_ACCOUNT_ID")
-        or "VA21359019"
+        or ""
     )
     token = (
         env.get("TRADIER_ACCESS_TOKEN")
@@ -217,7 +210,8 @@ def get_broker_telemetry() -> dict[str, Any]:
         "unrealized_pnl": 0.0,
         "positions": [],
         "orders": [],
-        "risk_cap": 5000.0,
+        "risk_cap": float(env.get("IC_MAX_POSITION_RISK") or os.getenv("IC_MAX_POSITION_RISK", 15000.0)),
+        "portfolio_risk_cap": float(env.get("IC_MAX_PORTFOLIO_RISK") or os.getenv("IC_MAX_PORTFOLIO_RISK", 100000.0)),
         "single_trade_pct": 30.0,
         "buying_power_headroom_pct": 100.0,
     }
@@ -229,6 +223,7 @@ def get_broker_telemetry() -> dict[str, Any]:
             headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
             # Balances
+            b: dict[str, Any] = {}
             r_bal = requests.get(f"{base_url}/accounts/{account_id}/balances", headers=headers, timeout=4)
             if r_bal.status_code == 200:
                 b = r_bal.json().get("balances", {})
@@ -285,27 +280,11 @@ def get_broker_telemetry() -> dict[str, Any]:
                     ask = q.get("ask")
                     last = q.get("last")
 
-                    mark = None
-                    if bid is not None and ask is not None:
-                        try:
-                            b, a = float(bid), float(ask)
-                            if b >= 0 and a >= b:
-                                mark = (b + a) / 2.0
-                        except (ValueError, TypeError):
-                            pass
-                    if mark is None and last is not None:
-                        try:
-                            l = float(last)
-                            if l >= 0:
-                                mark = l
-                        except (ValueError, TypeError):
-                            pass
-                    if mark is None:
-                        mark = abs(cost_basis) / (100.0 * abs(qty)) if qty != 0 else 0.0
-
-                    market_value = qty * mark * 100.0
-                    unrealized_pl = market_value - cost_basis
-                    total_unrealized += unrealized_pl
+                    mark = option_mark(bid, ask, last)
+                    market_value = qty * mark * 100.0 if mark is not None else None
+                    unrealized_pl = market_value - cost_basis if market_value is not None else None
+                    if unrealized_pl is not None:
+                        total_unrealized += unrealized_pl
 
                     greeks = q.get("greeks") or {}
                     delta_val = greeks.get("delta")
@@ -314,17 +293,20 @@ def get_broker_telemetry() -> dict[str, Any]:
                     formatted_positions.append({
                         "symbol": sym,
                         "quantity": f"{int(qty)}" if qty.is_integer() else f"{qty:.1f}",
-                        "cost_basis": f"${cost_basis:.2f}",
-                        "last_price": f"${mark:.2f}",
-                        "market_value": f"${market_value:.2f}",
-                        "unrealized_pl": f"{'+' if unrealized_pl >= 0 else ''}${unrealized_pl:.2f}",
+                        "cost_basis": money(cost_basis),
+                        "last_price": money(mark),
+                        "market_value": money(market_value),
+                        "unrealized_pl": money(unrealized_pl),
                         "delta": f"{float(delta_val):.2f}" if delta_val is not None else "-",
                         "theta": f"{float(theta_val):.2f}" if theta_val is not None else "-",
                         "unrealized_pl_num": unrealized_pl,
+                        "unrealized_pl_color": "#10B981" if (unrealized_pl or 0) > 0 else "#EF4444" if (unrealized_pl or 0) < 0 else "#94A3B8",
                     })
 
                 res["positions"] = formatted_positions
-                res["unrealized_pnl"] = float(b.get("open_pl") or total_unrealized)
+                broker_pnl = number(b.get("open_pl"))
+                all_marked = all(row["unrealized_pl_num"] is not None for row in formatted_positions)
+                res["unrealized_pnl"] = broker_pnl if broker_pnl is not None else total_unrealized if all_marked else None
                 res["open_exposure"] = float(res["option_requirement"])
 
             # Orders
@@ -972,8 +954,11 @@ def get_ab_lab_data() -> dict[str, Any]:
             "fees_str": r["fees_str"],
             "net_pnl_str": r["net_pnl_str"],
             "net_pnl_num": r["net_pnl"],
+            "net_pnl_color": "#10B981" if r["net_pnl"] > 0 else "#EF4444" if r["net_pnl"] < 0 else "#94A3B8",
             "net_ror_pct": r["net_ror_pct"],
+            "net_ror_color": "#10B981" if r["net_pnl"] > 0 else "#EF4444" if r["net_pnl"] < 0 else "#94A3B8",
             "net_roc_pct": r["net_roc_pct"],
+            "net_roc_color": "#10B981" if r["net_pnl"] > 0 else "#EF4444" if r["net_pnl"] < 0 else "#94A3B8",
             "profit_factor": pf,
             "avg_trade_str": money(avg_trade),
             "status": r["status"],
@@ -1009,9 +994,20 @@ def get_neural_policy_data() -> dict[str, Any]:
     current_ticks = 0
     if traj_path.exists():
         try:
+            today_session = datetime.now(EASTERN_TZ).date().isoformat()
             with open(traj_path, "r", encoding="utf-8") as f:
-                lines = [l for l in f if l.strip()]
-                current_ticks = len(lines)
+                for line in f:
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+                    try:
+                        record = json.loads(line_str)
+                        if record.get("event") == "SNAPSHOT":
+                            rec_session = record.get("session")
+                            if rec_session == today_session:
+                                current_ticks += 1
+                    except Exception:
+                        continue
         except Exception:
             pass
 
@@ -1086,9 +1082,10 @@ def get_config_settings() -> dict[str, str]:
         "alpaca_api_key": env.get("ALPACA_API_KEY", ""),
         "alpaca_secret_key": env.get("ALPACA_SECRET_KEY", ""),
         "symbol": env.get("IC_SYMBOL", "XSP"),
-        "data_source": env.get("DATA_SOURCE", "external"),
+        "data_source": env.get("DATA_SOURCE", "tradier"),
         "fee_per_contract": env.get("OPTION_FEE_PER_CONTRACT", "0.40"),
-        "risk_cap": env.get("GLOBAL_RISK_CAP", "5000"),
+        "risk_cap": env.get("IC_MAX_POSITION_RISK") or env.get("GLOBAL_RISK_CAP", "15000.0"),
+        "portfolio_risk_cap": env.get("IC_MAX_PORTFOLIO_RISK", "100000.0"),
         # Testing Strategy (25 DTE Experimental Setup)
         "testing_dte": env.get("TESTING_DTE", "25"),
         "testing_delta": env.get("TESTING_DELTA", "0.15"),

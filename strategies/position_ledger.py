@@ -71,14 +71,52 @@ def asset_key(asset: Any) -> str:
 class PositionLedger:
     """Persist package submissions and confirmed fills in SQLite transactions."""
 
-    def __init__(self, path: str | Path = ":memory:") -> None:
+    def __init__(self, path: str | Path = ":memory:", *, read_only: bool = False) -> None:
         self.path = str(path)
-        if self.path != ":memory:":
+        if not read_only and self.path != ":memory:":
             Path(self.path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-        self._connection = sqlite3.connect(self.path, check_same_thread=False)
+        if read_only and self.path != ":memory:":
+            database = Path(self.path).expanduser().resolve().as_uri() + "?mode=ro"
+            uri_flag = True
+        else:
+            database = self.path
+            uri_flag = False
+        self._connection = sqlite3.connect(database, check_same_thread=False, uri=uri_flag)
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
-        self._initialize()
+        if not read_only:
+            self._initialize()
+
+    def close(self) -> None:
+        """Close the database connection."""
+        with self._lock:
+            self._connection.close()
+
+    def risk_snapshot(self) -> dict[str, Any]:
+        """Read ownership and defined risk from one SQLite snapshot."""
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN")
+                try:
+                    tables = {
+                        row[0]
+                        for row in self._connection.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    if "packages" not in tables:
+                        return {"strategy_risk": {}, "portfolio_risk": 0.0, "owned_quantities": {}}
+                    owners = [str(row[0]) for row in self._connection.execute(
+                        "SELECT DISTINCT strategy_id FROM packages"
+                    )]
+                    risks = {owner: self.portfolio_defined_risk(owner) for owner in owners}
+                    quantities = {owner: self.owned_quantities(owner) for owner in owners}
+                    portfolio = None if any(value is None for value in risks.values()) else sum(risks.values())
+                    return {"strategy_risk": risks, "portfolio_risk": portfolio, "owned_quantities": quantities}
+                finally:
+                    self._connection.rollback()
+            except sqlite3.OperationalError:
+                return {"strategy_risk": {}, "portfolio_risk": 0.0, "owned_quantities": {}}
 
     def _initialize(self) -> None:
         """Create or migrate the ledger without replacing existing rows."""
@@ -193,6 +231,7 @@ class PositionLedger:
         broker_tag: str | None = None,
         replacement_of: str | None = None,
         reprice_count: int = 0,
+        created_at: datetime | str | None = None,
     ) -> None:
         """Atomically record a broker package before considering any leg owned."""
         normalized = tuple(self._coerce_leg(leg) for leg in legs)
@@ -210,7 +249,19 @@ class PositionLedger:
         price = None if limit_price is None else float(limit_price)
         if price is not None and (not math.isfinite(price) or price < 0):
             raise ValueError("limit_price must be finite and non-negative")
-        now = datetime.now(timezone.utc).isoformat()
+        now = (
+            datetime.now(timezone.utc).isoformat()
+            if created_at is None
+            else (
+                created_at.replace(tzinfo=timezone.utc).isoformat()
+                if isinstance(created_at, datetime) and created_at.tzinfo is None
+                else (
+                    created_at.astimezone(timezone.utc).isoformat()
+                    if isinstance(created_at, datetime)
+                    else str(created_at)
+                )
+            )
+        )
         with self._lock, self._connection:
             package_data = {
                 "package_id": package_id,
@@ -419,20 +470,40 @@ class PositionLedger:
             )
             return self._refresh_package(str(leg["package_id"]))
 
-    def record_terminal_status(self, package_id: str, status: str) -> None:
+    def record_terminal_status(
+        self, package_id: str, status: str, updated_at: datetime | str | None = None
+    ) -> None:
         """Record a broker-confirmed terminal state for a package."""
         normalized = status.strip().lower()
         if normalized not in TERMINAL_STATES:
             raise ValueError(f"non-terminal package state: {status}")
+        ts = (
+            datetime.now(timezone.utc).isoformat()
+            if updated_at is None
+            else (
+                updated_at.replace(tzinfo=timezone.utc).isoformat()
+                if isinstance(updated_at, datetime) and updated_at.tzinfo is None
+                else (
+                    updated_at.astimezone(timezone.utc).isoformat()
+                    if isinstance(updated_at, datetime)
+                    else str(updated_at)
+                )
+            )
+        )
         with self._lock, self._connection:
             result = self._connection.execute(
                 "UPDATE packages SET state = ?, updated_at = ? WHERE package_id = ?",
-                (normalized, datetime.now(timezone.utc).isoformat(), package_id),
+                (normalized, ts, package_id),
             )
             if result.rowcount != 1:
                 raise KeyError(f"unknown package_id: {package_id}")
 
-    def resolve_partial_package(self, package_id: str, terminal_status: str) -> BasketRecord:
+    def resolve_partial_package(
+        self,
+        package_id: str,
+        terminal_status: str,
+        updated_at: datetime | str | None = None,
+    ) -> BasketRecord:
         """Resolve a partially filled package whose broker order reached terminal status."""
         normalized = terminal_status.strip().lower()
         if normalized not in TERMINAL_STATES:
@@ -444,7 +515,19 @@ class PositionLedger:
             if package is None:
                 raise KeyError(f"unknown package_id: {package_id}")
             intent = str(package["intent"])
-            now = datetime.now(timezone.utc).isoformat()
+            now = (
+                datetime.now(timezone.utc).isoformat()
+                if updated_at is None
+                else (
+                    updated_at.replace(tzinfo=timezone.utc).isoformat()
+                    if isinstance(updated_at, datetime) and updated_at.tzinfo is None
+                    else (
+                        updated_at.astimezone(timezone.utc).isoformat()
+                        if isinstance(updated_at, datetime)
+                        else str(updated_at)
+                    )
+                )
+            )
             if intent in {"close", "trim"}:
                 self._connection.execute(
                     "UPDATE packages SET state = ?, updated_at = ? WHERE package_id = ?",
@@ -548,7 +631,7 @@ class PositionLedger:
         if normalized:
             query += f" AND intent IN ({','.join('?' for _ in normalized)})"
             parameters.extend(normalized)
-        query += " ORDER BY updated_at DESC LIMIT 1"
+        query += " ORDER BY updated_at DESC, rowid DESC LIMIT 1"
         with self._lock:
             row = self._connection.execute(query, tuple(parameters)).fetchone()
             return self._basket_from_row(row) if row is not None else None

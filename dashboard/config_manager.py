@@ -10,7 +10,7 @@ import requests
 
 ENV_PATHS = [
     Path(".env"),
-    Path("/app/.env"),
+    Path(__file__).resolve().parent.parent / ".env",
     Path("../.env"),
 ]
 

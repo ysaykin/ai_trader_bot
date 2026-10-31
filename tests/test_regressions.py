@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -184,6 +185,11 @@ class BrokerSelectionTests(unittest.TestCase):
         })
         self.assertFalse(entrypoint._test_brokers.Tradier.call_args.args[0]["PAPER"])
 
+    def test_runner_rejects_alpaca_before_broker_construction(self) -> None:
+        with patch.dict(os.environ, {"TRADING_BROKER": "alpaca"}, clear=True):
+            with self.assertRaisesRegex(entrypoint.ConfigurationError, "atomic"):
+                entrypoint.validate_runtime_configuration()
+
     def test_tradier_data_source_supports_indexes_and_rejects_unwired_sources(self) -> None:
         with patch.dict(os.environ, {
             "TRADING_BROKER": "tradier", "TRADIER_PAPER": "true", "IC_SYMBOL": "XSP",
@@ -218,6 +224,7 @@ class BrokerSelectionTests(unittest.TestCase):
 
     def test_runtime_failure_reconstructs_once_and_shutdown_does_not_restart(self) -> None:
         with (
+            patch.object(entrypoint, "validate_runtime_configuration"),
             patch.object(entrypoint, "_run_once", side_effect=[RuntimeError("boom"), None]) as run_once,
             patch.object(entrypoint.time, "sleep") as sleep,
             patch.dict(os.environ, {"PROCESS_RESTART_BACKOFF_SECONDS": "0.25"}, clear=True),
@@ -226,7 +233,7 @@ class BrokerSelectionTests(unittest.TestCase):
         self.assertEqual(run_once.call_count, 2)
         sleep.assert_called_once_with(0.25)
 
-        with patch.object(entrypoint, "_run_once", side_effect=KeyboardInterrupt) as run_once:
+        with patch.object(entrypoint, "validate_runtime_configuration"), patch.object(entrypoint, "_run_once", side_effect=KeyboardInterrupt) as run_once:
             with self.assertRaises(KeyboardInterrupt):
                 entrypoint.run()
         run_once.assert_called_once()
@@ -255,6 +262,7 @@ class BrokerSelectionTests(unittest.TestCase):
     def test_broker_configuration_error_exits_without_retrying(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
+            patch.object(entrypoint, "validate_runtime_configuration"),
             patch.object(entrypoint, "_run_once", side_effect=entrypoint.ConfigurationError("bad broker")) as run_once,
             patch.object(entrypoint.time, "sleep") as sleep,
             self.assertRaises(SystemExit) as raised,
@@ -333,7 +341,7 @@ class IronCondorTests(unittest.TestCase):
             for strike, right in ((95, "put"), (100, "put"), (110, "call"), (115, "call"))
         ]
         signed = (quantity, -quantity, -quantity, quantity)
-        package_id = f"filled-{id(self)}-{quantity}-{len(self.strategy._position_ledger.open_baskets())}"
+        package_id = f"filled-{id(self)}-{quantity}-{uuid.uuid4().hex[:8]}"
         legs = []
         for index, (asset, signed_quantity) in enumerate(zip(assets, signed), start=1):
             key = iron_condor.asset_key(asset)
@@ -845,6 +853,106 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
         self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
+
+    def test_multi_trade_sequential_open_close_cycles_do_not_deadlock(self) -> None:
+        """Verify that closing Trade #1 does not permanently deadlock close attempts on Trade #2."""
+        # 1. Open Trade #1
+        self.open_filled_position(quantity=1)
+        self.assertTrue(self.strategy._position_open)
+        self.assertEqual(len(self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())), 1)
+
+        # 2. Close Trade #1
+        self.strategy._close_all_options(exit_reason="PROFIT_TARGET")
+        self.strategy.submit_order.assert_called_once()
+        self.strategy.submit_order.reset_mock()
+
+        # Complete fill of Trade #1 close package
+        close_basket = next(
+            b for b in self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())
+            if b.intent == "close"
+        )
+        for leg in close_basket.legs:
+            self.strategy._position_ledger.record_fill(
+                leg["order_id"], int(leg["requested_signed_quantity"]), 0.50
+            )
+        self.strategy._hydrate_from_ledger()
+        self.assertFalse(self.strategy._position_open)
+        self.strategy.get_positions.return_value = []
+        self.strategy.on_trading_iteration()
+        self.assertFalse(self.strategy._position_open)
+
+        # 3. Open Trade #2
+        self.open_filled_position(quantity=1)
+        self.assertTrue(self.strategy._position_open)
+
+        # 4. Close Trade #2 (must NOT deadlock due to Trade #1's closed package)
+        self.strategy._close_all_options(exit_reason="STOP_LOSS")
+        self.strategy.submit_order.assert_called_once()
+        self.assertEqual(self.strategy._pending_exit_reason, "STOP_LOSS")
+
+        # Complete fill of Trade #2 close package
+        self.strategy.submit_order.reset_mock()
+        close_basket_2 = next(
+            b for b in self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())
+            if b.intent == "close"
+        )
+        for leg in close_basket_2.legs:
+            self.strategy._position_ledger.record_fill(
+                leg["order_id"], int(leg["requested_signed_quantity"]), 0.50
+            )
+        self.strategy._hydrate_from_ledger()
+        self.assertFalse(self.strategy._position_open)
+
+    def test_multi_trade_expire_then_open_close_cycle(self) -> None:
+        """Verify that an expired Trade #1 does not poison reprice count or deadlock Trade #2 close."""
+        # 1. Open Trade #1
+        self.open_filled_position(quantity=1)
+        self.assertTrue(self.strategy._position_open)
+
+        # 2. Advance to expiration day and expire Trade #1
+        self.strategy.get_datetime.return_value = datetime(2026, 10, 27, 14, tzinfo=timezone.utc)
+        self.strategy._position_ledger.expire_strategy_positions(
+            self.strategy._strategy_id(), self.strategy.get_datetime().date()
+        )
+        self.strategy._hydrate_from_ledger()
+        self.strategy.get_positions.return_value = []
+        self.strategy.on_trading_iteration()
+        self.assertFalse(self.strategy._position_open)
+
+        # 3. Open Trade #2
+        self.open_filled_position(quantity=1)
+        self.assertTrue(self.strategy._position_open)
+
+        # 4. Close Trade #2
+        self.strategy._close_all_options(exit_reason="PROFIT_TARGET")
+        self.strategy.submit_order.assert_called_once()
+        close_basket = next(
+            b for b in self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())
+            if b.intent == "close"
+        )
+        self.assertEqual(close_basket.reprice_count, 0)
+        self.assertIsNone(close_basket.replacement_of)
+
+    def test_close_all_options_preserves_pending_exit_reason_and_metadata(self) -> None:
+        """Verify that retrying _close_all_options or calling EOD hooks preserves pending reason & P&L."""
+        self.open_filled_position(quantity=1)
+        self.strategy._close_all_options(
+            exit_reason="STOP_LOSS", gross_pnl=-250.0, fees=6.40, net_pnl=-256.40
+        )
+        self.assertEqual(self.strategy._pending_exit_reason, "STOP_LOSS")
+        self.assertEqual(self.strategy._pending_gross_pnl, -250.0)
+        self.assertEqual(self.strategy._pending_fees, 6.40)
+        self.assertEqual(self.strategy._pending_net_pnl, -256.40)
+
+        # Retry with no arguments (e.g. before_market_closes or on_abrupt_closing)
+        self.strategy.before_market_closes()
+        self.assertEqual(self.strategy._pending_exit_reason, "STOP_LOSS")
+        self.assertEqual(self.strategy._pending_gross_pnl, -250.0)
+        self.assertEqual(self.strategy._pending_fees, 6.40)
+        self.assertEqual(self.strategy._pending_net_pnl, -256.40)
+
+        self.strategy.on_abrupt_closing()
+        self.assertEqual(self.strategy._pending_exit_reason, "STOP_LOSS")
 
 
 class OrderRoutingRegressionTests(unittest.TestCase):

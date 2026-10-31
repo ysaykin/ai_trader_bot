@@ -139,7 +139,7 @@ def relabel_session(session: str, log_path: Path = DEFAULT_TRAJECTORY_PATH) -> i
             best_future_pnl = max(item["pnl"] for item in path)
             profit_target = None
             if opening_credit is not None and opening_credit > 0:
-                profit_target = min(max(best_future_pnl / (opening_credit * 100.0), 0.15), 0.80)
+                profit_target = min(max(best_future_pnl / (opening_credit * quantity * 100.0), 0.15), 0.80)
             labels[name] = {
                 "action": best,
                 "scores": scores,
@@ -262,17 +262,26 @@ class TrajectoryLogger:
                     for asset, _ in legs
                 )
             )
+            if legs:
+                leg_quantities = [abs(int(qty)) for _, qty in legs if int(qty) != 0]
+                actual_quantity = max(leg_quantities) if leg_quantities else int(parameters.get("quantity", 1) or 1)
+            else:
+                actual_quantity = int(parameters.get("quantity", 1) or 1)
+
             if book is None or book["entry"] != entry_token:
                 book = {
                     "entry": entry_token, "legs": list(legs), "credit": credit,
                     "trade_id": getattr(strategy, "_current_trade_id", None),
                     "trajectory_id": f"{name}:{now.isoformat()}",
-                    "quantity": int(parameters["quantity"]),
+                    "quantity": actual_quantity,
                 }
                 self._books[name] = book
-        quantity = book["quantity"] if book else int(parameters["quantity"])
+            else:
+                book["quantity"] = actual_quantity
+                book["legs"] = list(legs)
+        quantity = book["quantity"] if book else (max((abs(int(qty)) for _, qty in legs if int(qty) != 0), default=int(parameters.get("quantity", 1) or 1)) if legs else int(parameters.get("quantity", 1) or 1))
         risk = float(parameters["wing_width"]) * 100 * quantity
-        capped_position_risk = min(float(parameters["max_position_risk"]), 5000.0)
+        capped_position_risk = float(parameters["max_position_risk"])
         state = {
             "observed_at": now.astimezone(timezone.utc).isoformat(),
             "action": action, "position_open": bool(strategy._position_open),
@@ -296,7 +305,7 @@ class TrajectoryLogger:
             return state
         prices = [finite_number(self._cached("price", strategy, asset)) for asset, _ in book["legs"]]
         if all(price is not None and price >= 0 for price in prices):
-            state["pnl"] = book["credit"] * 100 + sum(
+            state["pnl"] = book["credit"] * book["quantity"] * 100 + sum(
                 price * signed_qty * 100
                 for price, (_, signed_qty) in zip(prices, book["legs"])
             )
@@ -409,6 +418,7 @@ class TrajectoryLogger:
         row["timestamp"] = max(state["observed_at"] for state in states.values() if state)
         total_risk = sum(state["max_risk"] for state in states.values() if state and state["position_open"])
         complete = all(state is not None for state in states.values())
+        max_portfolio_risk = float(os.environ.get("IC_MAX_PORTFOLIO_RISK", 100_000.0))
         for name, state in states.items():
             if state is None:
                 continue
@@ -416,7 +426,7 @@ class TrajectoryLogger:
             state["can_add"] = bool(
                 complete and state["position_open"] and not state["exit_requested"]
                 and risk * 2 <= state["max_position_risk"] * state["single_trade_pct"]
-                and total_risk + risk <= state["max_position_risk"]
+                and total_risk + risk <= max_portfolio_risk
             )
             previous = self._previous_states.get(name)
             state["reward"] = None

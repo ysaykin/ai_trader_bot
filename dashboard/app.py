@@ -11,6 +11,8 @@ Implements all user-facing features defined in USER_FEATURES.md:
 """
 from __future__ import annotations
 
+from dashboard.presentation import finite_number, format_numeric, option_mark
+
 import math
 import os
 import re
@@ -79,16 +81,11 @@ def broker_settings(environment: Mapping[str, str]) -> BrokerSettings:
 
 def number(value: Any) -> float | None:
     """Keep missing and non-finite financial values distinct from zero."""
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
+    return finite_number(value)
 
 
 def money(value: Any) -> str:
-    parsed = number(value)
-    return f"${parsed:,.2f}" if parsed is not None else "Unavailable"
+    return format_numeric(value, currency=True)
 
 
 def single_trade_percentage(cap: float, override: str = "") -> float:
@@ -293,7 +290,7 @@ def position_records(positions: list[dict[str, Any]], quotes: dict[str, dict[str
         quote = quotes.get(symbol, {})
         greeks = quote.get("greeks") or {}
         bid, ask = number(quote.get("bid")), number(quote.get("ask"))
-        mid = (bid + ask) / 2 if bid is not None and ask is not None and 0 <= bid <= ask and ask > 0 else number(quote.get("last"))
+        mid = option_mark(bid, ask, quote.get("last"))
         strat = position.get("strategy") or position.get("tag")
         tag = strategy_tag(strat) or (str(strat) if strat else "Unattributed")
         qty = number(position.get("quantity", position.get("qty")))
@@ -1460,8 +1457,8 @@ def main() -> None:
             candidates = [
                 Path("USER_FEATURES.md"),
                 Path("dashboard/USER_FEATURES.md"),
-                Path("/app/USER_FEATURES.md"),
-                Path("/app/dashboard/USER_FEATURES.md"),
+                Path(__file__).resolve().parent.parent / "USER_FEATURES.md",
+                Path(__file__).resolve().parent / "USER_FEATURES.md",
             ]
             uf_path = next((p for p in candidates if p.exists()), None)
             if uf_path:

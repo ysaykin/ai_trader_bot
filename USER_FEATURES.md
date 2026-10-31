@@ -36,7 +36,7 @@ This document is the **single source of truth** for all user-facing features sup
 | **BRK-05** | Tradier Host Routing & Resilient Close Package Retention | Broker Connectivity | ✅ Active | Atomic package routing with host tags, unique ID/legacy tag recovery & uncertain close locks | Order Routing & Package Recovery |
 | **CFG-01** | Interactive Config & Credentials GUI | Configuration | ✅ Active | Edit and test API keys & risk boundaries live in GUI | Dedicated Broker & Strategy Config Tab |
 | **GUI-01** | Live Engine Status & Session Clock | Dashboard UI | ✅ Active | Know exactly what the bot is doing | Header Status Bar & Market Clock |
-| **GUI-02** | Interactive Visual Risk Dials | Dashboard UI | ✅ Active | At-a-glance capital & cap visibility | Dual Risk Gauges ($5k & Single-Trade) |
+| **GUI-02** | Interactive Visual Risk Dials | Dashboard UI | ✅ Active | At-a-glance capital & cap visibility | Dynamic Risk Gauges (Configured Strategy & Portfolio Caps) |
 | **GUI-03** | Active Positions & Greeks Matrix | Dashboard UI | ✅ Active | Live monitoring of all 4 option legs | Interactive Table ($\Delta, \Theta, \text{IV}$) |
 | **GUI-04** | Multi-Curve Payoff Explorer | Dashboard UI | ✅ Active | Visualize profit zones & breakevens | Interactive Plotly Payoff Chart |
 | **GUI-05** | Real-Time Execution Log Console | Dashboard UI | ✅ Active | Instant auditability without terminal | Streaming Log Viewer with Filters |
@@ -206,8 +206,8 @@ This document is the **single source of truth** for all user-facing features sup
 
 #### `GUI-02`: Interactive Visual Risk Gauges
 * Real-time radial dials and progress bars for:
-  1. **Global Open Position Exposure** (Current \$ vs \$5,000 cap).
-  2. **Single-Trade Sizing Utilization** (Current \$ vs \$1,500 limit).
+  1. **Global Open Position Exposure** (Current \$ vs configured portfolio cap, default \$100,000).
+  2. **Single-Trade / Strategy Sizing Utilization** (Current \$ vs configured strategy risk cap, default \$15,000).
   3. **Option Buying Power Headroom**.
 
 #### `GUI-03`: Active Positions & Greeks Matrix

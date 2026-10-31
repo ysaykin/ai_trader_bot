@@ -86,11 +86,11 @@ def fetch_positions(client) -> List[Dict[str, Any]]:
                 "symbol": p.symbol,
                 "qty": float(p.qty),
                 "side": p.side.value if hasattr(p.side, "value") else str(p.side),
-                "market_value": float(p.market_value) if p.market_value is not None else 0.0,
+                "market_value": float(p.market_value) if p.market_value is not None else None,
                 "cost_basis": float(p.cost_basis) if p.cost_basis is not None else 0.0,
-                "unrealized_pl": float(p.unrealized_pl) if p.unrealized_pl is not None else 0.0,
-                "unrealized_plpc": float(p.unrealized_plpc) if p.unrealized_plpc is not None else 0.0,
-                "current_price": float(p.current_price) if p.current_price is not None else 0.0,
+                "unrealized_pl": float(p.unrealized_pl) if p.unrealized_pl is not None else None,
+                "unrealized_plpc": float(p.unrealized_plpc) if p.unrealized_plpc is not None else None,
+                "current_price": float(p.current_price) if p.current_price is not None else None,
                 "asset_class": p.asset_class.value if hasattr(p.asset_class, "value") else str(p.asset_class),
             })
         return res

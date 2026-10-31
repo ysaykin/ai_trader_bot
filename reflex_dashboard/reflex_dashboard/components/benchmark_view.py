@@ -103,14 +103,14 @@ def benchmark_view() -> rx.Component:
                     ),
                     rx.box(
                         rx.text("Max Strategy Drawdown", size="1", color=TEXT_MUTED),
-                        rx.text("-0.19%", size="3", weight="bold", color=GREEN, class_name="tabular-nums"),
+                        rx.text("-0.19%", size="3", weight="bold", color=CRIMSON, class_name="tabular-nums"),
                         padding="10px 12px",
                         background_color="#0C101A",
                         border_radius="6px",
                     ),
                     rx.box(
                         rx.text("Max S&P 500 Drawdown", size="1", color=TEXT_MUTED),
-                        rx.text("-1.42%", size="3", weight="bold", color=TEXT_MUTED, class_name="tabular-nums"),
+                        rx.text("-1.42%", size="3", weight="bold", color=CRIMSON, class_name="tabular-nums"),
                         padding="10px 12px",
                         background_color="#0C101A",
                         border_radius="6px",

@@ -66,7 +66,7 @@ def config_view() -> rx.Component:
                     rx.input(
                         value=DashboardState.cfg_account_id,
                         on_change=DashboardState.set_cfg_account_id,
-                        placeholder="e.g. VA21359019",
+                        placeholder="Broker account identifier",
                         size="2",
                         width="100%",
                     ),
@@ -132,11 +132,44 @@ def config_view() -> rx.Component:
                     rx.input(
                         value=DashboardState.cfg_risk_cap,
                         on_change=DashboardState.set_cfg_risk_cap,
-                        placeholder="5000",
+                        placeholder="15000",
                         size="2",
                         width="100%",
                     ),
-                    rx.text("Hard ceiling per individual strategy variant (default: $5,000)", size="1", color=TEXT_MUTED),
+                    rx.text("Hard ceiling per individual strategy variant (default: $15,000)", size="1", color=TEXT_MUTED),
+                    spacing="1",
+                    align="start",
+                    width="100%",
+                ),
+
+                # Portfolio Risk Cap
+                rx.vstack(
+                    rx.text("Global Portfolio Risk Cap ($)", size="2", weight="bold"),
+                    rx.input(
+                        value=DashboardState.cfg_portfolio_risk_cap,
+                        on_change=DashboardState.set_cfg_portfolio_risk_cap,
+                        placeholder="100000",
+                        size="2",
+                        width="100%",
+                    ),
+                    rx.text("Account-wide risk ceiling across all active variants (default: $100,000)", size="1", color=TEXT_MUTED),
+                    spacing="1",
+                    align="start",
+                    width="100%",
+                ),
+
+                # Paper / Sandbox Mode Toggle
+                rx.vstack(
+                    rx.text("Environment Mode", size="2", weight="bold"),
+                    rx.select(
+                        ["true", "false"],
+                        value=DashboardState.cfg_paper,
+                        on_change=DashboardState.set_cfg_paper,
+                        color_scheme="cyan",
+                        size="2",
+                        width="100%",
+                    ),
+                    rx.text("true = Paper / Sandbox, false = Live Production", size="1", color=TEXT_MUTED),
                     spacing="1",
                     align="start",
                     width="100%",

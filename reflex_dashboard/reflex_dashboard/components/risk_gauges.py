@@ -83,7 +83,7 @@ def risk_gauges_section() -> rx.Component:
                         rx.flex(
                             rx.text("PER-STRATEGY RISK CAP (RSK-01)", size="1", color=TEXT_MUTED, weight="bold"),
                             rx.spacer(),
-                            rx.text(f"{DashboardState.open_risk_str} / $5,000.00 Max", size="1", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                            rx.text(f"{DashboardState.open_risk_str} / {DashboardState.open_risk_cap_str} Max", size="1", color=TEXT_PRIMARY, class_name="tabular-nums"),
                             width="100%",
                             align="center",
                             wrap="wrap",
@@ -96,8 +96,8 @@ def risk_gauges_section() -> rx.Component:
                             width="100%",
                         ),
                         rx.hstack(
-                            rx.badge("0.0% OF CAP USED", color_scheme="jade", variant="soft", size="1"),
-                            rx.text("Hard $5,000 ceiling per single strategy", size="1", color=TEXT_MUTED),
+                            rx.badge(DashboardState.open_risk_pct_str, color_scheme="jade", variant="soft", size="1"),
+                            rx.text("Configured ceiling per individual strategy variant", size="1", color=TEXT_MUTED),
                             align="center",
                             spacing="2",
                             wrap="wrap",
@@ -151,7 +151,7 @@ def risk_gauges_section() -> rx.Component:
                         rx.flex(
                             rx.text("BUYING POWER HEADROOM (RSK-04)", size="1", color=TEXT_MUTED, weight="bold"),
                             rx.spacer(),
-                            rx.text("100.0% Available", size="1", color=GREEN, weight="bold", class_name="tabular-nums"),
+                            rx.text(DashboardState.buying_power_headroom_str, size="1", color=GREEN, weight="bold", class_name="tabular-nums"),
                             width="100%",
                             align="center",
                             wrap="wrap",

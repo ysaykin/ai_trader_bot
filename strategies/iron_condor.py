@@ -296,6 +296,7 @@ class SPXIronCondor(Strategy):
         self._pending_gross_pnl = None
         self._pending_fees = None
         self._pending_net_pnl = None
+        self._terminal_package_times: dict[str, datetime] = {}
         self._close_reprice_seconds = max(
             float(os.getenv("IC_CLOSE_REPRICE_SECONDS", "60")), 0.0
         )
@@ -735,7 +736,10 @@ class SPXIronCondor(Strategy):
         if not option_positions:
             if pending_orders:
                 if self._exit_requested:
-                    self._close_all_options()
+                    self._close_all_options(
+                        exit_reason=self._pending_exit_reason, gross_pnl=self._pending_gross_pnl,
+                        fees=self._pending_fees, net_pnl=self._pending_net_pnl,
+                    )
                 return
             if self._owned_legs and self._all_owned_legs_expired():
                 self._position_ledger.expire_strategy_positions(
@@ -759,7 +763,10 @@ class SPXIronCondor(Strategy):
             return
 
         if self._exit_requested:
-            self._close_all_options()
+            self._close_all_options(
+                exit_reason=self._pending_exit_reason, gross_pnl=self._pending_gross_pnl,
+                fees=self._pending_fees, net_pnl=self._pending_net_pnl,
+            )
             return
 
         roll_dte = self.parameters.get("roll_dte")
@@ -1101,18 +1108,33 @@ class SPXIronCondor(Strategy):
 
     def _close_all_options(
         self,
-        exit_reason: str = "MANUAL",
+        exit_reason: str | None = None,
         gross_pnl: float | None = None,
         fees: float | None = None,
         net_pnl: float | None = None,
     ) -> None:
         """Close all open option positions owned by this strategy variant."""
+        if self._exit_requested and self._pending_exit_reason:
+            if exit_reason and not self._pending_exit_reason:
+                self._pending_exit_reason = exit_reason
+        else:
+            self._pending_exit_reason = exit_reason or self._pending_exit_reason or "MANUAL"
         self._exit_requested = True
         self._position_open = True
-        self._pending_exit_reason = exit_reason
-        self._pending_gross_pnl = gross_pnl
-        self._pending_fees = fees
-        self._pending_net_pnl = net_pnl
+        if gross_pnl is not None:
+            self._pending_gross_pnl = gross_pnl
+        elif not hasattr(self, "_pending_gross_pnl"):
+            self._pending_gross_pnl = None
+
+        if fees is not None:
+            self._pending_fees = fees
+        elif not hasattr(self, "_pending_fees"):
+            self._pending_fees = None
+
+        if net_pnl is not None:
+            self._pending_net_pnl = net_pnl
+        elif not hasattr(self, "_pending_net_pnl"):
+            self._pending_net_pnl = None
         try:
             # Refresh order state and stop entry fills before unwinding their legs.
             broker_orders = self.get_orders() or []
@@ -1141,7 +1163,7 @@ class SPXIronCondor(Strategy):
                     None,
                 )
                 created = self._as_aware_utc(datetime.fromisoformat(str(active_close.created_at)))
-                now = self._as_aware_utc(self.get_datetime())
+                now = self._as_aware_utc(self._current_datetime())
                 age = (now - created).total_seconds()
                 if parent is not None and parent.is_active():
                     if age >= self._close_reprice_seconds:
@@ -1155,14 +1177,35 @@ class SPXIronCondor(Strategy):
             self._hydrate_from_ledger()
             if not self._owned_legs:
                 return
-            previous = self._position_ledger.latest_basket(
+            latest_close = self._position_ledger.latest_basket(
                 self._strategy_id(), {"close"}
             )
+            latest_open = self._position_ledger.latest_basket(
+                self._strategy_id(), {"open", "add"}
+            )
+            previous = None
+            if (
+                latest_close is not None
+                and latest_open is not None
+                and str(latest_close.created_at) >= str(latest_open.created_at)
+            ):
+                previous = latest_close
+
             reprice_count = 0
             replacement_of = None
             if previous is not None:
                 if previous.state not in {"canceled", "expired", "failed", "rejected"}:
                     return
+                ref_time_str = previous.created_at or previous.updated_at
+                if ref_time_str:
+                    try:
+                        ref_time = self._as_aware_utc(datetime.fromisoformat(str(ref_time_str)))
+                        now = self._as_aware_utc(self._current_datetime())
+                        elapsed = (now - ref_time).total_seconds()
+                        if 0 <= elapsed < self._close_reprice_seconds:
+                            return
+                    except Exception:
+                        pass
                 reprice_count = previous.reprice_count + 1
                 replacement_of = previous.package_id
             legs = [(asset, -signed_quantity) for asset, signed_quantity in self._owned_legs]
@@ -1171,13 +1214,10 @@ class SPXIronCondor(Strategy):
                 logger.warning("Complete quotes are required before closing the package.")
                 return
             order_type = "debit"
-            if reprice_count > self._close_max_reprices:
-                if not self._close_allow_market:
-                    logger.warning("Close reprice limit reached; retaining contracts for manual review.")
-                    return
+            if reprice_count > self._close_max_reprices and self._close_allow_market:
                 order_type = "market"
             else:
-                price += reprice_count * self._close_price_step
+                price += min(reprice_count, self._close_max_reprices) * self._close_price_step
             orders = self._submit_package(
                 legs,
                 intent="close",
@@ -1201,6 +1241,15 @@ class SPXIronCondor(Strategy):
             or self.parameters.get("strategy_name")
             or type(self).__name__
         )
+
+    def _current_datetime(self) -> datetime:
+        getter = getattr(self, "get_datetime", None)
+        if callable(getter):
+            try:
+                return getter()
+            except Exception:
+                pass
+        return datetime.now(timezone.utc)
 
     def _broker_routing_tag(self) -> str:
         """Route broker events to the registered host, independently of ledger ownership."""
@@ -1256,6 +1305,12 @@ class SPXIronCondor(Strategy):
         self._position_open = bool(self._owned_legs) or any(
             basket.state in {"submitted", "partial", "closing"} for basket in baskets
         )
+        if not self._position_open:
+            self._exit_requested = False
+            self._pending_exit_reason = None
+            self._pending_gross_pnl = None
+            self._pending_fees = None
+            self._pending_net_pnl = None
 
     def _all_owned_legs_expired(self) -> bool:
         if not self._owned_legs:
@@ -1641,10 +1696,14 @@ class SPXIronCondor(Strategy):
                 status in terminal_map for status in leg_statuses
             ):
                 term_status = terminal_map[leg_statuses[0]]
+                now_dt = self._current_datetime()
+                if not hasattr(self, "_terminal_package_times"):
+                    self._terminal_package_times = {}
+                self._terminal_package_times[refreshed.package_id] = self._as_aware_utc(now_dt)
                 if all(int(leg["filled_signed_quantity"]) == 0 for leg in refreshed.legs):
-                    self._position_ledger.record_terminal_status(refreshed.package_id, term_status)
+                    self._position_ledger.record_terminal_status(refreshed.package_id, term_status, updated_at=now_dt)
                 else:
-                    resolved = self._position_ledger.resolve_partial_package(refreshed.package_id, term_status)
+                    resolved = self._position_ledger.resolve_partial_package(refreshed.package_id, term_status, updated_at=now_dt)
                     if resolved.state == "open" and resolved.intent == "open":
                         self._record_filled_entry(resolved)
                     elif resolved.state == "open" and resolved.intent == "add":
@@ -1653,10 +1712,14 @@ class SPXIronCondor(Strategy):
             parent_status = str(getattr(parent, "status", "") or "").lower()
             if parent_status in terminal_map:
                 term_status = terminal_map[parent_status]
+                now_dt = self._current_datetime()
+                if not hasattr(self, "_terminal_package_times"):
+                    self._terminal_package_times = {}
+                self._terminal_package_times[refreshed.package_id] = self._as_aware_utc(now_dt)
                 if all(int(leg["filled_signed_quantity"]) == 0 for leg in refreshed.legs):
-                    self._position_ledger.record_terminal_status(refreshed.package_id, term_status)
+                    self._position_ledger.record_terminal_status(refreshed.package_id, term_status, updated_at=now_dt)
                 else:
-                    resolved = self._position_ledger.resolve_partial_package(refreshed.package_id, term_status)
+                    resolved = self._position_ledger.resolve_partial_package(refreshed.package_id, term_status, updated_at=now_dt)
                     if resolved.state == "open" and resolved.intent == "open":
                         self._record_filled_entry(resolved)
                     elif resolved.state == "open" and resolved.intent == "add":
@@ -1747,6 +1810,7 @@ class SPXIronCondor(Strategy):
             broker_tag=broker_tag,
             replacement_of=replacement_of,
             reprice_count=reprice_count,
+            created_at=self._current_datetime(),
         )
         submit_kwargs = {
             "is_multileg": True,
@@ -1868,7 +1932,7 @@ class SPXIronCondor(Strategy):
             actual_net = round(actual_gross - close_fees, 2)
             mfe = max(float(getattr(self, "_mfe_pnl", 0.0)), actual_net)
             mae = min(float(getattr(self, "_mae_pnl", 0.0)), actual_net)
-            reason = getattr(self, "_pending_exit_reason", "PROFIT_TARGET")
+            reason = self._pending_exit_reason or "MANUAL"
 
             remaining = self._position_ledger.owned_quantities(self._strategy_id())
             remaining_qty = max((abs(value) for value in remaining.values()), default=0)
@@ -2507,7 +2571,7 @@ class SPXIronCondor(Strategy):
         should_close = (dte == 0) or self._is_expiring_today()
         if self._position_open and should_close:
             logger.info("Market closing — closing option positions expiring today (dte=%s)", dte)
-            self._close_all_options()
+            self._close_all_options(exit_reason=getattr(self, "_pending_exit_reason", None) or "EOD_CLOSE")
         elif self._position_open:
             logger.info("Market closing — holding swing position overnight (dte=%s)", dte)
         for follower in getattr(self, "_attached_strategies", ()):
@@ -2529,7 +2593,7 @@ class SPXIronCondor(Strategy):
         """Handle unexpected shutdowns gracefully."""
         logger.warning("Abrupt shutdown detected. Attempting to close positions.")
         if self._position_open:
-            self._close_all_options()
+            self._close_all_options(exit_reason=getattr(self, "_pending_exit_reason", None) or "ABRUPT_CLOSE")
         for follower in getattr(self, "_attached_strategies", ()):
             try:
                 follower.on_abrupt_closing()

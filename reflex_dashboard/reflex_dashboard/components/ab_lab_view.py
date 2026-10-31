@@ -168,15 +168,15 @@ def ab_lab_view() -> rx.Component:
                         ),
                         rx.box(
                             rx.text("Realized Net P&L", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["net_pnl_str"], size="4", weight="bold", color=GREEN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_a["net_pnl_str"], size="4", weight="bold", color=DashboardState.ab_card_a["net_pnl_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Realized Net P&L % (RoR)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["net_ror_pct"], size="4", weight="bold", color=CYAN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_a["net_ror_pct"], size="4", weight="bold", color=DashboardState.ab_card_a["net_ror_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Return on Credit %", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["net_roc_pct"], size="3", weight="bold", color=GREEN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_a["net_roc_pct"], size="3", weight="bold", color=DashboardState.ab_card_a["net_roc_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Broker Fees Paid", size="1", color=TEXT_MUTED),
@@ -240,15 +240,15 @@ def ab_lab_view() -> rx.Component:
                         ),
                         rx.box(
                             rx.text("Realized Net P&L", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["net_pnl_str"], size="4", weight="bold", color=GREEN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_b["net_pnl_str"], size="4", weight="bold", color=DashboardState.ab_card_b["net_pnl_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Realized Net P&L % (RoR)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["net_ror_pct"], size="4", weight="bold", color=AMBER, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_b["net_ror_pct"], size="4", weight="bold", color=DashboardState.ab_card_b["net_ror_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Return on Credit %", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["net_roc_pct"], size="3", weight="bold", color=GREEN, class_name="tabular-nums"),
+                            rx.text(DashboardState.ab_card_b["net_roc_pct"], size="3", weight="bold", color=DashboardState.ab_card_b["net_roc_color"], class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Broker Fees Paid", size="1", color=TEXT_MUTED),

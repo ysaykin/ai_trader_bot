@@ -59,7 +59,7 @@ def positions_view() -> rx.Component:
                                     rx.table.cell(rx.text(p["last_price"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(p["delta"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(p["theta"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(p["unrealized_pl"], weight="bold", color=GREEN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(p["unrealized_pl"], weight="bold", color=p["unrealized_pl_color"], class_name="tabular-nums nowrap")),
                                     style=TABLE_ROW_STYLE,
                                 )
                             )
@@ -72,8 +72,8 @@ def positions_view() -> rx.Component:
                     rx.vstack(
                         rx.icon("layers", size=32, color=CYAN),
                         rx.heading("No Active Open Option Positions", size="3", color=TEXT_PRIMARY, weight="bold"),
-                        rx.text("All 14 completed Iron Condor positions have reached their profit targets and closed out.", size="2", color=TEXT_MUTED),
-                        rx.text("Tradier Broker confirms 0 active contracts. The bot is currently scanning for upcoming entry windows.", size="1", color=TEXT_MUTED),
+                        rx.text("No active open contracts reported by the broker.", size="2", color=TEXT_MUTED),
+                        rx.text("Scanning for upcoming entry windows across configured strategy variants.", size="1", color=TEXT_MUTED),
                         rx.hstack(
                             rx.button("View Incubator Performance", on_click=DashboardState.set_tab("incubator"), size="1", color_scheme="cyan", variant="surface", cursor="pointer"),
                             rx.button("View Scanner & Monitor", on_click=DashboardState.set_tab("monitor"), size="1", color_scheme="amber", variant="surface", cursor="pointer"),

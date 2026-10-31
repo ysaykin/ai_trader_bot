@@ -162,6 +162,36 @@ class TestReflexDashboard(unittest.TestCase):
                 self.assertFalse(state.panic_in_progress)
                 self.assertFalse(state.panic_modal_open)
 
+    def test_config_settings_and_save_configuration(self):
+        import tempfile
+        from unittest.mock import patch
+        from pathlib import Path
+        from reflex_dashboard.data.adapters import get_config_settings
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env_file = Path(tmpdir) / ".env"
+            env_file.write_text("TRADING_BROKER=tradier\nTRADIER_ACCOUNT_NUMBER=12345\nIC_MAX_POSITION_RISK=15000\nIC_MAX_PORTFOLIO_RISK=100000\nTRADIER_PAPER=true\n")
+            with patch("reflex_dashboard.data.adapters.PROJECT_ROOT", Path(tmpdir)):
+                cfg = get_config_settings()
+                self.assertEqual(cfg["broker"], "tradier")
+                self.assertEqual(cfg["tradier_account_id"], "12345")
+                self.assertEqual(cfg["risk_cap"], "15000")
+                self.assertEqual(cfg["portfolio_risk_cap"], "100000")
+
+                state = DashboardState()
+                state.cfg_broker = "tradier"
+                state.cfg_account_id = "67890"
+                state.cfg_risk_cap = "20000"
+                state.cfg_portfolio_risk_cap = "150000"
+                state.cfg_paper = "false"
+                state.save_configuration()
+
+                saved_text = env_file.read_text()
+                self.assertIn("TRADIER_ACCOUNT_NUMBER=67890", saved_text)
+                self.assertIn("IC_MAX_POSITION_RISK=20000", saved_text)
+                self.assertIn("IC_MAX_PORTFOLIO_RISK=150000", saved_text)
+                self.assertIn("TRADIER_PAPER=false", saved_text)
+
 
 if __name__ == "__main__":
     unittest.main()

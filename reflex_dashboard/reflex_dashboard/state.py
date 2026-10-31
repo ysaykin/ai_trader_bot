@@ -58,9 +58,12 @@ class DashboardState(rx.State):
     option_requirement_str: str = "$0.00"
     open_risk: float = 0.0
     open_risk_str: str = "$0.00"
-    open_risk_cap: float = 5000.0
+    open_risk_cap: float = 15000.0
+    open_risk_cap_str: str = "$15,000.00"
     open_risk_pct: int = 0
+    open_risk_pct_str: str = "0.0% OF CAP USED"
     buying_power_headroom_pct: int = 100
+    buying_power_headroom_str: str = "100.0% Available"
 
     # Incubator Grid
     incubator_rows: list[dict[str, Any]] = []
@@ -122,8 +125,11 @@ class DashboardState(rx.State):
         "gross_pnl_str": "+$28.00",
         "fees_str": "-$3.20",
         "net_pnl_str": "+$24.80",
+        "net_pnl_color": "#10B981",
         "net_ror_pct": "+4.96%",
+        "net_ror_color": "#10B981",
         "net_roc_pct": "+45.9%",
+        "net_roc_color": "#10B981",
         "profit_factor": "∞ (0 losses)",
         "avg_trade_str": "+$24.80",
     }
@@ -137,8 +143,11 @@ class DashboardState(rx.State):
         "gross_pnl_str": "+$26.00",
         "fees_str": "-$3.20",
         "net_pnl_str": "+$22.80",
+        "net_pnl_color": "#10B981",
         "net_ror_pct": "+7.60%",
+        "net_ror_color": "#10B981",
         "net_roc_pct": "+45.6%",
+        "net_roc_color": "#10B981",
         "profit_factor": "∞ (0 losses)",
         "avg_trade_str": "+$22.80",
     }
@@ -172,12 +181,13 @@ class DashboardState(rx.State):
 
     # Config form
     cfg_broker: str = "tradier"
-    cfg_account_id: str = "VA21359019"
+    cfg_account_id: str = ""
     cfg_access_token: str = ""
     cfg_paper: str = "true"
     cfg_symbol: str = "XSP"
     cfg_fee_per_contract: str = "0.40"
-    cfg_risk_cap: str = "5000"
+    cfg_risk_cap: str = "15000"
+    cfg_portfolio_risk_cap: str = "100000"
 
     # Testing Strategy Configuration (25 DTE Experimental Setup)
     cfg_testing_dte: str = "25"
@@ -267,8 +277,11 @@ class DashboardState(rx.State):
             self.open_risk = tel["open_exposure"]
             self.open_risk_str = money(tel["open_exposure"])
             self.open_risk_cap = tel["risk_cap"]
+            self.open_risk_cap_str = money(tel["risk_cap"])
             self.open_risk_pct = int(min(100.0, (self.open_risk / max(self.open_risk_cap, 1.0)) * 100.0))
+            self.open_risk_pct_str = f"{self.open_risk_pct:.1f}% OF CAP USED"
             self.buying_power_headroom_pct = int(tel["buying_power_headroom_pct"])
+            self.buying_power_headroom_str = f"{self.buying_power_headroom_pct:.1f}% Available"
             self.positions = tel["positions"]
             self.orders = tel["orders"]
 
@@ -326,7 +339,9 @@ class DashboardState(rx.State):
             self.cfg_account_id = cfg.get("tradier_account_id", "")
             self.cfg_symbol = cfg.get("symbol", "XSP")
             self.cfg_fee_per_contract = cfg.get("fee_per_contract", "0.40")
-            self.cfg_risk_cap = cfg.get("risk_cap", "5000")
+            self.cfg_risk_cap = cfg.get("risk_cap", "15000")
+            self.cfg_portfolio_risk_cap = cfg.get("portfolio_risk_cap", "100000")
+            self.cfg_paper = cfg.get("paper", "true")
             self.cfg_testing_dte = cfg.get("testing_dte", "25")
             self.cfg_testing_delta = cfg.get("testing_delta", "0.15")
             self.cfg_testing_wing = cfg.get("testing_wing", "5.0")
@@ -369,8 +384,11 @@ class DashboardState(rx.State):
                 "gross_pnl_str": match_a["gross_pnl_str"],
                 "fees_str": match_a["fees_str"],
                 "net_pnl_str": match_a["net_pnl_str"],
+                "net_pnl_color": match_a.get("net_pnl_color", "#10B981"),
                 "net_ror_pct": match_a["net_ror_pct"],
+                "net_ror_color": match_a.get("net_ror_color", "#10B981"),
                 "net_roc_pct": match_a["net_roc_pct"],
+                "net_roc_color": match_a.get("net_roc_color", "#10B981"),
                 "profit_factor": match_a["profit_factor"],
                 "avg_trade_str": match_a["avg_trade_str"],
                 "status": match_a["status"],
@@ -387,8 +405,11 @@ class DashboardState(rx.State):
                 "gross_pnl_str": match_b["gross_pnl_str"],
                 "fees_str": match_b["fees_str"],
                 "net_pnl_str": match_b["net_pnl_str"],
+                "net_pnl_color": match_b.get("net_pnl_color", "#10B981"),
                 "net_ror_pct": match_b["net_ror_pct"],
+                "net_ror_color": match_b.get("net_ror_color", "#10B981"),
                 "net_roc_pct": match_b["net_roc_pct"],
+                "net_roc_color": match_b.get("net_roc_color", "#10B981"),
                 "profit_factor": match_b["profit_factor"],
                 "avg_trade_str": match_b["avg_trade_str"],
                 "status": match_b["status"],
@@ -511,11 +532,13 @@ class DashboardState(rx.State):
     def save_configuration(self):
         """Save form values to .env file."""
         updates = {
-            "BROKER": self.cfg_broker,
-            "TRADIER_ACCOUNT_ID": self.cfg_account_id,
+            "TRADING_BROKER": self.cfg_broker,
+            "TRADIER_ACCOUNT_NUMBER": self.cfg_account_id,
+            "TRADIER_PAPER": self.cfg_paper,
             "IC_SYMBOL": self.cfg_symbol,
             "OPTION_FEE_PER_CONTRACT": self.cfg_fee_per_contract,
-            "GLOBAL_RISK_CAP": self.cfg_risk_cap,
+            "IC_MAX_POSITION_RISK": self.cfg_risk_cap,
+            "IC_MAX_PORTFOLIO_RISK": self.cfg_portfolio_risk_cap,
             "TESTING_DTE": self.cfg_testing_dte,
             "TESTING_DELTA": self.cfg_testing_delta,
             "TESTING_WING": self.cfg_testing_wing,

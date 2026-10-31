@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Optional
 import requests
 from dotenv import load_dotenv
+from dashboard.presentation import option_mark
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -191,29 +192,10 @@ class TradierClient:
                     ask = q.get("ask")
                     last = q.get("last")
 
-                    # Mark-to-market midpoint calculation
-                    mark: Optional[float] = None
-                    if bid is not None and ask is not None:
-                        try:
-                            b, a = float(bid), float(ask)
-                            if b >= 0 and a >= b:
-                                mark = (b + a) / 2.0
-                        except (TypeError, ValueError):
-                            pass
-                    if mark is None and last is not None:
-                        try:
-                            l = float(last)
-                            if l >= 0:
-                                mark = l
-                        except (TypeError, ValueError):
-                            pass
-                    if mark is None:
-                        # Fallback to unit cost basis if quote is completely unavailable
-                        mark = abs(cost_basis) / (100.0 * abs(qty)) if qty != 0 else 0.0
-
-                    market_value = qty * mark * 100.0
+                    mark = option_mark(bid, ask, last)
+                    market_value = qty * mark * 100.0 if mark is not None else None
                     # Gain/Loss = Market Value - Cost Basis (holds for both long and short per Tradier accounting)
-                    unrealized_pl = market_value - cost_basis
+                    unrealized_pl = market_value - cost_basis if market_value is not None else None
 
                     greeks = q.get("greeks") or {}
                     delta = float(greeks.get("delta")) if greeks.get("delta") is not None else None
@@ -224,6 +206,7 @@ class TradierClient:
                         "qty": qty,
                         "quantity": qty,
                         "cost_basis": cost_basis,
+                        "mark_available": mark is not None,
                         "current_price": mark,
                         "last_price": mark,
                         "market_value": market_value,

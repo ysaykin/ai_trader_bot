@@ -64,15 +64,21 @@ def _tradier_paper() -> bool:
     )
 
 
-def get_broker() -> Broker:
-    """Instantiate broker from env vars (Tradier sandbox or Alpaca)."""
+def _selected_broker_type() -> str:
+    """Resolve the explicit broker selection or infer it from credentials."""
     broker_type = os.getenv("TRADING_BROKER", "").strip().lower()
     if broker_type not in ("", "tradier", "alpaca"):
         raise ConfigurationError(f"Unsupported TRADING_BROKER: {broker_type}")
+    return broker_type or ("tradier" if os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY") else "alpaca")
+
+
+def get_broker() -> Broker:
+    """Instantiate broker from env vars (Tradier sandbox or Alpaca)."""
+    broker_type = _selected_broker_type()
     access_token = os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY")
 
     # Prioritize an explicit broker selection; otherwise infer from credentials.
-    if broker_type == "tradier" or (not broker_type and access_token):
+    if broker_type == "tradier":
         account_number = os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT")
         token_str = (access_token or "").strip()
         account_str = (account_number or "").strip()
@@ -134,12 +140,14 @@ def _configured_sequence_length() -> int | None:
 
 def validate_runtime_configuration() -> None:
     """Fail before strategy construction when the requested runtime is unsafe."""
-    broker = os.getenv("TRADING_BROKER", "").strip().lower()
+    broker = _selected_broker_type()
     data_source = os.getenv("DATA_SOURCE", "").strip().lower()
     if data_source not in {"", "tradier"}:
         raise ConfigurationError(
             f"Unsupported DATA_SOURCE: {data_source}. This runner supports Tradier data only."
         )
+    if broker == "alpaca":
+        raise ConfigurationError("This runner requires the verified Tradier atomic execution adapter.")
     if broker == "tradier":
         access_token = (os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_API_KEY") or "").strip()
         account_number = (os.getenv("TRADIER_ACCOUNT_NUMBER") or os.getenv("TRADIER_ACCOUNT") or "").strip()

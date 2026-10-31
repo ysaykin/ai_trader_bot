@@ -85,7 +85,7 @@ class TrajectoryTests(unittest.TestCase):
         source = SimpleNamespace(
             name=name, parameters={"quantity": quantity, "wing_width": 5, "max_position_risk": 5000},
             _underlying="XSP", _owned_legs=legs, _entry_orders=[object() for _ in range(4)],
-            _entry_credit=2.0 * quantity, _position_open=True, _exit_requested=False,
+            _entry_credit=2.0, _position_open=True, _exit_requested=False,
             get_datetime=Mock(return_value=session_time(15, 45)),
             get_historical_prices=Mock(return_value=None),
             get_greeks=Mock(return_value=dict.fromkeys(GREEKS, 0.1)),
