@@ -8,6 +8,7 @@ import tempfile
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
@@ -23,7 +24,7 @@ def load_module(name: str, path: str) -> ModuleType:
     traders = ModuleType("lumibot.traders")
     traders.Trader = Mock()
     strategy = ModuleType("lumibot.strategies.strategy")
-    strategy.Strategy = type("Strategy", (), {})
+    strategy.Strategy = type("Strategy", (), {"name": "SPXIronCondor"})
     entities = ModuleType("lumibot.entities")
     entities.Asset = Mock()
     entities.Asset.AssetType.OPTION = "option"
@@ -406,18 +407,33 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.submit_order.assert_not_called()
         self.assertTrue(self.strategy._position_open)
 
-    def test_close_that_never_reached_broker_is_replaced_after_grace_period(self) -> None:
+    def test_missing_close_identity_retains_ownership_and_blocks_replacement(self) -> None:
+        self.open_filled_position()
+        owned = self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id())
+        package_id = self.record_pending_close()
+        ledger = self.strategy._position_ledger
+        for _ in range(2):
+            self.strategy._close_all_options()
+            self.assertEqual(ledger.get_basket(package_id).state, "submitted")
+            self.assertTrue(self.strategy._recovery_lock)
+            self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
+        self.strategy.submit_order.assert_not_called()
+        self.assertTrue(self.strategy._position_open)
+        self.assertTrue(self.strategy._exit_requested)
+
+    def test_confirmed_close_cancellation_allows_replacement(self) -> None:
         self.open_filled_position()
         package_id = self.record_pending_close()
-        self.strategy._close_all_options()
+        parent = SimpleNamespace(identifier="broker-close", status="canceled", child_orders=[])
         ledger = self.strategy._position_ledger
-        self.assertEqual(ledger.get_basket(package_id).state, "failed")
+        ledger.bind_broker_submission(package_id, parent)
+        self.strategy._reconcile_inflight_orders([parent])
+        self.assertEqual(ledger.get_basket(package_id).state, "canceled")
+        self.strategy._close_all_options()
         self.strategy.submit_order.assert_called_once()
         replacement = ledger.latest_basket(self.strategy._strategy_id(), {"close"})
         self.assertEqual(replacement.replacement_of, package_id)
         self.assertEqual(replacement.reprice_count, 1)
-        self.assertTrue(self.strategy._position_open)
-        self.assertTrue(self.strategy._exit_requested)
 
     def test_pending_close_is_retained_during_grace_period(self) -> None:
         self.open_filled_position()
@@ -456,7 +472,7 @@ class IronCondorTests(unittest.TestCase):
     def test_partial_fill_prevents_replacing_unconfirmed_close(self) -> None:
         self.assert_close_is_not_replaced("fill")
 
-    def test_failed_close_submission_recovers_without_discarding_ownership(self) -> None:
+    def test_close_submission_exception_retains_intent_without_retrying(self) -> None:
         self.open_filled_position()
         owned_before = self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id())
         self.strategy.submit_order.side_effect = RuntimeError("broker unavailable")
@@ -465,8 +481,9 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.get_datetime.return_value = datetime.fromisoformat(failed.created_at) + timedelta(seconds=120)
         self.strategy.submit_order.side_effect = None
         self.strategy._close_all_options()
-        self.assertEqual(self.strategy.submit_order.call_count, 2)
-        self.assertEqual(self.strategy._position_ledger.get_basket(failed.package_id).state, "failed")
+        self.assertEqual(self.strategy.submit_order.call_count, 1)
+        self.assertEqual(self.strategy._position_ledger.get_basket(failed.package_id).state, "submitted")
+        self.assertTrue(self.strategy._recovery_lock)
         self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), owned_before)
 
     def test_zero_credit_contracts_submit_eod_close_with_zero_quotes(self) -> None:
@@ -828,6 +845,219 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
         self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
+
+
+class OrderRoutingRegressionTests(unittest.TestCase):
+    setUp = IronCondorTests.setUp
+
+    @staticmethod
+    def assets() -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                asset_type="option", symbol="XSP", expiration="2026-11-20",
+                strike=strike, right=right,
+            )
+            for strike, right in ((95, "put"), (100, "put"), (110, "call"), (115, "call"))
+        ]
+
+    def configure_submission(self, strategy: Any) -> None:
+        local_orders = []
+
+        def create_order(asset: object, quantity: int, side: str) -> SimpleNamespace:
+            order = SimpleNamespace(
+                identifier=f"local-{len(local_orders)}", asset=asset,
+                quantity=quantity, side=side, custom_params={},
+            )
+            local_orders.append(order)
+            return order
+
+        strategy.create_order = Mock(side_effect=create_order)
+        strategy.submit_order = Mock(return_value=[SimpleNamespace(
+            identifier="submitted-parent", child_orders=[], custom_params={},
+        )])
+        strategy.get_positions = Mock(return_value=[])
+
+    def record_package(self, package_id: str, tag: str = "Shared-Host") -> SimpleNamespace:
+        children = [
+            SimpleNamespace(
+                identifier=f"{package_id}-broker-{index}", asset=asset,
+                side=side, quantity=1, status="submitted", filled_quantity=0,
+                avg_fill_price=None, tag=tag, child_orders=[],
+            )
+            for index, (asset, side) in enumerate(zip(
+                self.assets(), ("buy_to_open", "sell_to_open", "sell_to_open", "buy_to_open"),
+            ))
+        ]
+        ledger = self.strategy._position_ledger
+        for child in children:
+            self.strategy._asset_registry[iron_condor.asset_key(child.asset)] = child.asset
+        ledger.record_submission(
+            package_id, self.strategy._strategy_id(), "open",
+            [
+                iron_condor.LedgerLeg(f"{package_id}-local-{index}", iron_condor.asset_key(child.asset), sign)
+                for index, (child, sign) in enumerate(zip(children, (1, -1, -1, 1)))
+            ],
+            broker_tag=tag,
+        )
+        parent = SimpleNamespace(
+            identifier=f"{package_id}-parent", child_orders=children,
+            status="submitted", tag=tag,
+        )
+        for child in children:
+            child.parent_identifier = parent.identifier
+        return parent
+
+    def test_single_strategy_uses_normalized_registered_name_everywhere(self) -> None:
+        self.strategy.name = "  IC_Host / café-1  "
+        self.configure_submission(self.strategy)
+        [parent] = self.strategy._submit_package(
+            list(zip(self.assets(), (1, -1, -1, 1))),
+            intent="open", order_type="credit", price=2.0,
+        )
+        [basket] = self.strategy._position_ledger.open_baskets()
+        self.assertEqual(basket.strategy_id, self.strategy.name)
+        self.assertEqual(basket.broker_tag, "IC-Host---caf--1")
+        self.assertEqual(parent.tag, basket.broker_tag)
+        self.assertEqual(parent.custom_params["tag"], basket.broker_tag)
+        self.assertNotEqual(basket.package_id, basket.broker_tag)
+        for child in self.strategy.submit_order.call_args.args[0]:
+            self.assertEqual(child.tag, basket.broker_tag)
+            self.assertEqual(child.custom_params["tag"], basket.broker_tag)
+        self.strategy.submit_order.assert_called_once()
+        self.assertTrue(self.strategy.submit_order.call_args.kwargs["is_multileg"])
+        self.assertEqual(self.strategy._position_ledger.all_owned_quantities(), {})
+
+    def test_empty_registered_host_name_fails_before_recording_or_submitting(self) -> None:
+        self.configure_submission(self.strategy)
+        self.strategy._host_strategy = SimpleNamespace(name=" \t ")
+        with self.assertRaisesRegex(ValueError, "registered strategy name"):
+            self.strategy._submit_package(
+                list(zip(self.assets(), (1, -1, -1, 1))),
+                intent="open", order_type="credit", price=2.0,
+            )
+        self.assertEqual(self.strategy._position_ledger.open_baskets(), ())
+        self.strategy.create_order.assert_not_called()
+        self.strategy.submit_order.assert_not_called()
+
+    def test_ab_and_incubator_followers_route_to_host_and_keep_ledger_owner(self) -> None:
+        for builder in (incubator.build_ab_strategies, incubator.build_incubator_strategies):
+            with self.subTest(builder=builder.__name__):
+                ledger = iron_condor.PositionLedger(":memory:")
+                self.addCleanup(ledger._connection.close)
+                with patch.object(incubator, "SPXIronCondor", iron_condor.SPXIronCondor):
+                    strategies = builder(broker=self.strategy.broker, position_ledger=ledger)
+                host = strategies[0]
+                host.broker = self.strategy.broker
+                self.configure_submission(host)
+                for follower in strategies[1:]:
+                    follower.initialize()
+                    incubator.bind_follower_to_host(follower, host)
+                    follower._submit_package(
+                        list(zip(self.assets(), (1, -1, -1, 1))),
+                        intent="open", order_type="credit", price=2.0,
+                    )
+                    [basket] = ledger.open_baskets(follower.name)
+                    self.assertEqual(basket.strategy_id, follower.name)
+                    self.assertEqual(basket.broker_tag, host.name.replace("_", "-"))
+                    self.assertNotEqual(basket.strategy_id, host.name)
+                self.assertEqual(ledger.all_owned_quantities(), {})
+
+    def test_shared_host_tags_never_cross_bind_packages_even_after_rollover(self) -> None:
+        first = self.record_package("first")
+        second = self.record_package("second")
+        self.strategy.get_datetime.return_value = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        self.assertTrue(self.strategy._reconcile_inflight_orders([first]))
+        self.assertTrue(self.strategy._reconcile_inflight_orders([second, first]))
+        for package_id in ("first", "second"):
+            basket = self.strategy._position_ledger.get_basket(package_id)
+            self.assertIsNone(basket.broker_parent_id)
+            self.assertEqual(basket.state, "submitted")
+            self.assertTrue(all(leg["broker_order_id"] is None for leg in basket.legs))
+        self.assertIsNone(self.strategy._find_order_by_tag([first], "Shared-Host"))
+
+    def test_confirmed_parent_and_child_ids_recover_correct_packages_after_reopen(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "positions.sqlite3"
+            ledger = iron_condor.PositionLedger(path)
+            self.strategy._position_ledger = ledger
+            first = self.record_package("first")
+            second = self.record_package("second")
+            ledger.bind_broker_submission("first", first)
+            # Simulate a submission where only the child IDs were persisted.
+            ledger.bind_broker_children("second", second.child_orders)
+            ledger._connection.close()
+            reopened = iron_condor.PositionLedger(path)
+            self.addCleanup(reopened._connection.close)
+            self.strategy._position_ledger = reopened
+            self.strategy.get_datetime.return_value = datetime.now(timezone.utc)
+            self.strategy.get_order = Mock(return_value=None)
+            self.assertFalse(self.strategy._reconcile_inflight_orders([second, first]))
+            self.assertEqual(reopened.get_basket("first").broker_parent_id, first.identifier)
+            self.assertEqual(reopened.get_basket("second").broker_parent_id, second.identifier)
+            self.assertEqual(reopened.all_owned_quantities(), {})
+
+    def test_direct_parent_lookup_and_persisted_child_lookup_restore_identity(self) -> None:
+        parent = self.record_package("direct")
+        ledger = self.strategy._position_ledger
+        ledger.bind_broker_submission("direct", parent)
+        self.strategy.get_datetime.return_value = datetime.now(timezone.utc)
+        self.strategy.get_order = Mock(side_effect=lambda key: {
+            parent.identifier: parent,
+            **{child.identifier: child for child in parent.child_orders},
+        }.get(key))
+        self.assertFalse(self.strategy._reconcile_inflight_orders([]))
+        self.strategy.get_order.assert_any_call(parent.identifier)
+
+        second = self.record_package("child-only")
+        ledger.bind_broker_children("child-only", second.child_orders)
+        self.strategy.get_order.side_effect = lambda key: {
+            parent.identifier: parent, second.identifier: second,
+            **{child.identifier: child for child in second.child_orders},
+        }.get(key)
+        self.assertFalse(self.strategy._reconcile_inflight_orders([]))
+        self.assertEqual(ledger.get_basket("child-only").broker_parent_id, second.identifier)
+
+    def test_legacy_tags_resolve_original_and_sanitized_forms_only_when_unique(self) -> None:
+        tag = "IC_0123456789abcdef0123"
+        first = self.record_package("legacy", tag)
+        second = SimpleNamespace(identifier="different-parent", tag=tag, child_orders=[])
+        for stored_tag in (tag, tag.replace("_", "")):
+            for broker_tag in (tag, tag.replace("_", "")):
+                with self.subTest(stored_tag=stored_tag, broker_tag=broker_tag):
+                    first.tag = broker_tag
+                    for child in first.child_orders:
+                        child.tag = broker_tag
+                    orders = [first, first, *first.child_orders]
+                    self.assertIs(self.strategy._find_order_by_tag(orders, stored_tag), first)
+                    self.assertIsNone(self.strategy._find_order_by_tag([*orders, second], stored_tag))
+        self.assertFalse(self.strategy._reconcile_inflight_orders([first]))
+        self.assertEqual(self.strategy._position_ledger.get_basket("legacy").broker_parent_id, first.identifier)
+        for invalid in ("Shared-Host", "IC_short", "IC_" + "a" * 21):
+            self.assertIsNone(self.strategy._find_order_by_tag([first], invalid))
+
+    def test_ambiguous_legacy_tags_and_conflicting_child_parents_retain_basket(self) -> None:
+        tag = "IC_0123456789abcdef0123"
+        first = self.record_package("legacy", tag)
+        second = SimpleNamespace(identifier="other-parent", tag=tag, child_orders=[])
+        self.assertTrue(self.strategy._reconcile_inflight_orders([first, second]))
+        self.assertIsNone(self.strategy._position_ledger.get_basket("legacy").broker_parent_id)
+        self.strategy._position_ledger.bind_broker_children("legacy", first.child_orders)
+        second.child_orders = first.child_orders
+        self.assertTrue(self.strategy._reconcile_inflight_orders([first, second]))
+        self.assertIsNone(self.strategy._position_ledger.get_basket("legacy").broker_parent_id)
+
+    def test_missing_parent_identity_locks_reconciliation_and_preserves_filled_contracts(self) -> None:
+        self.record_package("missing")
+        ledger = self.strategy._position_ledger
+        leg = ledger.get_basket("missing").legs[0]
+        ledger.record_fill(leg["order_id"], leg["requested_signed_quantity"], 0.25)
+        owned = ledger.all_owned_quantities()
+        self.strategy.get_datetime.return_value = datetime(2026, 11, 1, tzinfo=timezone.utc)
+        self.assertTrue(self.strategy._reconcile_broker_state())
+        self.assertTrue(self.strategy._recovery_lock)
+        self.assertEqual(ledger.get_basket("missing").state, "partial")
+        self.assertEqual(ledger.all_owned_quantities(), owned)
+        self.assertIsNone(ledger.get_basket("missing").broker_parent_id)
 
 
 class IncubatorAndMarketDataHubTests(unittest.TestCase):

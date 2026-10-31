@@ -30,6 +30,7 @@ import os
 import logging
 import json
 import math
+import re
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
@@ -1121,7 +1122,8 @@ class SPXIronCondor(Strategy):
                     (
                         order
                         for order in [*broker_orders, *self._closing_orders]
-                        if str(getattr(order, "identifier", None) or getattr(order, "id", ""))
+                        if active_close.broker_parent_id
+                        and str(getattr(order, "identifier", None) or getattr(order, "id", ""))
                         == str(active_close.broker_parent_id or "")
                     ),
                     None,
@@ -1133,19 +1135,11 @@ class SPXIronCondor(Strategy):
                     if age >= self._close_reprice_seconds:
                         self.cancel_order(parent)
                     return
-                never_reached_broker = (
-                    not active_close.broker_parent_id
-                    and self._find_order_by_tag(broker_orders, active_close.broker_tag) is None
-                    and all(int(leg["filled_signed_quantity"]) == 0 for leg in active_close.legs)
-                )
-                if not never_reached_broker or age < max(self._close_reprice_seconds, 60.0):
-                    # Cancellation/rejection must be observed by reconciliation before replacement.
-                    return
-                logger.error(
-                    "Close package %s never reached the broker; marking failed and resubmitting.",
-                    active_close.package_id,
-                )
-                self._position_ledger.record_terminal_status(active_close.package_id, "failed")
+                # Absence and timeouts cannot prove that a submission was rejected.
+                # Reconciliation must observe a terminal status before replacement.
+                if parent is None:
+                    self._recovery_lock = True
+                return
             self._hydrate_from_ledger()
             if not self._owned_legs:
                 return
@@ -1195,6 +1189,17 @@ class SPXIronCondor(Strategy):
             or self.parameters.get("strategy_name")
             or type(self).__name__
         )
+
+    def _broker_routing_tag(self) -> str:
+        """Route broker events to the registered host, independently of ledger ownership."""
+        host = getattr(self, "_host_strategy", None)
+        if host is None:
+            host = self
+        name = str(getattr(host, "name", None) or "").strip()
+        tag = re.sub(r"[^a-zA-Z0-9-]", "-", name)
+        if not tag:
+            raise ValueError("a registered strategy name is required for broker routing")
+        return tag
 
     def _hydrate_from_ledger(self) -> None:
         quantities = self._position_ledger.owned_quantities(self._strategy_id())
@@ -1469,25 +1474,25 @@ class SPXIronCondor(Strategy):
         """Reconcile active packages by broker IDs/tags and flag ambiguous rollover."""
         broker_orders: list[object] = []
 
-        def collect(order) -> None:
+        parents_by_child: dict[str, dict[str, Any]] = {}
+
+        def collect(order: Any, parent: Any | None = None) -> None:
             broker_orders.append(order)
+            if parent is not None:
+                child_id = getattr(order, "identifier", None) or getattr(order, "id", None)
+                parent_id = getattr(parent, "identifier", None) or getattr(parent, "id", None)
+                if child_id and parent_id:
+                    parents_by_child.setdefault(str(child_id), {})[str(parent_id)] = parent
             for child in getattr(order, "child_orders", None) or ():
-                collect(child)
+                collect(child, parent if parent is not None else order)
 
         for order in orders:
             collect(order)
         order_lookup: dict[str, object] = {}
-        tag_lookup: dict[str, object] = {}
         for order in broker_orders:
             identifier = getattr(order, "identifier", None) or getattr(order, "id", None)
             if identifier:
                 order_lookup[str(identifier)] = order
-            custom = getattr(order, "custom_params", None)
-            tag = getattr(order, "tag", None)
-            if not tag and isinstance(custom, dict):
-                tag = custom.get("tag")
-            if tag:
-                tag_lookup[str(tag)] = order
         fetch_order = getattr(self, "get_order", None)
         terminal_map = {
             "canceled": "canceled",
@@ -1516,14 +1521,51 @@ class SPXIronCondor(Strategy):
                     parent = fetch_order(str(basket.broker_parent_id))
                 except Exception:
                     parent = None
-            if parent is None and basket.broker_tag:
-                parent = tag_lookup.get(basket.broker_tag)
+            if parent is None:
+                candidates: dict[str, Any] = {}
+                for leg in basket.legs:
+                    child_id = str(leg.get("broker_order_id") or "")
+                    candidates.update(parents_by_child.get(child_id, {}))
+                    child = order_lookup.get(child_id)
+                    if child is None and child_id and callable(fetch_order):
+                        try:
+                            child = fetch_order(child_id)
+                        except Exception:
+                            child = None
+                        if child is not None:
+                            order_lookup[child_id] = child
+                    parent_id = getattr(child, "parent_identifier", None) or getattr(child, "parent_id", None)
+                    if parent_id:
+                        candidate = order_lookup.get(str(parent_id))
+                        if candidate is None and callable(fetch_order):
+                            try:
+                                candidate = fetch_order(str(parent_id))
+                            except Exception:
+                                candidate = None
+                        if candidate is not None:
+                            candidates[str(parent_id)] = candidate
+                if basket.broker_parent_id:
+                    candidates = {
+                        key: value for key, value in candidates.items()
+                        if key == str(basket.broker_parent_id)
+                    }
+                if len(candidates) > 1:
+                    ambiguous = True
+                    continue
+                parent = next(iter(candidates.values()), None)
+                if parent is None:
+                    parent = self._find_order_by_tag(orders, basket.broker_tag)
                 if parent is not None:
+                    parent_id = getattr(parent, "identifier", None) or getattr(parent, "id", None)
+                    if basket.broker_parent_id and str(parent_id) != str(basket.broker_parent_id):
+                        ambiguous = True
+                        continue
                     try:
                         self._position_ledger.bind_broker_submission(basket.package_id, parent)
                         basket = self._position_ledger.get_basket(basket.package_id)
                     except (KeyError, ValueError):
                         ambiguous = True
+                        continue
             if parent is not None and getattr(parent, "child_orders", None):
                 self._position_ledger.bind_broker_children(
                     basket.package_id, parent.child_orders
@@ -1603,24 +1645,9 @@ class SPXIronCondor(Strategy):
                     refreshed.package_id, terminal_map[parent_status]
                 )
                 continue
-            if refreshed.package_id not in stale_ids:
-                continue
-            any_fill = any(int(leg["filled_signed_quantity"]) for leg in refreshed.legs)
-            if any_fill:
+            if parent is None or refreshed.package_id in stale_ids:
+                # A missing order or a DAY rollover is not a terminal broker result.
                 ambiguous = True
-                continue
-            basket_assets = {str(leg["asset_key"]) for leg in refreshed.legs}
-            broker_has_assets = any(
-                asset_key(position.asset) in basket_assets
-                and int(getattr(position, "quantity", 0)) != 0
-                for position in (positions or [])
-            )
-            if refreshed.intent in {"open", "add"} and broker_has_assets:
-                ambiguous = True
-            elif refreshed.intent in {"open", "add", "close", "trim"}:
-                self._position_ledger.record_terminal_status(
-                    refreshed.package_id, "expired"
-                )
         return ambiguous
 
     def _supports_atomic_multileg(self) -> bool:
@@ -1643,8 +1670,8 @@ class SPXIronCondor(Strategy):
         if len(legs) not in (2, 4) or len({abs(quantity) for _, quantity in legs}) != 1:
             raise ValueError("an atomic package requires 2 or 4 balanced legs with matching quantity")
         package_id = uuid.uuid4().hex
-        broker_tag = f"IC_{package_id[:20]}"
         owner = self._strategy_id()
+        broker_tag = self._broker_routing_tag()
         opening = intent in {"open", "add"}
         if opening:
             combined_positions: dict[str, int] = {}
@@ -1724,6 +1751,9 @@ class SPXIronCondor(Strategy):
                 ("tag", broker_tag),
             ):
                 setattr(parent, attribute, value)
+            custom_params = getattr(parent, "custom_params", None)
+            if isinstance(custom_params, dict):
+                custom_params["tag"] = broker_tag
             try:
                 self._position_ledger.bind_broker_submission(package_id, parent)
             except ValueError:
@@ -1980,17 +2010,32 @@ class SPXIronCondor(Strategy):
 
     @staticmethod
     def _find_order_by_tag(orders: Iterable[Any], tag: str | None) -> Any | None:
-        if not tag:
+        """Resolve only a unique legacy package tag, never a shared host tag."""
+        match = re.fullmatch(r"IC_?([0-9a-f]{20})", tag or "")
+        if match is None:
             return None
-        stack = list(orders)
+        tags = {f"IC_{match[1]}", f"IC{match[1]}"}
+        candidates: set[str] = set()
+        order_lookup: dict[str, Any] = {}
+        stack = [(order, order) for order in orders]
         while stack:
-            order = stack.pop()
+            order, parent = stack.pop()
+            identifier = getattr(order, "identifier", None) or getattr(order, "id", None)
+            if identifier:
+                order_lookup[str(identifier)] = order
             custom = getattr(order, "custom_params", None)
             order_tag = getattr(order, "tag", None) or (custom.get("tag") if isinstance(custom, dict) else None)
-            if str(order_tag or "") == tag:
-                return order
-            stack.extend(getattr(order, "child_orders", None) or ())
-        return None
+            if str(order_tag or "") in tags:
+                parent_id = getattr(parent, "identifier", None) or getattr(parent, "id", None)
+                if order is parent:
+                    parent_id = getattr(order, "parent_identifier", None) or getattr(order, "parent_id", None) or parent_id
+                if not parent_id:
+                    return None
+                candidates.add(str(parent_id))
+            stack.extend((child, parent) for child in getattr(order, "child_orders", None) or ())
+        if len(candidates) != 1:
+            return None
+        return order_lookup.get(next(iter(candidates)))
 
     @staticmethod
     def _quote_bounds(quote) -> tuple[float, float] | None:

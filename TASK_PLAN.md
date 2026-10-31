@@ -159,3 +159,54 @@ environment outside the repositories before recording runnable-suite baselines.
   changes are confined to planned files and staged work is unchanged. Baseline,
   before-fix regression, and final full-suite output are stored in the private
   backup directory above. No new test failures or new skips remain.
+
+## Approved Tradier routing implementation, 2026-10-31
+
+Baseline: Lumibot `1d0c1aaf264144850ca94a30be5869ae550cd5a8` and Jev-bot
+`ec5d3220a9d1bd3083b5644e86b9e9bcf66a9b00`, both clean before execution.
+Change only this record, `strategies/iron_condor.py`, `tests/test_regressions.py`,
+and new `tests/test_tradier_order_routing.py`. Jev-bot is verification only.
+
+1. Route atomic packages using the normalized registered host name, preserving
+   separate package IDs and ledger owners. Reject an empty host name before submission.
+2. Recover packages through confirmed parent/child IDs or unique legacy package
+   tags. Never use a shared host tag as package identity. Retain unresolved orders
+   and owned contracts with a recovery lock, including uncertain closing submissions.
+3. Add offline regressions and contract tests against the installed broker's
+   guards, serialization, polling, and host callback routing. Do not edit packages.
+4. Compile the planned Python paths, run targeted and full suites, verify scope
+   and whitespace, and retain the existing broker selection and credit protections.
+
+Pre-change suites: Lumibot 154 passed, 2 skipped, 51 subtests passed; Jev-bot
+38 passed, 17 subtests passed, and unittest discovery passed all 38 tests.
+Jev-bot's structure test executes root, module, and installed console entrypoints
+and checks each completes exactly one iteration and stops.
+
+No authentication or broker writes are authorized by these offline checks.
+Panic liquidation, expiration accounting, dynamic fees, partial-fill terminal
+transitions, and duplicated journaling remain outside this bounded change.
+
+### Routing implementation verification
+
+- Targeted gate: 109 passed, 47 subtests passed. Command:
+  `RUN_TRADIER_SANDBOX_WRITE_TEST=0 .venv/bin/python3 -m pytest -q tests/test_regressions.py tests/test_tradier_order_routing.py tests/test_strike_selection_and_pnl.py tests/test_iron_condor_math.py tests/test_import_hygiene.py`.
+- Full gate: 169 passed, 2 skipped, 60 subtests passed. Command:
+  `RUN_TRADIER_SANDBOX_WRITE_TEST=0 .venv/bin/python3 -m pytest -q -ra tests`.
+  The skips match baseline: Reflex is absent and the Sandbox write test is disabled.
+  All five installed-broker contract tests executed and passed without skips.
+- Compilation passed under the existing Python 3.12.16 environment:
+  `.venv/bin/python3 -m py_compile main.py strategies/iron_condor.py tests/test_regressions.py tests/test_tradier_order_routing.py tests/test_strike_selection_and_pnl.py tests/test_iron_condor_math.py`.
+- Jev-bot: `/tmp/jev-bot-stage-venv/bin/python3 -m pytest -q tests` passed
+  38 tests and 17 subtests. The same interpreter passed
+  `-m unittest discover -s tests -v` and
+  `-m py_compile main.py jev_bot/*.py tests/*.py`.
+  Its entrypoint structure test executed all three commands and verified one
+  iteration and shutdown for each. Its worktree remains clean.
+- `git diff --check` and `git check-ignore .env` passed. Changes are confined to
+  the four planned Lumibot paths. Credentials, configuration, dependency manifests,
+  ledger schema, and installed package sources are unchanged.
+- SDK I/O and position reads were mocked in the installed-broker tests.
+  Offline verification does not establish credential validity or live readiness.
+
+Package these four files in one isolated commit. While that commit remains HEAD,
+rollback with `git -C /workspace/lumibot revert --no-edit HEAD`.
