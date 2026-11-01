@@ -36,6 +36,6 @@ services:
       - ./strategies:/app/strategies:ro
       - ./ml:/app/ml:ro
       - ./trade_logger.py:/app/trade_logger.py:ro
-      - ./logs:/app/logs:ro
+      - ./logs:/app/logs
       - ./.env:/app/.env
       - ./USER_FEATURES.md:/app/USER_FEATURES.md:ro

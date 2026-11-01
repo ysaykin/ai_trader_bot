@@ -112,11 +112,26 @@ class TestReflexDashboard(unittest.TestCase):
     def test_execute_panic_liquidation_no_broker(self):
         import reflex as rx
         from unittest.mock import patch
-        state = DashboardState()
+        state = DashboardState(_reflex_internal_init=True)
         with patch("dashboard.broker_client.get_broker_client", return_value=None):
             result = state.execute_panic_liquidation()
             self.assertFalse(state.panic_in_progress)
             self.assertFalse(state.panic_modal_open)
+
+    def test_execute_panic_liquidation_stops_when_halt_fails(self):
+        from unittest.mock import Mock, patch
+
+        client = Mock()
+        from contextlib import nullcontext
+        ledger = Mock()
+        ledger.execution_gate.return_value = nullcontext()
+        ledger.set_panic_halt.side_effect = OSError("disk unavailable")
+        state = DashboardState(_reflex_internal_init=True)
+        with patch("dashboard.broker_client.get_broker_client", return_value=client), \
+             patch("strategies.position_ledger.PositionLedger", return_value=ledger):
+            state.execute_panic_liquidation()
+        ledger.close.assert_called_once()
+        client.emergency_flatten_positions.assert_not_called()
 
     def test_execute_panic_liquidation_success_sets_durable_halt(self):
         import tempfile
@@ -130,7 +145,7 @@ class TestReflexDashboard(unittest.TestCase):
             mock_client.emergency_flatten_positions.return_value = True
             mock_client.flatten_failures = {}
 
-            state = DashboardState()
+            state = DashboardState(_reflex_internal_init=True)
             with patch.dict(os.environ, {"POSITION_LEDGER_PATH": ledger_path}), \
                  patch("dashboard.broker_client.get_broker_client", return_value=mock_client), \
                  patch.object(DashboardState, "load_all"):
@@ -154,7 +169,7 @@ class TestReflexDashboard(unittest.TestCase):
             mock_client.emergency_flatten_positions.return_value = False
             mock_client.flatten_failures = {"SPXW241031C05800000": "Order rejected"}
 
-            state = DashboardState()
+            state = DashboardState(_reflex_internal_init=True)
             with patch.dict(os.environ, {"POSITION_LEDGER_PATH": ledger_path}), \
                  patch("dashboard.broker_client.get_broker_client", return_value=mock_client), \
                  patch.object(DashboardState, "load_all"):
@@ -178,7 +193,7 @@ class TestReflexDashboard(unittest.TestCase):
                 self.assertEqual(cfg["risk_cap"], "15000")
                 self.assertEqual(cfg["portfolio_risk_cap"], "100000")
 
-                state = DashboardState()
+                state = DashboardState(_reflex_internal_init=True)
                 state.cfg_broker = "tradier"
                 state.cfg_account_id = "67890"
                 state.cfg_risk_cap = "20000"

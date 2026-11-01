@@ -40,7 +40,7 @@ This document is the **single source of truth** for all user-facing features sup
 | **GUI-03** | Active Positions & Greeks Matrix | Dashboard UI | ✅ Active | Live monitoring of all 4 option legs | Interactive Table ($\Delta, \Theta, \text{IV}$) |
 | **GUI-04** | Multi-Curve Payoff Explorer | Dashboard UI | ✅ Active | Visualize profit zones & breakevens | Interactive Plotly Payoff Chart |
 | **GUI-05** | Real-Time Execution Log Console | Dashboard UI | ✅ Active | Instant auditability without terminal | Streaming Log Viewer with Filters |
-| **GUI-06** | One-Click Emergency Control Center | Emergency Controls | ✅ Active | Instant liquidation on unexpected events | Flatten Strategy A/B & Flatten All Buttons |
+| **GUI-06** | One-Click Emergency Control Center | Emergency Controls | ✅ Active | Verified liquidation, durable trading halt, and serialized order submission | Flatten Strategy A/B & Flatten All Buttons |
 | **ML-01** | Regime & Volatility Trade-Entry Classifier | Machine Learning | 📋 Planned | Filter out losing trades in trending/high-vol regimes | Model Confidence Score & Go/No-Go Badge |
 | **ML-02** | Predictive Early-Exit Sentinel | Machine Learning | 📋 Planned | Salvage capital before reaching hard stop loss | Early Warning Risk Meter & Dynamic Close Alert |
 | **ML-03** | Dynamic Delta & Volatility Sizing Optimizer | Machine Learning | 📋 Planned | Adjust strikes based on predicted expected move | Dynamic Delta Recommendation Badge |
@@ -232,7 +232,7 @@ This document is the **single source of truth** for all user-facing features sup
   * **Flatten Strategy B**: Liquidates only Strategy B's open legs.
   * **Emergency Flatten All**: Liquidates all open positions across all strategies immediately via verified broker liquidation (canceling working orders, closing short option legs before protective longs, and polling until flat).
   * **Cancel All Orders**: Cancels any unfilled/working orders.
-  * **Trading Pause / Resume & Durable Panic Halt**: Temporarily prevents new entries while maintaining active position management. Emergency liquidation engages a durable SQLite panic halt (`set_panic_halt(True)`) that blocks subsequent trading iterations and policy actions until explicitly resolved.
+  * **Trading Pause / Durable Panic Halt**: Emergency liquidation engages a durable SQLite panic halt (`set_panic_halt(True)`) and a shared execution gate that blocks concurrent strategy submissions. Strategy iterations retry liquidation while halted; an independent recovery supervisor with startup and shutdown is still pending.
 
 ---
 

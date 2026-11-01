@@ -411,15 +411,28 @@ class SPXIronCondor(Strategy):
             except Exception as error:
                 logger.warning("Could not persist trajectory: %s", error)
 
+    def _panic_recovery(self) -> None:
+        """Retry account liquidation under the shared execution gate."""
+        try:
+            from dashboard.broker_client import get_broker_client
+            with self._position_ledger.execution_gate():
+                if self._position_ledger.is_panic_halted():
+                    client = get_broker_client()
+                    if client is not None:
+                        client.emergency_flatten_positions()
+        except Exception as error:
+            logger.error("Panic recovery failed: %s", error)
+
     def _run_trading_iteration(self) -> None:
         """Execute the trading tick before publishing its trajectory observation."""
-        if self._position_ledger.is_panic_halted():
-            logger.warning("[%s] Execution blocked: durable panic halt is active.", self._strategy_id())
+        halted = self._position_ledger.is_panic_halted()
+        reconciled = self._reconcile_broker_state()
+        if halted:
+            self._panic_recovery()
+            return
+        if not reconciled:
             return
         now = self.get_datetime()
-
-        if not self._reconcile_broker_state():
-            return
         queued = getattr(self, "_queued_policy_action", None)
         if queued is not None:
             self._queued_policy_action = None
@@ -988,6 +1001,10 @@ class SPXIronCondor(Strategy):
           - FLATTEN_NOW: Immediately close all owned option legs.
         """
         normalized = (action or "HOLD").strip().upper()
+        if normalized == "FLATTEN_NOW" and self._position_ledger.is_panic_halted():
+            self._panic_recovery()
+            self._last_action = "FLATTEN_NOW"
+            return "FLATTEN_NOW"
         if self._position_ledger.is_panic_halted():
             logger.warning("[%s] Policy action blocked: durable panic halt is active.", self._strategy_id())
             self._last_action = "HOLD"
@@ -1800,26 +1817,29 @@ class SPXIronCondor(Strategy):
             self._asset_registry[asset_key(asset)] = asset
             orders.append(order)
             ledger_legs.append(LedgerLeg(order_id, asset_key(asset), signed_quantity))
-        self._position_ledger.record_submission(
-            package_id,
-            owner,
-            intent,
-            ledger_legs,
-            duration="day",
-            limit_price=round(float(price), 2),
-            broker_tag=broker_tag,
-            replacement_of=replacement_of,
-            reprice_count=reprice_count,
-            created_at=self._current_datetime(),
-        )
-        submit_kwargs = {
-            "is_multileg": True,
-            "order_type": order_type,
-            "duration": "day",
-        }
-        if order_type != "market":
-            submit_kwargs["price"] = round(float(price), 2)
-        submitted = self.submit_order(orders, **submit_kwargs)
+        with self._position_ledger.execution_gate():
+            if self._position_ledger.is_panic_halted():
+                raise RuntimeError("Durable panic halt is active")
+            self._position_ledger.record_submission(
+                package_id,
+                owner,
+                intent,
+                ledger_legs,
+                duration="day",
+                limit_price=round(float(price), 2),
+                broker_tag=broker_tag,
+                replacement_of=replacement_of,
+                reprice_count=reprice_count,
+                created_at=self._current_datetime(),
+            )
+            submit_kwargs = {
+                "is_multileg": True,
+                "order_type": order_type,
+                "duration": "day",
+            }
+            if order_type != "market":
+                submit_kwargs["price"] = round(float(price), 2)
+            submitted = self.submit_order(orders, **submit_kwargs)
         parents = list(submitted) if isinstance(submitted, (list, tuple)) else []
         if not parents:
             # Some test doubles and older adapters mutate/return the local legs.

@@ -225,10 +225,11 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy.parameters = {"symbol": "SPX"}
         self.ledger.set_panic_halt(True)
 
-        strategy._reconcile_broker_state = Mock()
+        strategy._reconcile_broker_state = Mock(return_value=True)
+        strategy._panic_recovery = Mock()
         strategy._run_trading_iteration()
-        # _reconcile_broker_state must not be called when halted
-        strategy._reconcile_broker_state.assert_not_called()
+        strategy._reconcile_broker_state.assert_called_once()
+        strategy._panic_recovery.assert_called_once()
 
     def test_strategy_blocks_policy_action_when_halted(self) -> None:
         strategy = SPXIronCondor.__new__(SPXIronCondor)
@@ -239,8 +240,10 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy.parameters = {}
         self.ledger.set_panic_halt(True)
 
+        strategy._panic_recovery = Mock()
         result = strategy.apply_policy_action("FLATTEN_NOW")
-        self.assertEqual(result, "HOLD")
+        self.assertEqual(result, "FLATTEN_NOW")
+        strategy._panic_recovery.assert_called_once()
 
 
 if __name__ == "__main__":

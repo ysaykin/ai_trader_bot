@@ -4,6 +4,7 @@ Supports both Tradier (Sandbox/Live) and Alpaca (Paper/Live).
 """
 import os
 import re
+import math
 import time
 import logging
 from datetime import datetime
@@ -248,12 +249,21 @@ class TradierClient:
             if res.status_code != 200:
                 raise RuntimeError(f"Failed to fetch orders from Tradier (status {res.status_code}): {res.text}")
             data = res.json()
-            orders_data = data.get("orders")
-            if not orders_data or orders_data == "null":
+            if not isinstance(data, dict) or "orders" not in data:
+                raise ValueError("Missing orders response")
+            orders_data = data["orders"]
+            if orders_data is None or orders_data == "null":
                 break
-            order_list = orders_data.get("order", [])
+            if not isinstance(orders_data, dict) or "order" not in orders_data:
+                raise ValueError("Incomplete orders response")
+            order_list = orders_data["order"]
             if isinstance(order_list, dict):
                 order_list = [order_list]
+            if not isinstance(order_list, list):
+                raise ValueError("Invalid orders list")
+            for order in order_list:
+                if not isinstance(order, dict) or not order.get("id") or str(order.get("status", "")).lower() not in {"open", "pending", "partially_filled", "submitted", "calculated", "accepted", "filled", "canceled", "cancelled", "rejected", "expired", "error"}:
+                    raise ValueError("Invalid order or unknown status")
             if not order_list:
                 break
             new_orders = [o for o in order_list if o.get("id") not in seen_ids]
@@ -274,12 +284,24 @@ class TradierClient:
         if res.status_code != 200:
             raise RuntimeError(f"Failed to fetch positions from Tradier (status {res.status_code}): {res.text}")
         data = res.json()
-        pos_data = data.get("positions")
-        if not pos_data or pos_data == "null":
+        if not isinstance(data, dict) or "positions" not in data:
+            raise ValueError("Missing positions response")
+        pos_data = data["positions"]
+        if pos_data is None or pos_data == "null":
             return []
-        pos_list = pos_data.get("position", [])
+        if not isinstance(pos_data, dict) or "position" not in pos_data:
+            raise ValueError("Incomplete positions response")
+        pos_list = pos_data["position"]
         if isinstance(pos_list, dict):
             pos_list = [pos_list]
+        if not isinstance(pos_list, list):
+            raise ValueError("Invalid positions list")
+        for position in pos_list:
+            if not isinstance(position, dict) or not position.get("symbol") or "quantity" not in position:
+                raise ValueError("Incomplete position")
+            quantity = float(position["quantity"])
+            if not math.isfinite(quantity) or not quantity.is_integer():
+                raise ValueError("Invalid position quantity")
         return pos_list
 
     def emergency_cancel_orders(self) -> bool:
@@ -295,7 +317,6 @@ class TradierClient:
         if not working_orders:
             return True
 
-        success = True
         for o in working_orders:
             order_id = o.get("id")
             try:
@@ -303,10 +324,8 @@ class TradierClient:
                 r = requests.delete(url, headers=self.headers, timeout=5)
                 if r.status_code not in [200, 204]:
                     logger.warning(f"Failed to cancel order {order_id} (status {r.status_code}): {r.text}")
-                    success = False
             except Exception as e:
                 logger.warning(f"Exception canceling order {order_id}: {e}")
-                success = False
 
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
@@ -314,12 +333,12 @@ class TradierClient:
                 current_orders = self._fetch_all_orders()
                 still_working = [o for o in current_orders if str(o.get("status", "")).lower() in working_statuses]
                 if not still_working:
-                    return success
+                    return True
             except Exception:
                 pass
             time.sleep(0.5)
 
-        return success
+        return False
 
     def emergency_flatten_positions(self, timeout_seconds: float = 10.0) -> bool:
         """Emergency liquidate all open positions with verified order acceptance and polling."""
@@ -327,7 +346,8 @@ class TradierClient:
 
         # 1. Cancel working orders first
         if not self.emergency_cancel_orders():
-            logger.warning("Emergency cancel orders encountered non-fatal failure; proceeding to positions.")
+            self.flatten_failures["__global__"] = "Unable to verify cancellation of working orders"
+            return False
 
         # 2. Re-read positions to capture fills during cancellation
         try:
@@ -336,9 +356,6 @@ class TradierClient:
             self.flatten_failures["__global__"] = f"Failed to fetch positions: {e}"
             logger.error(f"Tradier emergency_flatten_positions error: {e}")
             return False
-
-        if not positions:
-            return True
 
         occ_pattern = re.compile(r"^([A-Za-z]{1,6})\d{6}[CP]\d{8}$")
         equity_pattern = re.compile(r"^[A-Za-z]{1,6}$")
@@ -381,7 +398,26 @@ class TradierClient:
             ("equity", long_equities),
         ]
 
-        for instrument_type, batch in close_batches:
+        for batch_index, (instrument_type, batch) in enumerate(close_batches):
+            if batch_index == 2 and short_options:
+                if self.flatten_failures:
+                    return False
+                deadline = time.monotonic() + max(timeout_seconds, 1.0)
+                short_symbols = {item[0] for item in short_options}
+                while time.monotonic() < deadline:
+                    try:
+                        remaining = self._fetch_all_positions()
+                        orders = self._fetch_all_orders()
+                        if not any(p["symbol"] in short_symbols and float(p["quantity"]) < 0 for p in remaining) and not any(str(o["status"]).lower() in {"open", "pending", "partially_filled", "submitted", "calculated", "accepted"} for o in orders):
+                            break
+                    except Exception as exc:
+                        logger.warning("Short close verification failed: %s", exc)
+                    time.sleep(0.5)
+                else:
+                    self.flatten_failures["__verification__"] = "Short option closes not confirmed; protection retained"
+                    return False
+            if self.flatten_failures:
+                return False
             for item in batch:
                 sym, underlying_or_sym, abs_qty, side = item
                 if instrument_type == "option":
@@ -450,7 +486,8 @@ class TradierClient:
         except Exception as e:
             self.flatten_failures["__verification__"] = f"Verification failed: {e}"
 
-        return len(self.flatten_failures) == 0
+        self.flatten_failures.setdefault("__verification__", "Unable to verify flat positions and no working orders")
+        return False
 
 
 def get_broker_client():

@@ -10,6 +10,8 @@ from ..styles.theme import (
     CYAN,
     INDIGO,
     GREEN,
+    RED,
+    CRIMSON,
     TEXT_MUTED,
     TEXT_PRIMARY,
     KPI_CARD_STYLE,

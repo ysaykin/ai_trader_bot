@@ -445,6 +445,12 @@ class DashboardState(rx.State):
     def set_cfg_risk_cap(self, val: str):
         self.cfg_risk_cap = val
 
+    def set_cfg_portfolio_risk_cap(self, val: str):
+        self.cfg_portfolio_risk_cap = val
+
+    def set_cfg_paper(self, val: str):
+        self.cfg_paper = val
+
     def set_cfg_testing_dte(self, val: str):
         self.cfg_testing_dte = val
 
@@ -507,15 +513,21 @@ class DashboardState(rx.State):
             if client is None or not callable(getattr(client, "emergency_flatten_positions", None)):
                 return rx.toast.error("Panic liquidation is unavailable for the configured broker.")
 
+            ledger = None
             try:
                 from strategies.position_ledger import PositionLedger
                 ledger_path = os.getenv("POSITION_LEDGER_PATH", "logs/position_ledger.sqlite3")
                 ledger = PositionLedger(ledger_path)
-                ledger.set_panic_halt(True, reason="dashboard_panic_liquidation")
+                with ledger.execution_gate():
+                    ledger.set_panic_halt(True, reason="dashboard_panic_liquidation")
+                    success = client.emergency_flatten_positions()
             except Exception as e:
                 logger.exception("Failed to persist durable panic halt: %s", e)
+                return rx.toast.error("Panic halt could not be saved. Check the broker account immediately.")
+            finally:
+                if ledger is not None:
+                    ledger.close()
 
-            success = client.emergency_flatten_positions()
             failures = getattr(client, "flatten_failures", {})
             if not success or failures:
                 failed_syms = ", ".join(failures.keys()) if failures else "broker unverified"

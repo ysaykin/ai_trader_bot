@@ -723,3 +723,20 @@ tasks:
     deliverables:
       - Dockerfile
       - pyproject.toml
+
+  - id: panic-recovery-supervisor-and-coordinator-spec
+    title: "Run panic liquidation recovery under a managed supervisor and complete the omitted coordinator requirements"
+    status: pending
+    priority: P0
+    owner: unassigned
+    review_notes:
+      - "Repair cycle verified retries during halted strategy iterations, but no separately managed recovery supervisor with startup and shutdown was implemented; retries therefore depend on strategy iterations continuing."
+      - "The approved plan text available to the implementation cycle was truncated in the Jev-bot section and omitted the detailed coordinator specification. Obtain the missing remainder before claiming the emergency verification gate or whole plan complete."
+    acceptance:
+      - "Add a recovery supervisor with explicit startup and graceful shutdown that retries broker reconciliation/liquidation while the durable panic halt is active, independent of strategy iteration cadence."
+      - "Implement and verify the full coordinator requirements from the complete approved plan, including submission exclusion and confirmed short-fill sequencing, with no success reported from unverified broker state."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - dashboard/broker_client.py
+      - tests/test_emergency_liquidation.py

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import fcntl
+from contextlib import contextmanager
 import math
 import sqlite3
 import threading
@@ -86,6 +88,21 @@ class PositionLedger:
         self._lock = threading.RLock()
         if not read_only:
             self._initialize()
+
+    @contextmanager
+    def execution_gate(self):
+        """Serialize submissions and emergency liquidation across processes."""
+        if self.path == ":memory:":
+            with self._lock:
+                yield
+            return
+        lock_path = str(Path(self.path).expanduser().resolve()) + ".execution.lock"
+        with open(lock_path, "a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def close(self) -> None:
         """Close the database connection."""

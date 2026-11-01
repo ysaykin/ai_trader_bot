@@ -13,6 +13,7 @@ BORDER_COLOR = "#1F273D"
 CYAN = "#00D4B2"      # Active / Telemetry / Neutral Brand
 GREEN = "#10B981"     # Positive P&L / Filled / In-the-money
 RED = "#EF4444"       # Negative P&L / Risk Limit / Canceled / Stop
+CRIMSON = "#F43F5E"   # Negative drawdown / Loss accent
 AMBER = "#F59E0B"     # Warning / Near-threshold / Pending
 INDIGO = "#6366F1"    # Neural Policy / Model Inference / Benchmark
 
