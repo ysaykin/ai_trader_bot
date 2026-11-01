@@ -46,6 +46,22 @@ class TradierClient:
         }
         self.flatten_failures: Dict[str, str] = {}
 
+    def _request_with_backoff(self, method: str, url: str, max_retries: int = 3, **kwargs) -> Any:
+        """Execute HTTP request with bounded backoff on 429, 502, 503, 504."""
+        backoff = 0.5
+        func = getattr(requests, method.lower(), None)
+        for attempt in range(max_retries):
+            if callable(func):
+                res = func(url, **kwargs)
+            else:
+                res = requests.request(method, url, **kwargs)
+            if res.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return res
+        return res
+
     def fetch_account_info(self) -> Optional[Dict[str, Any]]:
         """Fetch balances, equity, cash, and option buying power."""
         try:
@@ -117,7 +133,7 @@ class TradierClient:
                 return {q["symbol"]: float(q.get("last", 0.0) or q.get("prevclose", 0.0)) for q in data if "symbol" in q}
         except Exception as e:
             logger.warning(f"Tradier quotes exception: {e}")
-        return {"XSP": 762.37, "SPX": 7623.68, "SPY": 759.97}
+        return {}
 
     def fetch_option_greeks(self, symbol: str, expiration: str) -> Dict[str, Dict[str, float]]:
         """Fetch real options Greeks from Tradier API for active strikes."""
@@ -321,7 +337,7 @@ class TradierClient:
             order_id = o.get("id")
             try:
                 url = f"{self.base_url}/accounts/{self.account}/orders/{order_id}"
-                r = requests.delete(url, headers=self.headers, timeout=5)
+                r = self._request_with_backoff("delete", url, headers=self.headers, timeout=5)
                 if r.status_code not in [200, 204]:
                     logger.warning(f"Failed to cancel order {order_id} (status {r.status_code}): {r.text}")
             except Exception as e:
@@ -439,9 +455,39 @@ class TradierClient:
                         "type": "market",
                         "duration": "day",
                     }
+                if instrument_type == "option" and underlying_or_sym in {"SPX", "SPXW", "XSP"}:
+                    try:
+                        quote_response = self._request_with_backoff(
+                            "get",
+                            f"{self.base_url}/markets/quotes", headers=self.headers,
+                            params={"symbols": sym}, timeout=6,
+                        )
+                        quote_response.raise_for_status()
+                        raw_quotes = quote_response.json().get("quotes", {})
+                        quote = raw_quotes.get("quote", {})
+                        if isinstance(quote, list):
+                            quote = quote[0] if quote else {}
+                        elif not isinstance(quote, dict):
+                            quote = {}
+                        price = float(quote.get("ask" if side == "buy_to_close" else "bid") or 0)
+                        if not math.isfinite(price) or price <= 0:
+                            if side == "sell_to_close":
+                                price = 0.05
+                            else:
+                                raise ValueError("No executable quote")
+                        price = round(round(price / 0.05) * 0.05, 2)
+                        if price <= 0:
+                            price = 0.05
+                        data.update(type="limit", price=f"{price:.2f}")
+                    except Exception as exc:
+                        if side == "sell_to_close":
+                            data.update(type="limit", price="0.05")
+                        else:
+                            self.flatten_failures[sym] = f"Cannot price index option close: {exc}"
+                            continue
                 try:
                     url = f"{self.base_url}/accounts/{self.account}/orders"
-                    res = requests.post(url, headers=self.headers, data=data, timeout=6)
+                    res = self._request_with_backoff("post", url, headers=self.headers, data=data, timeout=6)
                     if res.status_code not in (200, 201):
                         self.flatten_failures[sym] = f"Order rejected (status {res.status_code})"
                         logger.error(f"Tradier reject for {sym}: {res.status_code} {res.text}")

@@ -713,9 +713,20 @@ class PositionLedger:
         quantities = self.owned_quantities(strategy_id)
         if not quantities:
             return 0.0
-        remaining_qty = max(abs(quantity) for quantity in quantities.values())
+        active_groups: dict[tuple[str, str], int] = defaultdict(int)
+        for key, qty in quantities.items():
+            if qty != 0:
+                try:
+                    decoded = json.loads(key)
+                    active_groups[(decoded["symbol"], decoded["expiration"])] = max(
+                        active_groups[(decoded["symbol"], decoded["expiration"])], abs(qty)
+                    )
+                except Exception:
+                    pass
+        if not active_groups:
+            return 0.0
+
         total_cash = 0.0
-        opened_qty = 0
         with self._lock:
             rows = self._connection.execute(
                 """SELECT * FROM packages WHERE strategy_id = ?
@@ -723,16 +734,31 @@ class PositionLedger:
                    AND opening_cash_flow IS NOT NULL""",
                 (strategy_id,),
             ).fetchall()
-        for row in rows:
-            basket = self._basket_from_row(row)
-            basket_qty = max(
-                (abs(int(leg["filled_signed_quantity"])) for leg in basket.legs),
-                default=0,
-            )
-            if basket_qty > 0:
-                opened_qty += basket_qty
-                total_cash += float(basket.opening_cash_flow or 0.0)
-        return total_cash * min(remaining_qty / opened_qty, 1.0) if opened_qty else 0.0
+
+        for grp, remaining_qty in active_groups.items():
+            grp_cash = 0.0
+            grp_opened_qty = 0
+            for row in rows:
+                basket = self._basket_from_row(row)
+                basket_groups = set()
+                for leg in basket.legs:
+                    try:
+                        ak = json.loads(leg["asset_key"])
+                        basket_groups.add((ak["symbol"], ak["expiration"]))
+                    except Exception:
+                        pass
+                if grp in basket_groups:
+                    b_qty = max(
+                        (abs(int(leg["filled_signed_quantity"])) for leg in basket.legs),
+                        default=0,
+                    )
+                    if b_qty > 0:
+                        grp_opened_qty += b_qty
+                        grp_cash += float(basket.opening_cash_flow or 0.0)
+            if grp_opened_qty > 0:
+                total_cash += grp_cash * min(remaining_qty / grp_opened_qty, 1.0)
+
+        return round(total_cash, 2)
 
     def open_baskets(self, strategy_id: str | None = None) -> tuple[BasketRecord, ...]:
         """Return active packages, optionally restricted to one strategy owner."""
@@ -769,8 +795,25 @@ class PositionLedger:
                         groups[(decoded["symbol"], decoded["expiration"])].append((decoded, quantity))
                     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                         return None
-                opening_credit = self.active_opening_cash(owner) if len(groups) == 1 else 0.0
-                for legs in groups.values():
+                with self._lock:
+                    rows = self._connection.execute(
+                        """SELECT l.asset_key, l.filled_signed_quantity, l.fill_price
+                           FROM legs l JOIN packages p ON p.package_id = l.package_id
+                           WHERE p.strategy_id = ? AND p.intent IN ('open','add')
+                           AND p.state IN ('open','partial')""", (owner,),
+                    ).fetchall()
+                for group, legs in groups.items():
+                    cash = 0.0
+                    opened: dict[str, int] = defaultdict(int)
+                    for row in rows:
+                        asset = json.loads(row["asset_key"])
+                        if (asset["symbol"], asset["expiration"]) == group:
+                            qty = int(row["filled_signed_quantity"])
+                            opened[row["asset_key"]] += qty
+                            cash -= qty * float(row["fill_price"] or 0.0) * 100
+                    opened_qty = max((abs(q) for q in opened.values()), default=0)
+                    remaining_qty = max(abs(q) for _, q in legs)
+                    opening_credit = cash * min(remaining_qty / opened_qty, 1.0) if opened_qty else 0.0
                     basket_shape = self._package_width_and_quantity(legs)
                     if basket_shape is None:
                         return None
@@ -895,18 +938,72 @@ class PositionLedger:
                closing_cash_flow = ?, updated_at = ? WHERE package_id = ?""",
             (state, opening_cash, closing_cash, now, package_id),
         )
-        if state == "closed" and intent in {"trim", "close"} and not self.owned_quantities(strategy_id):
-            inflight = self._connection.execute(
-                """SELECT 1 FROM packages WHERE strategy_id = ?
-                   AND state IN ('submitted','partial','closing') LIMIT 1""",
-                (strategy_id,),
-            ).fetchone()
-            if inflight is None:
-                self._connection.execute(
-                    """UPDATE packages SET state = 'closed', updated_at = ?
-                       WHERE strategy_id = ? AND state = 'open'""",
-                    (now, strategy_id),
-                )
+        if state == "closed" and intent in {"trim", "close"}:
+            pkg_legs = self._connection.execute(
+                "SELECT asset_key FROM legs WHERE package_id = ?", (package_id,)
+            ).fetchall()
+            target_groups = set()
+            for pleg in pkg_legs:
+                try:
+                    ak = json.loads(pleg["asset_key"])
+                    target_groups.add((ak["symbol"], ak["expiration"]))
+                except Exception:
+                    pass
+
+            owned = self.owned_quantities(strategy_id)
+            for grp in target_groups:
+                grp_owned = sum(
+                    abs(qty) for ak_str, qty in owned.items()
+                    if json.loads(ak_str).get("symbol") == grp[0] and json.loads(ak_str).get("expiration") == grp[1]
+                ) if owned else 0
+                if grp_owned == 0:
+                    inflight_rows = self._connection.execute(
+                        """SELECT l.asset_key FROM packages p
+                           JOIN legs l ON l.package_id = p.package_id
+                           WHERE p.strategy_id = ? AND p.state IN ('submitted','partial','closing')
+                           AND p.package_id != ?""",
+                        (strategy_id, package_id),
+                    ).fetchall()
+                    grp_inflight = any(
+                        json.loads(r["asset_key"]).get("symbol") == grp[0]
+                        and json.loads(r["asset_key"]).get("expiration") == grp[1]
+                        for r in inflight_rows
+                    )
+                    if not grp_inflight:
+                        candidates = self._connection.execute(
+                            """SELECT DISTINCT p.package_id FROM packages p
+                               JOIN legs l ON l.package_id = p.package_id
+                               WHERE p.strategy_id = ? AND p.intent IN ('open','add')
+                               AND p.state IN ('open','partial')""",
+                            (strategy_id,),
+                        ).fetchall()
+                        for cand in candidates:
+                            c_id = cand["package_id"]
+                            c_legs = self._connection.execute(
+                                "SELECT asset_key FROM legs WHERE package_id = ?", (c_id,)
+                            ).fetchall()
+                            c_groups = {
+                                (json.loads(cl["asset_key"]).get("symbol"), json.loads(cl["asset_key"]).get("expiration"))
+                                for cl in c_legs
+                            }
+                            if grp in c_groups:
+                                self._connection.execute(
+                                    """UPDATE packages SET state = 'closed', updated_at = ?
+                                       WHERE package_id = ?""",
+                                    (now, c_id),
+                                )
+            if not self.owned_quantities(strategy_id):
+                inflight = self._connection.execute(
+                    """SELECT 1 FROM packages WHERE strategy_id = ?
+                       AND state IN ('submitted','partial','closing') LIMIT 1""",
+                    (strategy_id,),
+                ).fetchone()
+                if inflight is None:
+                    self._connection.execute(
+                        """UPDATE packages SET state = 'closed', updated_at = ?
+                           WHERE strategy_id = ? AND state = 'open'""",
+                        (now, strategy_id),
+                    )
         return self.get_basket(package_id)
 
     def _basket_from_row(self, package: sqlite3.Row) -> BasketRecord:

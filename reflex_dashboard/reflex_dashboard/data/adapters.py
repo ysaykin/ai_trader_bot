@@ -417,6 +417,10 @@ def format_strategy_label(strat_name: str) -> str:
 def format_strikes(strikes: dict[str, Any] | None, structure: str) -> str:
     if not strikes or not isinstance(strikes, dict):
         return "-"
+    strikes = dict(strikes)
+    for legacy, canonical in (("put_1", "long_put"), ("put_2", "short_put"), ("call_3", "short_call"), ("call_4", "long_call")):
+        if legacy in strikes:
+            strikes.setdefault(canonical, strikes[legacy])
     struct = (structure or "").lower()
     if struct == "bull_put" or ("short_put" in strikes and "long_put" in strikes and "short_call" not in strikes):
         lp = strikes.get("long_put", "")
@@ -461,9 +465,36 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
                     tid = r.get("trade_id")
                     if not tid:
                         continue
-                    if tid not in trades_by_id:
-                        trades_by_id[tid] = {}
-                    trades_by_id[tid].update(r)
+                    event = str(r.get("event", "")).upper()
+                    if tid not in trades_by_id or event == "ENTRY":
+                        trade = dict(r)
+                        entry_fee = number(r.get("entry_fees"))
+                        if entry_fee is None:
+                            entry_fee = number(r.get("fees")) or 0.0
+                        trade["entry_fees"] = entry_fee
+                        trade["fees"] = entry_fee
+                        trade["entry_timestamp"] = r.get("timestamp")
+                        trades_by_id[tid] = trade
+                        continue
+                    trade = trades_by_id[tid]
+                    if event == "ADDITION":
+                        trade["opening_credit_cash"] = (number(trade.get("opening_credit_cash")) or 0.0) + (number(r.get("opening_credit_cash")) or 0.0)
+                        add_fee = number(r.get("fees")) or 0.0
+                        trade["entry_fees"] = (number(trade.get("entry_fees")) or 0.0) + add_fee
+                        trade["fees"] = (number(trade.get("fees")) or 0.0) + add_fee
+                        trade["quantity"] = (number(trade.get("quantity")) or 0.0) + (number(r.get("added_quantity")) or 0.0)
+                    elif event in {"ADJUSTMENT", "EXIT"}:
+                        for field in ("gross_pnl", "fees", "net_pnl"):
+                            value = number(r.get(field))
+                            if value is not None:
+                                trade[field] = (number(trade.get(field)) or 0.0) + value
+                        if "timestamp" in r:
+                            trade["exit_timestamp"] = r["timestamp"]
+                        for key, value in r.items():
+                            if key not in {"gross_pnl", "fees", "net_pnl", "opening_credit_cash", "quantity", "timestamp", "entry_fees"} and value is not None:
+                                trade[key] = value
+                    else:
+                        trade.update({key: value for key, value in r.items() if value is not None})
         except Exception:
             pass
 
@@ -479,7 +510,9 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
 
         max_risk = number(t.get("max_risk")) or 500.0
         credit_per_share = number(t.get("credit")) or 0.0
-        credit_cash = credit_per_share * 100.0 * qty
+        credit_cash = number(t.get("opening_credit_cash"))
+        if credit_cash is None:
+            credit_cash = credit_per_share * 100.0 * qty
 
         t["max_risk"] = max_risk
         t["credit_cash"] = credit_cash
@@ -495,6 +528,8 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             except Exception:
                 pass
 
+        struct = str(t.get("structure") or "").lower()
+        strikes = t.get("strikes") or {}
         if status == "CLOSED" or evt == "EXIT" or is_expired:
             t["status"] = "CLOSED"
             gross_pnl = number(t.get("gross_pnl"))
@@ -541,7 +576,8 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["strikes_display"] = format_strikes(strikes, struct)
             t["dte_str"] = f"{t.get('dte', 7)}DTE" if "dte" in t else "-"
 
-            t["time_str"] = format_trade_time_et(t.get("timestamp", ""))
+            t["time_str"] = format_trade_time_et(t.get("entry_timestamp") or t.get("timestamp", ""))
+            t["exit_time_str"] = format_trade_time_et(t.get("exit_timestamp", ""))
 
             closed_trades.append(t)
         elif status == "OPEN":
@@ -565,7 +601,8 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["strikes_display"] = format_strikes(strikes, struct)
             t["dte_str"] = f"{t.get('dte', 7)}DTE" if "dte" in t else "-"
 
-            t["time_str"] = format_trade_time_et(t.get("timestamp", ""))
+            t["time_str"] = format_trade_time_et(t.get("entry_timestamp") or t.get("timestamp", ""))
+            t["exit_time_str"] = format_trade_time_et(t.get("exit_timestamp", ""))
 
             open_trades.append(t)
 
@@ -728,7 +765,7 @@ def get_incubator_data() -> dict[str, Any]:
             "status": status,
             "status_color": status_color,
             "scan_status": "AI RUNTIME ACTIVE" if is_neural else ("TESTING ACTIVE" if is_testing else ("WAITING FOR WINDOW" if not v_closed and not v_open else ("TRADED TODAY" if v_closed else "ACTIVE POSITION"))),
-            "risk_cap": "$5,000",
+            "risk_cap": money(float(get_config_settings().get("risk_cap", "15000"))),
             "is_neural": is_neural,
             "is_testing": is_testing,
             "structure": struct,
@@ -740,7 +777,7 @@ def get_incubator_data() -> dict[str, Any]:
         else:
             monitored_rows.append(row)
 
-    overall_win_rate = (total_wins / total_trades_count * 100.0) if total_trades_count > 0 else 0.0
+    overall_win_rate = (total_wins / len(closed_all) * 100.0) if closed_all else 0.0
 
     # -------------------------------------------------------------
     # Curated Leaderboard: AI Strategy + Top 5 + Bottom 3 Strategies

@@ -502,9 +502,9 @@ tasks:
 
   - id: dashboard-comparison-selection-integrity
     title: "Prevent stale A/B cards and false tie messages when strategy selection changes"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "state.py initializes obsolete strategy names. _recompute_ab_comparison keeps old cards when selection lookup fails but computes missing sides as zero."
       - "Observed A/B cards with different P&L values while the banner claimed equal Net P&L."
@@ -515,6 +515,7 @@ tasks:
     deliverables:
       - reflex_dashboard/reflex_dashboard/state.py
       - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/components/benchmark_view.py
       - tests/test_reflex_dashboard.py
 
   - id: dashboard-regression-fixtures-and-browser-checks
@@ -625,9 +626,9 @@ tasks:
 
   - id: bug-06-reflex-trade-event-aggregation-and-win-rate
     title: "Aggregate ENTRY, ADDITION, ADJUSTMENT, and EXIT trade events in Reflex adapters and fix open-trade win-rate dilution"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "reflex_dashboard/reflex_dashboard/data/adapters.py:471-504 merges trade events via dict.update(), overwriting entry timestamps and entry fees on EXIT and ignoring ADDITION and ADJUSTMENT cash flows."
       - "adapters.py:666,761 divides closed wins by (closed + open) trades when computing overall_win_rate."
@@ -636,13 +637,14 @@ tasks:
       - "Compute win_rate strictly over closed trades while keeping open trade counts separate."
     deliverables:
       - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/state.py
       - tests/test_reflex_dashboard.py
 
   - id: bug-07-ledger-strike-keys-and-multi-package-attribution
     title: "Standardize strike dictionary keys on ledger entry and isolate multi-package cash and risk attribution"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "strategies/iron_condor.py:1885-1888 records strikes as put_1/put_2/call_3/call_4, causing adapters.py:format_strikes() to render blank ' / | / ' strings."
       - "strategies/position_ledger.py:607 drops opening_credit when multiple expirations are open, and _refresh_package (line 740) mutates all open packages."
@@ -654,6 +656,7 @@ tasks:
       - strategies/position_ledger.py
       - reflex_dashboard/reflex_dashboard/data/adapters.py
       - tests/test_position_ledger.py
+      - tests/test_regressions.py
 
   - id: bug-08-trajectory-logger-scaling-and-session-tick-count
     title: "Fix TrajectoryLogger quantity scaling, hardcoded $5k cap, and neural session tick counter"
@@ -698,9 +701,9 @@ tasks:
 
   - id: bug-10-legacy-react-form-and-mock-backend-accounting
     title: "Fix broken FormData bindings in legacy React dashboard and inverted cash/credit math in FastAPI mock backend"
-    status: pending
+    status: completed
     priority: P2
-    owner: unassigned
+    owner: antigravity
     evidence:
       - "dashboard/src/App.jsx:41-54 reads formData.get('symbol') etc. from inputs that only have id attributes and no name attributes; #runTradeBtn triggers native form submit reload and #closeBtn has no onClick handler."
       - "backend/app.py:23,53,79 computes cash as balance - equity, double-multiplies credit by quantity, and subtracts credit received from account_equity."
@@ -710,6 +713,7 @@ tasks:
     deliverables:
       - dashboard/src/App.jsx
       - backend/app.py
+      - tests/test_mock_backend.py
 
   - id: dev-env-python312-container-alignment
     title: "Align container Python 3.12 runtime and compiled NumPy dependencies for full test suite execution"

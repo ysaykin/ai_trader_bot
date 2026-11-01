@@ -156,7 +156,9 @@ def validate_runtime_configuration() -> None:
                 "TRADING_BROKER=tradier requires TRADIER_ACCESS_TOKEN and "
                 "TRADIER_ACCOUNT_NUMBER."
             )
-        _tradier_paper()
+        is_paper = _tradier_paper()
+        if is_paper and os.getenv("IC_SYMBOL", "XSP").strip().upper() == "SPX":
+            logger.warning("Tradier Sandbox may lack SPX index chains; consider IC_SYMBOL=XSP or SPY.")
     if _env_bool("ML_POLICY_ENABLED", default=False):
         from ml.inference import LivePolicyController
 

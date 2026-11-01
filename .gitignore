@@ -21,13 +21,12 @@ reflex_dashboard/reflex.lock
 # Legacy mock-UI prototype & local scratch artifacts
 /lumibot/
 /.legacy/
-/backend/
+/backend/.venv/
 /ui/
 /docker-compose.mock-ui.yml
 /test_dashboard.py
 /dashboard/Dockerfile
 /dashboard/index.html
 /dashboard/package.json
-/dashboard/src/
 /dashboard/vite.config.js
 /uv.lock

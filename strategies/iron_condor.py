@@ -32,6 +32,7 @@ import json
 import math
 import re
 import uuid
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
 
@@ -192,6 +193,8 @@ class SPXIronCondor(Strategy):
         "max_position_risk": 5000.0,
         "structure": "iron_condor",
     }
+
+    _iteration_count: int = 0
 
     def initialize(self) -> None:
         """Load parameters from env vars (unless explicitly overridden per variant) and set up state."""
@@ -806,18 +809,81 @@ class SPXIronCondor(Strategy):
             return
 
         marked_legs = []
+        leg_quotes = []
+        incomplete = False
         for asset, signed_quantity in self._owned_legs:
             try:
-                midpoint = self._quote_midpoint(self._fetch_quote(asset))
+                quote = self._fetch_quote(asset)
+                midpoint = self._quote_midpoint(quote)
+                bounds = self._quote_bounds(quote)
             except Exception as error:
                 logger.warning("Could not quote owned option %s: %s", asset, error)
-                self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
-                return
+                midpoint, bounds = None, None
+            leg_quotes.append({
+                "asset": asset,
+                "signed_quantity": signed_quantity,
+                "midpoint": midpoint,
+                "bounds": bounds,
+            })
             if midpoint is None:
+                incomplete = True
+            else:
+                marked_legs.append((signed_quantity, midpoint))
+        if incomplete:
+            # Pair legs by (right, expiration) to calculate conservative closing debit
+            # A wing can contribute positive lower-bound closing debit max(short_ask - long_bid, 0.0)
+            # ONLY when both legs of that wing have valid quotes (capped at wing width),
+            # or via spot intrinsic value when expiring and spot breaches the short strike.
+            # Otherwise retain the position with VALUATION_UNAVAILABLE without fabricating naked-option spikes.
+            wings: dict[tuple[Any, Any], dict[str, Any]] = defaultdict(dict)
+            for item in leg_quotes:
+                asset = item["asset"]
+                signed_quantity = item["signed_quantity"]
+                right = getattr(asset, "right", None)
+                expiration = getattr(asset, "expiration", None)
+                if right:
+                    right = str(right).lower()
+                key = (right, expiration)
+                if signed_quantity < 0:
+                    wings[key]["short"] = item
+                else:
+                    wings[key]["long"] = item
+
+            conservative_debit = 0.0
+            wing_width_cfg = float(self.parameters.get("wing_width", 0.0))
+            for key, wing in wings.items():
+                short_item = wing.get("short")
+                long_item = wing.get("long")
+                if short_item and long_item:
+                    s_asset = short_item["asset"]
+                    l_asset = long_item["asset"]
+                    s_qty = short_item["signed_quantity"]
+                    l_qty = long_item["signed_quantity"]
+                    s_bounds = short_item["bounds"]
+                    l_bounds = long_item["bounds"]
+                    w_qty = min(abs(s_qty), abs(l_qty))
+                    s_strike = getattr(s_asset, "strike", None)
+                    l_strike = getattr(l_asset, "strike", None)
+                    w_width = abs(float(s_strike) - float(l_strike)) if (s_strike is not None and l_strike is not None) else wing_width_cfg
+
+                    if s_bounds and l_bounds:
+                        closing_debit_per_share = max(s_bounds[1] - l_bounds[0], 0.0)
+                        conservative_debit += min(w_width, closing_debit_per_share) * w_qty * 100.0
+                    elif self._is_expiring_today():
+                        spot = self._fetch_underlying_price()
+                        if spot is not None and math.isfinite(spot) and s_strike is not None:
+                            right = key[0]
+                            intrinsic = (float(s_strike) - spot) if right == "put" else (spot - float(s_strike))
+                            if intrinsic > 0:
+                                conservative_debit += min(w_width, intrinsic) * w_qty * 100.0
+
+            threshold = self._entry_credit_cash * (1 + self.parameters["stop_loss_mult"])
+            if conservative_debit > 0 and conservative_debit >= threshold:
+                self._close_all_options(exit_reason="STOP_LOSS")
+            else:
                 logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
                 self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
-                return
-            marked_legs.append((signed_quantity, midpoint))
+            return
         current_value = signed_basket_value(marked_legs)
         pnl = credit_strategy_pnl(self._entry_credit_cash, current_value)
         if pnl is None:
@@ -1226,10 +1292,23 @@ class SPXIronCondor(Strategy):
                 reprice_count = previous.reprice_count + 1
                 replacement_of = previous.package_id
             legs = [(asset, -signed_quantity) for asset, signed_quantity in self._owned_legs]
-            price = self._package_price(legs, order_type="debit")
+            try:
+                price = self._package_price(legs, order_type="debit")
+            except Exception as error:
+                logger.warning("Could not price closing package: %s", error)
+                price = None
             if price is None or price <= 0:
-                logger.warning("Complete quotes are required before closing the package.")
-                return
+                urgent = (
+                    self._is_expiring_today()
+                    or self._pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"}
+                )
+                if not urgent:
+                    logger.warning("Complete quotes are required before closing the package.")
+                    return
+                price = self._emergency_close_debit_fallback(legs)
+                if price is None:
+                    logger.error("Cannot establish a bounded emergency close price; retaining management.")
+                    return
             order_type = "debit"
             if reprice_count > self._close_max_reprices and self._close_allow_market:
                 order_type = "market"
@@ -1251,6 +1330,70 @@ class SPXIronCondor(Strategy):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+
+    def _emergency_close_debit_fallback(self, legs: list[tuple[Asset, int]]) -> float | None:
+        """Bound an emergency debit limit strictly by wing_width and credit multiplier."""
+        try:
+            width = float(self.parameters.get("wing_width", 0.0))
+            multiplier = float(os.getenv("IC_EMERGENCY_CLOSE_MAX_DEBIT_MULT", "3.0"))
+            if not math.isfinite(width) or not math.isfinite(multiplier) or width <= 0 or multiplier <= 0:
+                return None
+            quantity = max((abs(qty) for _, qty in legs), default=1)
+            if quantity <= 0:
+                return None
+
+            entry_credit_per_share = 0.0
+            if getattr(self, "_entry_credit_cash", None) and self._entry_credit_cash > 0:
+                entry_credit_per_share = self._entry_credit_cash / (quantity * 100.0)
+            elif getattr(self, "_entry_credit", None) and self._entry_credit > 0:
+                entry_credit_per_share = float(self._entry_credit)
+
+            credit_target = entry_credit_per_share * multiplier if entry_credit_per_share > 0 else 0.0
+
+            paired_debit = 0.0
+            wings: dict[tuple[Any, Any], dict[str, Any]] = defaultdict(dict)
+            for asset, signed_qty in legs:
+                right = getattr(asset, "right", None)
+                expiration = getattr(asset, "expiration", None)
+                if right:
+                    right = str(right).lower()
+                key = (right, expiration)
+                if signed_qty > 0:
+                    wings[key]["buy_leg"] = (asset, signed_qty)
+                else:
+                    wings[key]["sell_leg"] = (asset, signed_qty)
+
+            for key, wing in wings.items():
+                buy_item = wing.get("buy_leg")
+                sell_item = wing.get("sell_leg")
+                if buy_item and sell_item:
+                    try:
+                        buy_bounds = self._quote_bounds(self._fetch_quote(buy_item[0]))
+                    except Exception:
+                        buy_bounds = None
+                    try:
+                        sell_bounds = self._quote_bounds(self._fetch_quote(sell_item[0]))
+                    except Exception:
+                        sell_bounds = None
+                    w_qty = min(abs(buy_item[1]), abs(sell_item[1]))
+                    if buy_bounds and sell_bounds:
+                        w_debit = max(buy_bounds[1] - sell_bounds[0], 0.0)
+                        paired_debit += min(width, w_debit) * (w_qty / quantity)
+                    elif self._is_expiring_today():
+                        spot = self._fetch_underlying_price()
+                        if spot is not None and math.isfinite(spot):
+                            right = key[0]
+                            short_strike = getattr(buy_item[0], "strike", None)
+                            if short_strike is not None:
+                                intrinsic = (float(short_strike) - spot) if right == "put" else (spot - float(short_strike))
+                                if intrinsic > 0:
+                                    paired_debit += min(width, intrinsic) * (w_qty / quantity)
+
+            fallback = max(credit_target, paired_debit, 0.01)
+            final_price = round(min(width, fallback), 2)
+            return final_price if final_price > 0 else round(width, 2)
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            return None
 
     def _strategy_id(self) -> str:
         return str(
@@ -2017,10 +2160,12 @@ class SPXIronCondor(Strategy):
         try:
             from trade_logger import record_trade_entry
 
-            strikes = {
-                f"{json.loads(leg['asset_key'])['right']}_{index}": json.loads(leg["asset_key"])["strike"]
-                for index, leg in enumerate(basket.legs, start=1)
-            }
+            strikes = {}
+            for leg in basket.legs:
+                asset = json.loads(leg["asset_key"])
+                right = str(asset["right"]).lower()
+                side = "long" if int(leg["filled_signed_quantity"]) > 0 else "short"
+                strikes[f"{side}_{right}"] = asset["strike"]
             opening_cash = float(basket.opening_cash_flow or 0.0)
             quantity = max(abs(int(leg["filled_signed_quantity"])) for leg in basket.legs)
             self._current_trade_id = record_trade_entry(
