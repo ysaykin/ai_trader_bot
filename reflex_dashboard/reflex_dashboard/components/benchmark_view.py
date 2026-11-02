@@ -4,6 +4,7 @@ Fully responsive across mobile, tablet, and desktop screens.
 """
 
 import reflex as rx
+from ..styles.numeric import numeric_color, numeric_text
 from ..state import DashboardState
 from ..styles.theme import (
     SURFACE_DARK,
@@ -26,8 +27,8 @@ def benchmark_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("LUMIBOT RETURN", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.benchmark_lumibot_return, size={"initial": "5", "sm": "6"}, color=GREEN, class_name="tabular-nums"),
-                    rx.text(DashboardState.benchmark_closed_trades, size="1", color=TEXT_MUTED),
+                    rx.heading(numeric_text(DashboardState.benchmark_lumibot_return), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.benchmark_lumibot_return), class_name="tabular-nums"),
+                    rx.text(numeric_text(DashboardState.benchmark_closed_trades), size="1", color=numeric_color(DashboardState.benchmark_closed_trades)),
                     spacing="1",
                 ),
                 style=KPI_CARD_STYLE,
@@ -35,7 +36,7 @@ def benchmark_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("S&P 500 (SPY)", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.benchmark_spy_return, size={"initial": "5", "sm": "6"}, color=CYAN, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.benchmark_spy_return), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.benchmark_spy_return), class_name="tabular-nums"),
                     rx.text("Buy & Hold", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -44,7 +45,7 @@ def benchmark_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("ALPHA (α)", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.benchmark_alpha, size={"initial": "5", "sm": "6"}, color=GREEN, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.benchmark_alpha), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.benchmark_alpha), class_name="tabular-nums"),
                     rx.text("Excess Return", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -53,7 +54,7 @@ def benchmark_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("BETA (β)", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.benchmark_beta, size={"initial": "5", "sm": "6"}, color=INDIGO, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.benchmark_beta), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.benchmark_beta), class_name="tabular-nums"),
                     rx.text("Delta Neutral", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -62,7 +63,7 @@ def benchmark_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("SHARPE RATIO", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.benchmark_sharpe, size={"initial": "5", "sm": "6"}, color=GREEN, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.benchmark_sharpe), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.benchmark_sharpe), class_name="tabular-nums"),
                     rx.text("Annualized", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -99,28 +100,28 @@ def benchmark_view() -> rx.Component:
                 rx.grid(
                     rx.box(
                         rx.text("Sortino Ratio", size="1", color=TEXT_MUTED),
-                        rx.text(DashboardState.benchmark_sortino, size="3", weight="bold", color=GREEN, class_name="tabular-nums"),
+                        rx.text(numeric_text(DashboardState.benchmark_sortino), size="3", weight="bold", color=numeric_color(DashboardState.benchmark_sortino), class_name="tabular-nums"),
                         padding="10px 12px",
                         background_color="#0C101A",
                         border_radius="6px",
                     ),
                     rx.box(
                         rx.text("Max Strategy Drawdown", size="1", color=TEXT_MUTED),
-                        rx.text(DashboardState.benchmark_max_strategy_dd, size="3", weight="bold", color=CRIMSON, class_name="tabular-nums"),
+                        rx.text(numeric_text(DashboardState.benchmark_max_strategy_dd), size="3", weight="bold", color=numeric_color(DashboardState.benchmark_max_strategy_dd), class_name="tabular-nums"),
                         padding="10px 12px",
                         background_color="#0C101A",
                         border_radius="6px",
                     ),
                     rx.box(
                         rx.text("Max S&P 500 Drawdown", size="1", color=TEXT_MUTED),
-                        rx.text(DashboardState.benchmark_max_spy_dd, size="3", weight="bold", color=CRIMSON, class_name="tabular-nums"),
+                        rx.text(numeric_text(DashboardState.benchmark_max_spy_dd), size="3", weight="bold", color=numeric_color(DashboardState.benchmark_max_spy_dd), class_name="tabular-nums"),
                         padding="10px 12px",
                         background_color="#0C101A",
                         border_radius="6px",
                     ),
                     rx.box(
                         rx.text("Correlation with SPY", size="1", color=TEXT_MUTED),
-                        rx.text(DashboardState.benchmark_correlation, size="3", weight="bold", color=CYAN, class_name="tabular-nums"),
+                        rx.text(numeric_text(DashboardState.benchmark_correlation), size="3", weight="bold", color=numeric_color(DashboardState.benchmark_correlation), class_name="tabular-nums"),
                         padding="10px 12px",
                         background_color="#0C101A",
                         border_radius="6px",

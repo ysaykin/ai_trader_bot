@@ -1,5 +1,49 @@
 # Implementation task plan
 
+## Position workspace implementation, 2026-11-01
+
+Implement the reviewed position workflow in the active Reflex dashboard. Preserve
+the existing execution fixes and the user's uncommitted task-plan updates.
+
+1. Read durable package fills through a read-only SQLite snapshot. Build a pure
+   position model in `dashboard/positions.py`, with a stable trade identity,
+   signed leg inventory, open and realized P&L, fee provenance, and reconciliation.
+2. Join broker contracts and quotes to confirmed ownership. Keep unmatched
+   inventory visible and mark missing or conflicting data unavailable.
+3. Add strategy/structure/underlying/expiry filters, expandable grouped trades,
+   current strategy comparisons, and actual-leg expiration payoff charts.
+4. Reuse the shared numeric formatting policy and make Positions the landing view.
+5. Verify ledger lifecycle and valuation with deterministic fixtures, compile
+   Reflex, exercise the UI, and update backlog statuses only for verified scope.
+
+Design: the UI calls one position-snapshot adapter and derives filtered views
+from that immutable snapshot. Financial calculations stay outside Reflex state.
+Grouping broker symbols heuristically was rejected because shared contracts can
+belong to different trades. Confirmed ledger trade IDs establish ownership;
+legacy close fills are linked only when exactly one compatible owner exists.
+Uncertain links remain visible as reconciliation issues. Expiration curves are
+restricted to one underlying and expiry, with fee estimates labeled separately
+from reported fees. No execution or account configuration changes are needed.
+
+Implemented and verified on 2026-11-01. The running dashboard now groups 11
+held trades and provides structure/strategy filters, leg expansion, current
+strategy comparison and actual-leg expiration graphs. Fees identify their
+reported or estimated source. Negative values use shared sign-aware colors.
+Read-only ownership and grouped overview tasks are complete. Extended filters,
+historical comparisons, theoretical today/mixed-expiry analysis and remaining
+legacy telemetry gaps retain explicit follow-ups in `.scrum/TASKS.yaml`.
+
+Verification: 71 tests and 6 subtests pass across `test_position_workspace.py`,
+`test_dashboard_integrity.py`, `test_reflex_dashboard.py`, `test_dashboard.py`,
+`test_position_ledger.py`, and `test_iron_condor_math.py`. Reflex 0.10.1
+`compile --dry` passes. The isolated Python 3.12 environment is under `/tmp`;
+existing virtual environments point to Linux interpreters unavailable on macOS.
+The dashboard service was restarted to load the external read-only position
+module; the trading bot was not restarted. Browser verification also exposed
+inconsistent leg marks implying loss beyond the condor's defined payoff range.
+Those baskets now show unavailable marked P&L and a quote-quality explanation;
+confirmed-fill expiration analysis remains available.
+
 ## Task
 
 Implement the approved Tradier configuration, durable iron-condor ownership and
@@ -77,36 +121,46 @@ the pending production dashboard features.
 
 ## Top 10 Prioritized Bug Backlog (Frontend & Backend), 2026-10-30
 
-1. **[P0] `bug-01-panic-liquidation-import-and-flatten` — Emergency Panic Liquidation crashes with `ImportError` and `TradierClient.emergency_flatten_positions()` is a no-op stub**
+1. **[Completed] [P0] `bug-01-panic-liquidation-import-and-flatten` — Emergency Panic Liquidation crashes with `ImportError` and `TradierClient.emergency_flatten_positions()` is a no-op stub**
    - `reflex_dashboard/reflex_dashboard/state.py` (`execute_panic_liquidation`, lines 475–485) imports non-existent `BrokerClient` from `dashboard.broker_client` and calls `client.close_all_positions()`.
    - `dashboard/broker_client.py` (`TradierClient.emergency_flatten_positions`, lines 256–260) only cancels open orders and returns `True` without submitting closing orders for open positions.
+   - *Status: Completed.* Fixed in `reflex_dashboard/reflex_dashboard/state.py` and `dashboard/broker_client.py`.
 
-2. **[P0] `bug-02-dynamic-leg-count-fee-accounting` — Vertical spread (2-leg) trades are charged 4-leg Iron Condor fees in `SPXIronCondor` and `trade_logger.py`**
+2. **[Completed] [P0] `bug-02-dynamic-leg-count-fee-accounting` — Vertical spread (2-leg) trades are charged 4-leg Iron Condor fees in `SPXIronCondor` and `trade_logger.py`**
    - `strategies/iron_condor.py` (lines 800, 871, 1824, 1900, 1929) and `trade_logger.py` (lines 467, 566, 645, 670, 674) hardcode `4 * qty * fee_rate` (or `8 * qty * fee_rate` roundtrip) even on 2-leg `bull_put` / `bear_call` vertical spreads, distorting live `net_pnl` exit triggers and logged P&L.
+   - *Status: Completed.* Fee calculation dynamically scales with actual leg count across live management and logging.
 
-3. **[P0] `bug-03-partial-fill-terminal-order-reconciliation` — Partial fills followed by broker order cancellation/rejection/expiration leave baskets permanently stuck in `partial` state**
+3. **[Completed] [P0] `bug-03-partial-fill-terminal-order-reconciliation` — Partial fills followed by broker order cancellation/rejection/expiration leave baskets permanently stuck in `partial` state**
    - `strategies/iron_condor.py` (`_reconcile_inflight_orders`, lines 1598–1635) only clears terminal orders when `refreshed.state == "submitted"` and all leg fills are `0`, permanently blocking `_manage_position()`, `apply_policy_action()`, and `_reconcile_broker_state()` if a partially filled order is canceled or expires.
+   - *Status: Completed.* `resolve_partial_package` reconciles and unwinds or journals terminal partial packages.
 
-4. **[P0] `bug-04-neural-strategy-switch-entry-times` — `_apply_neural_strategy_switch` fails to parse multi-slot `entry_time` strings and leaves `_entry_times` stale**
+4. **[Completed] [P0] `bug-04-neural-strategy-switch-entry-times` — `_apply_neural_strategy_switch` fails to parse multi-slot `entry_time` strings and leaves `_entry_times` stale**
    - `strategies/iron_condor.py` (lines 1085–1090) runs `map(int, str(target_spec["entry_time"]).split(":"))`, which raises `ValueError` on comma-separated schedules (`"09:45, 09:50, ..."`) and never updates `self._entry_times`.
+   - *Status: Completed.* Fixed with `set_run_times()` handling multi-slot schedules during switches.
 
-5. **[P1] `bug-05-config-view-env-key-alignment` — Config view reads/writes mismatched `.env` keys (`BROKER`, `TRADIER_ACCOUNT_ID`, `GLOBAL_RISK_CAP`)**
+5. **[Completed] [P1] `bug-05-config-view-env-key-alignment` — Config view reads/writes mismatched `.env` keys (`BROKER`, `TRADIER_ACCOUNT_ID`, `GLOBAL_RISK_CAP`)**
    - `reflex_dashboard/reflex_dashboard/state.py` (lines 493–512) and `reflex_dashboard/reflex_dashboard/data/adapters.py` (lines 1082–1091) write keys that `main.py` ignores (`TRADING_BROKER`, `TRADIER_ACCOUNT_NUMBER`, `IC_MAX_POSITION_RISK`, `IC_MAX_PORTFOLIO_RISK`), and omit `TRADIER_PAPER`.
+   - *Status: Completed.* Config view reads and writes canonical runtime `.env` keys and exposes paper mode toggle.
 
-6. **[P1] `bug-06-reflex-trade-event-aggregation-and-win-rate` — `get_reconciled_trades()` overwrites trade events via `dict.update()` and dilutes win rate with open positions**
+6. **[Completed] [P1] `bug-06-reflex-trade-event-aggregation-and-win-rate` — `get_reconciled_trades()` overwrites trade events via `dict.update()` and dilutes win rate with open positions**
    - `reflex_dashboard/reflex_dashboard/data/adapters.py` (lines 471–504) overwrites entry timestamps and fees on `EXIT` and ignores `ADDITION` and `ADJUSTMENT` cash flows; lines 666 and 761 divide closed wins by `closed + open` trades.
+   - *Status: Completed.* Aggregates multi-event trade lifecycle and separates open from closed trades for win rate calculation.
 
-7. **[P1] `bug-07-ledger-strike-keys-and-multi-package-attribution` — Ledger entry strike keys mismatch dashboard formatter (`put_1` vs `long_put`) and multi-package cash/risk attribution drops credit**
+7. **[Completed] [P1] `bug-07-ledger-strike-keys-and-multi-package-attribution` — Ledger entry strike keys mismatch dashboard formatter (`put_1` vs `long_put`) and multi-package cash/risk attribution drops credit**
    - `strategies/iron_condor.py` (lines 1885–1888) writes `f"{right}_{index}"` keys so `format_strikes()` renders `" / | / "`; `strategies/position_ledger.py` (lines 607, 740–744) zeroes `opening_credit` when holding multiple expirations and closes all open packages at once.
+   - *Status: Completed.* Standardized canonical strike keys and isolated multi-expiry risk scoping.
 
-8. **[P1] `bug-08-trajectory-logger-scaling-and-session-tick-count` — `TrajectoryLogger` omits contract quantity multiplier, hardcodes `$5,000` risk cap, and neural UI counts non-session JSONL lines**
+8. **[Completed] [P1] `bug-08-trajectory-logger-scaling-and-session-tick-count` — `TrajectoryLogger` omits contract quantity multiplier, hardcodes `$5,000` risk cap, and neural UI counts non-session JSONL lines**
    - `trade_logger.py` (lines 274, 298) caps `max_position_risk` at `5000.0` and forgets `* book["quantity"]` in live P&L state; `reflex_dashboard/reflex_dashboard/data/adapters.py` (lines 1010–1018) counts all historical lines in `trajectories.jsonl` instead of current-session `SNAPSHOT` rows.
+   - *Status: Completed.* Quantity-scaled P&L state, configured risk limit respected, and tick counter filtered by current session SNAPSHOTs.
 
-9. **[P1] `bug-09-ui-telemetry-fallbacks-and-sign-colors` — Cost-basis quote fallback fabricates `$0.00` P&L, gauges/header use hardcoded static labels/colors, and negative P&L/drawdown renders in green**
+9. **[Partially Completed / Pending Legacy Streamlit Parity] [P1] `bug-09-ui-telemetry-fallbacks-and-sign-colors` — Cost-basis quote fallback fabricates `$0.00` P&L, gauges/header use hardcoded static labels/colors, and negative P&L/drawdown renders in green**
    - `reflex_dashboard/reflex_dashboard/data/adapters.py` (line 304) and `dashboard/broker_client.py` (line 194) substitute cost basis when quotes are missing; `positions_view.py:62`, `ab_lab_view.py:171,243`, `benchmark_view.py:106`, `risk_gauges.py:86,99,154`, and `header.py:63,83` use hardcoded colors and static strings.
+   - *Status: Partially Completed.* Reflex dashboard defects are completed under `dashboard-telemetry-validity`, `dashboard-signed-value-formatting`, and `dashboard-configured-risk-telemetry`. Legacy Streamlit view (`dashboard/app.py` / `dashboard/broker_client.py`) parity remains pending.
 
-10. **[P2] `bug-10-legacy-react-form-and-mock-backend-accounting` — Legacy React form inputs lack `name` attributes and FastAPI mock backend has inverted cash/credit accounting**
+10. **[Completed] [P2] `bug-10-legacy-react-form-and-mock-backend-accounting` — Legacy React form inputs lack `name` attributes and FastAPI mock backend has inverted cash/credit accounting**
     - `dashboard/src/App.jsx` (lines 41–54, 136–191) uses `FormData` on inputs without `name` attributes and lacks `onSubmit`/`onClick` handlers; `backend/app.py` (lines 23, 53, 79) miscalculates cash, double-multiplies credit by quantity, and subtracts credit from equity.
+    - *Status: Completed.* Form state handlers and input bindings added to `App.jsx`, and accounting math corrected in `backend/app.py`.
 
 ## Approved bounded implementation, 2026-10-30
 
@@ -229,3 +283,79 @@ rollback with `git -C /workspace/lumibot revert --no-edit HEAD`.
 - **`bug-03-partial-fill-terminal-order-reconciliation`**: Completed and verified. Implemented `PositionLedger.resolve_partial_package()` transitioning partially filled packages with terminal broker orders (`canceled`, `rejected`, `expired`, `failed`) to active `"open"` (for entry/add) or `"canceled"` (for close/trim), unblocking position management and closing submissions. Fixed cumulative fill pricing in `PositionLedger.record_fill` and deduplicated trade journal events.
 - **`bug-04-neural-strategy-switch-entry-times`**: Completed and verified. Integrated `self.set_run_times()` into `SPXIronCondor._apply_neural_strategy_switch()` to parse multi-slot comma-separated entry schedules, safely synchronizing `self._entry_times` and `self._entry_time`.
 - **Verification**: Complete test suite passed (198 passed, 1 skipped, 76 subtests passed) in `tests/test_reflex_dashboard.py`, `tests/test_iron_condor_execution_safety.py`, `tests/test_trade_logger_win_rate.py`, `tests/test_neural_strategy_switch.py`, and the rest of the test suite. All modified Python files passed `python3 -m py_compile`, and `git diff --check` passed cleanly.
+
+## Focus the dynamic comparison, 2026-11-01
+
+The sandbox currently selects 29 strategies, including the 20 plain IC variants.
+Make StrategyBro the first entry strategy and compare it with TrendFlow, Skew
+Dynamic, VolCrush, ORB, Neural Pure, and one plain IC control.
+
+1. Make the focused roster the default and retain the full grid as an opt-in.
+   Apply count limits after prioritizing StrategyBro and the dynamic peers.
+2. Recover excluded ledger owners for position management only. Prevent these
+   owners from opening or adding exposure while retaining their normal exits.
+3. Add a rerunnable roster inspector and offline selection/recovery coverage.
+4. Verify the actual sandbox ledger and runner before activating the new roster.
+5. Keep unrelated dashboard work and historical trade/position ownership intact.
+
+Implemented and verified:
+
+- Default entries are IC_V25, V26, V27, V28, V29, V22, and V19 in that order.
+  Full-grid and explicit static-test opt-ins remain covered.
+- Real ledger inspection identified 22 excluded owners with active packages.
+  Startup retained them as management-only strategies and initialized StrategyBro
+  as the primary host. Their entry, addition, and strategy-switch paths are blocked.
+- Research snapshots and policy routing exclude management-only owners.
+- The dashboard displays seven unique comparison rows with StrategyBro first,
+  uses the configured count, and calculates win rate from selected strategies.
+  Historical journals and the Positions workspace remain available.
+- 174 targeted offline tests passed, covering selection, shared data, management
+  recovery, execution regressions, trajectories, policy inference, and dashboard
+  comparison data. Python compilation and `git diff --check` passed.
+- Browser inspection confirmed the seven-row dashboard, and sandbox startup logs
+  confirmed seven entry-enabled strategies and 22 management-only owners.
+  The market was closed during activation; no trading-performance result is claimed.
+
+### Implementation progress — 2026-11-02
+
+- Applied the shared ledger path resolver and common execution-lock path; configured both Compose services to use the shared mounted ledger.
+- Packaged the existing emergency recovery client dependencies in the bot image.
+- Retained unbalanced terminal opening fills as partial, using per-leg fill ratios to identify balanced packages.
+- Verification: `python3 -m py_compile` passed for the changed Python files; ledger, emergency liquidation and dashboard tests passed (26); execution safety, routing, regression and incubator tests passed (103 plus 50 subtests). Jev-bot baseline tests passed (38 plus 17 subtests) using Lumibot's virtual environment.
+- Remaining: complete the broker-confirmed fill recovery, entry-cancellation barrier, expiry pricing, neural opt-in, container smoke suite, and the remaining planned integration tests and documentation. The supplied plan was truncated during the expiry-pricing instructions.
+
+
+## Independent concurrent positions, 2026-11-02
+
+Implement the approved multi-tranche review and push only after validation.
+Preserve existing workspace changes and broker host routing.
+
+Design: a persistent position owns inventory, entry basis, trade identity,
+management settings, and exit intent. Every submission has its own package ID
+and an explicit position ID. Strategy state contains a map of position runtimes;
+management and fill processing select a position explicitly. Aggregate values
+are telemetry, never inputs to an individual position's exits.
+
+Alternatives: a dictionary of baskets alone cannot link trims and replacements
+to inventory. Separate broker-registered strategies per tranche would change
+routing and strategy risk ownership. Keep one strategy and explicit position
+ownership in the ledger instead.
+
+1. Add an additive, repeatable ledger migration with conservative legacy links.
+   Ambiguous legacy adjustments block new exposure instead of guessing ownership.
+2. Calculate remaining credit and risk per position, reserve unfilled entry
+   quantities, and enforce capacity, risk, spacing, and contract reservations
+   together under the shared execution gate.
+3. Scope strategy management, close retries, journals, policy adjustments, and
+   restart recovery to one position. Keep broker host tags unchanged.
+4. Add deterministic regression tests for distinct/shared strikes, closing A
+   while B survives, restart, terminal partial fills, duplicate observations,
+   missing broker orders, concurrent submissions, and legacy migration.
+5. Run focused and full offline suites, inspect the actual commit contents,
+   evaluate failures, and push a dedicated branch when the remote is supplied.
+
+Acceptance: exact position inventory, basis, identity, settings, and exit intent
+survive restart; one position's exit cannot alter another; pending quantities
+continue consuming capacity and risk. Concurrency is configurable, with a
+backward-compatible default of one and a 60-minute entry spacing default.
+No private credentials, live configuration, or broker orders are changed.

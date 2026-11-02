@@ -5,6 +5,7 @@ along with strategy aggregates and a 50-trade highlight log with CSV export capa
 """
 
 import reflex as rx
+from ..styles.numeric import numeric_color, numeric_text
 from ..state import DashboardState
 from ..styles.theme import (
     SURFACE_DARK,
@@ -29,9 +30,9 @@ def incubator_view() -> rx.Component:
             # Metric 1: Active Grid
             rx.box(
                 rx.vstack(
-                    rx.text("ACTIVE GRID", size="1", color=TEXT_MUTED, weight="bold"),
+                    rx.text("STRATEGY COMPARISON", size="1", color=TEXT_MUTED, weight="bold"),
                     rx.heading(DashboardState.active_grid_str, size={"initial": "5", "sm": "6"}, color=CYAN, class_name="tabular-nums"),
-                    rx.text("24 Configured Variants", size="1", color=TEXT_MUTED),
+                    rx.text(DashboardState.configured_variant_count, " configured strategies", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
                 style=KPI_CARD_STYLE,
@@ -50,7 +51,7 @@ def incubator_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("OVERALL WIN RATE", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.overall_win_rate, size={"initial": "5", "sm": "6"}, color=GREEN, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.overall_win_rate), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.overall_win_rate), class_name="tabular-nums"),
                     rx.text("Net positive trades", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -60,7 +61,7 @@ def incubator_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("FEES ($0.40/LEG)", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.total_fees_str, size={"initial": "5", "sm": "6"}, color=AMBER, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.total_fees_str), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.total_fees_str), class_name="tabular-nums"),
                     rx.text("Deducted from cash", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -70,7 +71,7 @@ def incubator_view() -> rx.Component:
             rx.box(
                 rx.vstack(
                     rx.text("NET REALIZED P&L", size="1", color=TEXT_MUTED, weight="bold"),
-                    rx.heading(DashboardState.total_net_pnl_str, size={"initial": "5", "sm": "6"}, color=GREEN, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.total_net_pnl_str), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.total_net_pnl_str), class_name="tabular-nums"),
                     rx.text("Bottom line return", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
@@ -120,14 +121,14 @@ def incubator_view() -> rx.Component:
                                 width="100%",
                             ),
                             rx.hstack(
-                                rx.heading(DashboardState.ai_aggregate["net_pnl_str"], size="5", color=CYAN, class_name="tabular-nums font-mono"),
+                                rx.heading(numeric_text(DashboardState.ai_aggregate["net_pnl_str"]), size="5", color=numeric_color(DashboardState.ai_aggregate["net_pnl_str"]), class_name="tabular-nums font-mono"),
                                 rx.badge(DashboardState.ai_aggregate["win_rate"], color_scheme="jade", size="1"),
                                 align="baseline",
                                 spacing="2",
                             ),
                             rx.grid(
                                 rx.box(rx.text("Trades", size="1", color=TEXT_MUTED), rx.text(DashboardState.ai_aggregate["trades"], size="1", weight="bold")),
-                                rx.box(rx.text("Fees", size="1", color=TEXT_MUTED), rx.text(DashboardState.ai_aggregate["fees_str"], size="1", color=AMBER)),
+                                rx.box(rx.text("Fees", size="1", color=TEXT_MUTED), rx.text(numeric_text(DashboardState.ai_aggregate["fees_str"]), size="1", color=numeric_color(DashboardState.ai_aggregate["fees_str"]))),
                                 rx.box(rx.text("Regime", size="1", color=TEXT_MUTED), rx.text("Adaptive", size="1", color=CYAN)),
                                 columns="3",
                                 width="100%",
@@ -155,14 +156,14 @@ def incubator_view() -> rx.Component:
                                 width="100%",
                             ),
                             rx.hstack(
-                                rx.heading(DashboardState.top5_aggregate["net_pnl_str"], size="5", color=GREEN, class_name="tabular-nums font-mono"),
+                                rx.heading(numeric_text(DashboardState.top5_aggregate["net_pnl_str"]), size="5", color=numeric_color(DashboardState.top5_aggregate["net_pnl_str"]), class_name="tabular-nums font-mono"),
                                 rx.badge(f"{DashboardState.top5_aggregate['avg_win_rate']} Win Rate", color_scheme="jade", size="1"),
                                 align="baseline",
                                 spacing="2",
                             ),
                             rx.grid(
                                 rx.box(rx.text("Combined Volume", size="1", color=TEXT_MUTED), rx.text(f"{DashboardState.top5_aggregate['trades']} Trades", size="1", weight="bold")),
-                                rx.box(rx.text("Total Fees", size="1", color=TEXT_MUTED), rx.text(DashboardState.top5_aggregate["fees_str"], size="1", color=AMBER)),
+                                rx.box(rx.text("Total Fees", size="1", color=TEXT_MUTED), rx.text(numeric_text(DashboardState.top5_aggregate["fees_str"]), size="1", color=numeric_color(DashboardState.top5_aggregate["fees_str"]))),
                                 rx.box(rx.text("Top Variant", size="1", color=TEXT_MUTED), rx.text(DashboardState.top5_aggregate["best_variant"], size="1", color=GREEN)),
                                 columns="3",
                                 width="100%",
@@ -190,14 +191,14 @@ def incubator_view() -> rx.Component:
                                 width="100%",
                             ),
                             rx.hstack(
-                                rx.heading(DashboardState.bottom3_aggregate["net_pnl_str"], size="5", color=RED, class_name="tabular-nums font-mono"),
+                                rx.heading(numeric_text(DashboardState.bottom3_aggregate["net_pnl_str"]), size="5", color=numeric_color(DashboardState.bottom3_aggregate["net_pnl_str"]), class_name="tabular-nums font-mono"),
                                 rx.badge(f"{DashboardState.bottom3_aggregate['avg_win_rate']} Win Rate", color_scheme="crimson", size="1"),
                                 align="baseline",
                                 spacing="2",
                             ),
                             rx.grid(
                                 rx.box(rx.text("Combined Volume", size="1", color=TEXT_MUTED), rx.text(f"{DashboardState.bottom3_aggregate['trades']} Trades", size="1", weight="bold")),
-                                rx.box(rx.text("Total Fees", size="1", color=TEXT_MUTED), rx.text(DashboardState.bottom3_aggregate["fees_str"], size="1", color=AMBER)),
+                                rx.box(rx.text("Total Fees", size="1", color=TEXT_MUTED), rx.text(numeric_text(DashboardState.bottom3_aggregate["fees_str"]), size="1", color=numeric_color(DashboardState.bottom3_aggregate["fees_str"]))),
                                 rx.box(rx.text("Lagging Variant", size="1", color=TEXT_MUTED), rx.text(DashboardState.bottom3_aggregate["worst_variant"], size="1", color=RED)),
                                 columns="3",
                                 width="100%",
@@ -230,12 +231,12 @@ def incubator_view() -> rx.Component:
                 rx.flex(
                     rx.hstack(
                         rx.icon("list-ordered", size=18, color=CYAN),
-                        rx.heading("Curated Strategy Leaderboard (AI, Top 5 & Bottom 3 Performers)", size="3", color=TEXT_PRIMARY, weight="bold"),
+                        rx.heading("StrategyBro & Dynamic Strategy Comparison", size="3", color=TEXT_PRIMARY, weight="bold"),
                         align="center",
                         spacing="2",
                     ),
                     rx.hstack(
-                        rx.badge("9 Curated Variants", color_scheme="jade", variant="surface", size="1"),
+                        rx.badge("Selected strategies", color_scheme="jade", variant="surface", size="1"),
                         rx.text("(Swipe table horizontally on mobile)", size="1", color=TEXT_MUTED, display={"initial": "block", "md": "none"}),
                         align="center",
                         spacing="2",
@@ -247,8 +248,8 @@ def incubator_view() -> rx.Component:
                     gap="2",
                 ),
                 rx.text(
-                    "Displaying only the high-signal spectrum: the Pure Neural AI strategy alongside the Top 5 leaders and Bottom 3 underperformers. "
-                    "Uninformative middle-ranking variants are excluded from the primary table.",
+                    "Compare StrategyBro with the dynamic peers, Neural Pure, and an IC control. "
+                    "Retired strategies remain in Positions while their existing trades are managed.",
                     size="2",
                     color=TEXT_MUTED,
                 ),
@@ -281,17 +282,17 @@ def incubator_view() -> rx.Component:
                                     rx.table.cell(rx.badge(row["rank_badge"], color_scheme=row["badge_color"], size="1", variant="surface")),
                                     rx.table.cell(rx.text(row["variant"], weight="bold", color=CYAN, class_name="font-mono nowrap")),
                                     rx.table.cell(rx.badge(row["structure_label"], color_scheme="gray", size="1")),
-                                    rx.table.cell(rx.text(row["delta"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["delta"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["wing"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(row["dte"], color_scheme="gray", size="1")),
                                     rx.table.cell(rx.text(row["profit_target"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["stop_loss"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["closed_trades"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["win_rate"], weight="bold", color=row["win_rate_color"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["gross_pnl_str"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["net_pnl_str"], weight="bold", color=row["status_color"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(row["net_ror_pct"], weight="bold", color=CYAN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["win_rate"]), weight="bold", color=numeric_color(row["win_rate"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["gross_pnl_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["fees_str"]), color=numeric_color(row["fees_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["net_pnl_str"]), weight="bold", color=numeric_color(row["net_pnl_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["net_ror_pct"]), weight="bold", color=numeric_color(row["net_ror_pct"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(row["status"], color_scheme=row["status_color"], size="1")),
                                     style=TABLE_ROW_STYLE,
                                 )
@@ -381,13 +382,13 @@ def incubator_view() -> rx.Component:
                                     rx.table.cell(rx.text(t["strategy_label"], weight="bold", color=CYAN, class_name="nowrap")),
                                     rx.table.cell(rx.badge(t["structure_label"], color_scheme="gray", size="1")),
                                     rx.table.cell(rx.text(t["strikes_display"], class_name="font-mono text-xs nowrap")),
-                                    rx.table.cell(rx.text(t["quantity"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(t["quantity"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(t["credit_str"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(t["exit_reason"], color_scheme=t["net_pnl_color"], size="1")),
-                                    rx.table.cell(rx.text(t["gross_pnl_str"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(t["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(t["net_pnl_str"], weight="bold", color=t["net_pnl_color"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(t["net_ror_str"], weight="bold", color=CYAN, class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(t["gross_pnl_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(t["fees_str"]), color=numeric_color(t["fees_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(t["net_pnl_str"]), weight="bold", color=numeric_color(t["net_pnl_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(t["net_ror_str"]), weight="bold", color=numeric_color(t["net_ror_str"]), class_name="tabular-nums nowrap")),
                                     style=TABLE_ROW_STYLE,
                                 )
                             )

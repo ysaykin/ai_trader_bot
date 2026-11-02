@@ -34,6 +34,8 @@ This document is the **single source of truth** for all user-facing features sup
 | **BRK-04** | Tradier Log Sanitization & Polling Interval | Broker Connectivity | ✅ Active | Zero credential leakage in logs & configurable polling cadence | Connection Log Output & Polling Interval |
 | **ENG-08** | Confirmed Opening Credit & Roll/DTE Priority | Core Engine | ✅ Active | Enforce confirmed cash credits & prioritize roll/DTE exits before valuation | Position State & Roll Status Pill |
 | **BRK-05** | Tradier Host Routing & Resilient Close Package Retention | Broker Connectivity | ✅ Active | Atomic package routing with host tags, unique ID/legacy tag recovery & uncertain close locks | Order Routing & Package Recovery |
+| **BRK-06** | In-Lock Panic Halt & Fill Reconciliation Safety | Broker Connectivity | 🔄 In Progress | In-lock halt evaluation, terminal fill verification, and cancellation barrier | Execution Safety & Order Routing |
+| **SYS-03** | Shared Absolute Ledger & Recovery Packaging | DevOps / System | 🔄 In Progress | Common database path, execution lock, and container recovery packaging | Architecture & Container Build |
 | **CFG-01** | Interactive Config & Credentials GUI | Configuration | ✅ Active | Edit and test API keys & risk boundaries live in GUI | Dedicated Broker & Strategy Config Tab |
 | **GUI-01** | Live Engine Status & Session Clock | Dashboard UI | ✅ Active | Know exactly what the bot is doing | Header Status Bar & Market Clock |
 | **GUI-02** | Interactive Visual Risk Dials | Dashboard UI | ✅ Active | At-a-glance capital & cap visibility | Dynamic Risk Gauges (Configured Strategy & Portfolio Caps) |
@@ -366,3 +368,11 @@ This document is the **single source of truth** for all user-facing features sup
 #### `BRK-05`: Tradier Host Routing & Resilient Close Package Retention
 * **User Story**: As an automated trader executing atomic multileg packages across multiple strategy variants on Tradier, I want packages to route using the registered host strategy tag while maintaining discrete package identities and ledger owners, resolving orders by verified parent/child IDs rather than shared tags, and locking uncertain closing orders to prevent duplicate submissions during broker latency or timeouts.
 * **Implementation**: Added normalized `_broker_routing_tag()` derived from the registered host name in `strategies/iron_condor.py`. Restricted `_find_order_by_tag` to unique legacy package tags (`IC_<hex>`) or verified broker IDs, preventing cross-strategy order collisions. When closing package orders are unresolved or missing from active broker queries, set `_recovery_lock = True` to retain contract ownership and prevent duplicate exit order submissions until broker state confirms terminal status.
+
+#### `SYS-03`: Shared Absolute Ledger Resolution & Emergency Recovery Packaging
+* **User Story**: As a platform operator running containerized bot and dashboard services, I want both services to resolve relative ledger paths to the identical shared absolute database and cross-process execution lock, and I want emergency broker recovery dependencies packaged in the trading bot image to prevent `ModuleNotFoundError` during liquidation retries.
+* **Implementation**: Added `resolve_ledger_path()` in `strategies/position_ledger.py` anchoring paths to project root, configured `POSITION_LEDGER_PATH=/app/logs/position_ledger.sqlite3` in `docker-compose.yml`, and added `dashboard/broker_client.py` and `dashboard/presentation.py` to `Dockerfile`.
+
+#### `BRK-06`: In-Lock Panic Halt Verification & Fill Reconciliation Safety
+* **User Story**: As an automated trader, I want the bot to recheck the durable panic halt immediately inside the cross-process execution lock before submitting orders, and retain terminal opening packages with missing or unbalanced fills as partial until cumulative broker evidence is verified.
+* **Implementation**: Relocated panic halt checks in `SPXIronCondor` directly inside `execution_gate()`, enforced verified leg execution evidence before resolving terminal packages in `PositionLedger`, and added a reconciliation check prior to closing restarted entries.

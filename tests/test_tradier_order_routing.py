@@ -155,13 +155,27 @@ class TradierOrderRoutingTests(unittest.TestCase):
         # Tradier returns broker-assigned child IDs on subsequent polling reads.
         broker_children = []
         for index, local_child in enumerate(parent.child_orders):
-            child = Order(
-                identifier=f"broker-child-{index}", strategy=self.host.name,
-                asset=local_child.asset, quantity=2, side=local_child.side,
-                tag=self.host._broker_routing_tag(), status="submitted",
+            right_char = "P" if str(local_child.asset.right).lower() == "put" else "C"
+            opt_symbol = f"XSP261120{right_char}{int(local_child.asset.strike) * 1000:08d}"
+            leg_dict = {
+                "id": f"broker-child-{index}",
+                "class": "option",
+                "symbol": "XSP",
+                "option_symbol": opt_symbol,
+                "side": local_child.side,
+                "quantity": 2,
+                "status": "submitted",
+                "type": "market",
+                "duration": "day",
+                "create_date": "2026-10-31T12:00:00.000Z",
+                "exec_quantity": 0,
+                "avg_fill_price": None,
+                "tag": self.host._broker_routing_tag(),
+            }
+            child = self.broker._parse_broker_order(
+                leg_dict, self.host.name, order_class_override=Order.OrderClass.SIMPLE
             )
             child.parent_identifier = parent.identifier
-            child.filled_quantity = 0
             broker_children.append(child)
         parent.child_orders = broker_children
         self.ledger.bind_broker_children(basket.package_id, parent.child_orders)
@@ -170,28 +184,34 @@ class TradierOrderRoutingTests(unittest.TestCase):
             self.events.append((event, payload))
             if event == "fill":
                 self.host.on_filled_order(**payload)
+            elif event == "partial":
+                self.host.on_partially_filled_order(**payload)
 
         self.subscriber.add_event.side_effect = deliver
         first = parent.child_orders[0]
         self.assertFalse(hasattr(first, "_ledger_order_id"))
-        first.filled_quantity = 1
+        first._raw["exec_quantity"] = 1
+        first._raw["avg_fill_price"] = 0.25
         first.avg_fill_price = 0.25
-        self.broker._on_filled_order(None, first, 0.25, 1, 100)
+        first.status = "partially_filled"
+        self.broker._on_partially_filled_order(None, first, 0.25, 1, 100)
         quantities = self.ledger.owned_quantities(follower.name)
         self.assertEqual(list(quantities.values()), [1])
         self.assertTrue(follower._position_open)
         self.assertFalse(peer._position_open)
         self.assertEqual(self.ledger.owned_quantities(self.host.name), {})
         self.assertEqual(self.ledger.owned_quantities(peer.name), {})
-        self.broker._on_filled_order(None, first, 0.25, 1, 100)
+        self.broker._on_partially_filled_order(None, first, 0.25, 1, 100)
         follower._reconcile_inflight_orders([parent])
         self.assertEqual(self.ledger.owned_quantities(follower.name), quantities)
         self.assertEqual(self.ledger.get_basket(basket.package_id).opening_cash_flow, -25.0)
 
         with patch("trade_logger.record_trade_entry", return_value="confirmed-trade"):
             for child, price in zip(parent.child_orders, (0.25, 1.25, 1.25, 0.25)):
-                child.filled_quantity = 2
+                child._raw["exec_quantity"] = 2
+                child._raw["avg_fill_price"] = price
                 child.avg_fill_price = price
+                child.status = "filled"
                 self.broker._on_filled_order(None, child, price, 2, 100)
         filled = self.ledger.get_basket(basket.package_id)
         self.assertEqual(filled.state, "open")

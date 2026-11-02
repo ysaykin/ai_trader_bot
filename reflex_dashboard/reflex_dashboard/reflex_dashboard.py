@@ -35,12 +35,22 @@ def index() -> rx.Component:
             header(),
 
             # Capital Protection & Risk Gauges
-            risk_gauges_section(),
+            rx.box(
+                rx.accordion.root(
+                    rx.accordion.item(header="Account risk & emergency controls", content=risk_gauges_section(), value="risk"),
+                    type="single", collapsible=True, width="100%",
+                ),
+                padding_x={"initial": "14px", "sm": "24px"}, width="100%",
+            ),
 
             # 10-Tab Navigation System - Horizontally Scrollable on Mobile
             rx.box(
                 rx.tabs.root(
                     rx.tabs.list(
+                        rx.tabs.trigger(
+                            rx.hstack(rx.icon("layers", size=16), rx.text("Positions", class_name="nowrap"), spacing="2"),
+                            value="positions",
+                        ),
                         rx.tabs.trigger(
                             rx.hstack(rx.icon("cpu", size=16), rx.text("Incubator Grid", class_name="nowrap"), spacing="2"),
                             value="incubator",
@@ -60,10 +70,6 @@ def index() -> rx.Component:
                         rx.tabs.trigger(
                             rx.hstack(rx.icon("scale", size=16), rx.text("A/B Lab", class_name="nowrap"), spacing="2"),
                             value="ab_lab",
-                        ),
-                        rx.tabs.trigger(
-                            rx.hstack(rx.icon("layers", size=16), rx.text("Positions & Greeks", class_name="nowrap"), spacing="2"),
-                            value="positions",
                         ),
                         rx.tabs.trigger(
                             rx.hstack(rx.icon("clipboard-list", size=16), rx.text("Orders", class_name="nowrap"), spacing="2"),
@@ -156,7 +162,8 @@ def index() -> rx.Component:
                         padding_top="16px",
                     ),
 
-                    default_value="incubator",
+                    value=DashboardState.current_tab,
+                    on_change=DashboardState.set_tab,
                     width="100%",
                 ),
                 padding={"initial": "0 14px 20px 14px", "sm": "0 24px 24px 24px"},

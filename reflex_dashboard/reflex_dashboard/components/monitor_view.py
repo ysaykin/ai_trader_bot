@@ -5,6 +5,7 @@ keeping the active trading performance view clean and high-signal.
 """
 
 import reflex as rx
+from ..styles.numeric import numeric_color, numeric_text
 from ..state import DashboardState
 from ..styles.theme import (
     SURFACE_DARK,
@@ -137,7 +138,7 @@ def monitor_view() -> rx.Component:
                                 DashboardState.incubator_monitored_rows,
                                 lambda row: rx.table.row(
                                     rx.table.cell(rx.text(row["variant"], weight="bold", color=CYAN, class_name="font-mono nowrap")),
-                                    rx.table.cell(rx.text(row["delta"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(row["delta"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(row["wing"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(row["dte"], color_scheme="gray", size="1")),
                                     rx.table.cell(rx.text(row["profit_target"], class_name="tabular-nums nowrap")),

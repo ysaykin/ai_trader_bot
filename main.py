@@ -189,11 +189,11 @@ def build_strategies_for_mode(
     from strategies.iron_condor import SPXIronCondor
     from strategies.incubator import build_ab_strategies, build_incubator_strategies
     from strategies.market_data_hub import get_shared_market_data_hub
-    from strategies.position_ledger import PositionLedger
+    from strategies.position_ledger import PositionLedger, resolve_ledger_path
 
     resolved = mode or resolve_trading_mode()
     hub = get_shared_market_data_hub()
-    ledger = PositionLedger(os.getenv("POSITION_LEDGER_PATH", "logs/position_ledger.sqlite3"))
+    ledger = PositionLedger(resolve_ledger_path())
 
     if resolved == "incubator":
         limit_env = os.getenv("INCUBATOR_STRATEGY_COUNT", "").strip()
@@ -224,49 +224,36 @@ def build_strategies_for_mode(
         strategy._position_ledger = ledger
         strategies = [strategy]
 
+    comparison_strategies = [
+        strategy for strategy in strategies
+        if not getattr(strategy, "parameters", {}).get("management_only", False)
+    ]
     controller = None
-    has_neural_strategy = any(
-        getattr(strategy, "pure_neural_mode", False)
-        or getattr(strategy, "parameters", {}).get("pure_neural_mode", False)
-        for strategy in strategies
-    )
     model_path = Path(os.getenv("ML_MODEL_PATH", "logs/models/policy.json"))
     if _env_bool("ML_POLICY_ENABLED", default=False):
         from ml.inference import LivePolicyController
 
         controller = LivePolicyController(
             model_path,
-            {strategy.name: strategy for strategy in strategies},
+            {strategy.name: strategy for strategy in comparison_strategies},
             expected_sequence_length=_configured_sequence_length(),
         )
-    elif has_neural_strategy and model_path.is_file():
-        try:
-            from ml.inference import LivePolicyController
-
-            controller = LivePolicyController(
-                model_path,
-                {strategy.name: strategy for strategy in strategies},
-                expected_sequence_length=_configured_sequence_length(),
-            )
-            logger.info("Attached LivePolicyController to neural-managed strategy")
-        except Exception as exc:
-            logger.warning("Could not initialize LivePolicyController for neural strategy: %s", exc)
     if controller is not None:
-        for strategy in strategies:
+        for strategy in comparison_strategies:
             strategy._policy_controller = controller
-    if os.getenv("TRAJECTORY_LOGGING_ENABLED", "true").strip().lower() in ("true", "1", "yes"):
+    if comparison_strategies and os.getenv("TRAJECTORY_LOGGING_ENABLED", "true").strip().lower() in ("true", "1", "yes"):
         from trade_logger import TrajectoryLogger
 
         try:
             collector = TrajectoryLogger(
-                [strategy.name for strategy in strategies],
+                [strategy.name for strategy in comparison_strategies],
                 Path(os.getenv("TRAJECTORY_LOG_PATH", "logs/trajectories.jsonl")),
                 completed_snapshot_callback=(controller.on_snapshot if controller else None),
             )
         except OSError as error:
             logger.warning("Could not initialize trajectory logging: %s", error)
             return strategies
-        for strategy in strategies:
+        for strategy in comparison_strategies:
             strategy._trajectory_logger = collector
     return strategies
 

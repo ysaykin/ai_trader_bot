@@ -7,6 +7,7 @@ services:
     env_file: .env
     environment:
       - TZ=America/New_York
+      - POSITION_LEDGER_PATH=${POSITION_LEDGER_PATH:-/app/logs/position_ledger.sqlite3}
     volumes:
       - ./main.py:/app/main.py:ro
       - ./trade_logger.py:/app/trade_logger.py:ro
@@ -30,6 +31,7 @@ services:
       - REFLEX_DIR=/tmp/reflex
       - REFLEX_USE_NPM=true
       - TZ=America/New_York
+      - POSITION_LEDGER_PATH=${POSITION_LEDGER_PATH:-/app/logs/position_ledger.sqlite3}
     volumes:
       - ./reflex_dashboard:/app/reflex_dashboard
       - ./dashboard:/app/dashboard:ro

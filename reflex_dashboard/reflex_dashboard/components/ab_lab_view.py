@@ -6,6 +6,7 @@ Fully responsive across mobile, tablet, and desktop screens.
 """
 
 import reflex as rx
+from ..styles.numeric import numeric_color, numeric_text
 from ..state import DashboardState
 from ..styles.theme import (
     SURFACE_DARK,
@@ -160,7 +161,7 @@ def ab_lab_view() -> rx.Component:
                     rx.grid(
                         rx.box(
                             rx.text("Win Rate (Closed)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["win_rate"], size="3", weight="bold", color=DashboardState.ab_card_a["win_rate_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_a["win_rate"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_a["win_rate"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Closed Trades", size="1", color=TEXT_MUTED),
@@ -168,19 +169,19 @@ def ab_lab_view() -> rx.Component:
                         ),
                         rx.box(
                             rx.text("Realized Net P&L", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["net_pnl_str"], size="4", weight="bold", color=DashboardState.ab_card_a["net_pnl_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_a["net_pnl_str"]), size="4", weight="bold", color=numeric_color(DashboardState.ab_card_a["net_pnl_str"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Realized Net P&L % (RoR)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["net_ror_pct"], size="4", weight="bold", color=DashboardState.ab_card_a["net_ror_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_a["net_ror_pct"]), size="4", weight="bold", color=numeric_color(DashboardState.ab_card_a["net_ror_pct"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Return on Credit %", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["net_roc_pct"], size="3", weight="bold", color=DashboardState.ab_card_a["net_roc_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_a["net_roc_pct"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_a["net_roc_pct"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Broker Fees Paid", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["fees_str"], size="3", weight="bold", color=AMBER, class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_a["fees_str"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_a["fees_str"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Profit Factor", size="1", color=TEXT_MUTED),
@@ -188,7 +189,7 @@ def ab_lab_view() -> rx.Component:
                         ),
                         rx.box(
                             rx.text("Avg Net / Trade", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_a["avg_trade_str"], size="3", weight="bold", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_a["avg_trade_str"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_a["avg_trade_str"]), class_name="tabular-nums"),
                         ),
                         columns="2",
                         spacing="3",
@@ -232,7 +233,7 @@ def ab_lab_view() -> rx.Component:
                     rx.grid(
                         rx.box(
                             rx.text("Win Rate (Closed)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["win_rate"], size="3", weight="bold", color=DashboardState.ab_card_b["win_rate_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_b["win_rate"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_b["win_rate"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Closed Trades", size="1", color=TEXT_MUTED),
@@ -240,19 +241,19 @@ def ab_lab_view() -> rx.Component:
                         ),
                         rx.box(
                             rx.text("Realized Net P&L", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["net_pnl_str"], size="4", weight="bold", color=DashboardState.ab_card_b["net_pnl_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_b["net_pnl_str"]), size="4", weight="bold", color=numeric_color(DashboardState.ab_card_b["net_pnl_str"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Realized Net P&L % (RoR)", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["net_ror_pct"], size="4", weight="bold", color=DashboardState.ab_card_b["net_ror_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_b["net_ror_pct"]), size="4", weight="bold", color=numeric_color(DashboardState.ab_card_b["net_ror_pct"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Return on Credit %", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["net_roc_pct"], size="3", weight="bold", color=DashboardState.ab_card_b["net_roc_color"], class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_b["net_roc_pct"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_b["net_roc_pct"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Broker Fees Paid", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["fees_str"], size="3", weight="bold", color=AMBER, class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_b["fees_str"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_b["fees_str"]), class_name="tabular-nums"),
                         ),
                         rx.box(
                             rx.text("Profit Factor", size="1", color=TEXT_MUTED),
@@ -260,7 +261,7 @@ def ab_lab_view() -> rx.Component:
                         ),
                         rx.box(
                             rx.text("Avg Net / Trade", size="1", color=TEXT_MUTED),
-                            rx.text(DashboardState.ab_card_b["avg_trade_str"], size="3", weight="bold", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                            rx.text(numeric_text(DashboardState.ab_card_b["avg_trade_str"]), size="3", weight="bold", color=numeric_color(DashboardState.ab_card_b["avg_trade_str"]), class_name="tabular-nums"),
                         ),
                         columns="2",
                         spacing="3",
@@ -332,14 +333,14 @@ def ab_lab_view() -> rx.Component:
                                     rx.table.cell(rx.text(strat["variant"], weight="bold", color=CYAN, class_name="font-mono nowrap")),
                                     rx.table.cell(rx.text(strat["config_desc"], size="1", color=TEXT_MUTED, class_name="nowrap")),
                                     rx.table.cell(rx.text(strat["closed_trades"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["win_rate"], weight="bold", color=strat["win_rate_color"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["gross_pnl_str"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["fees_str"], color=AMBER, class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["net_pnl_str"], weight="bold", color=strat["status_color"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["net_ror_pct"], weight="bold", color=CYAN, class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["net_roc_pct"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["win_rate"]), weight="bold", color=numeric_color(strat["win_rate"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["gross_pnl_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["fees_str"]), color=numeric_color(strat["fees_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["net_pnl_str"]), weight="bold", color=numeric_color(strat["net_pnl_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["net_ror_pct"]), weight="bold", color=numeric_color(strat["net_ror_pct"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["net_roc_pct"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(strat["profit_factor"], class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(strat["avg_trade_str"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(strat["avg_trade_str"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(strat["status"], color_scheme=strat["status_color"], size="1")),
                                     style=TABLE_ROW_STYLE,
                                 )

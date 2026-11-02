@@ -4,6 +4,7 @@ Fully responsive across mobile, tablet, and desktop screens with horizontal tabl
 """
 
 import reflex as rx
+from ..styles.numeric import numeric_color, numeric_text
 from ..state import DashboardState
 from ..styles.theme import (
     SURFACE_DARK,
@@ -57,7 +58,7 @@ def orders_view() -> rx.Component:
                                     rx.table.cell(rx.text(o["symbol"], class_name="font-mono nowrap")),
                                     rx.table.cell(rx.text(o["side"], weight="bold", class_name="nowrap")),
                                     rx.table.cell(rx.badge(o["type"], color_scheme="gray", size="1")),
-                                    rx.table.cell(rx.text(o["quantity"], class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.text(numeric_text(o["quantity"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(o["status"], color_scheme="jade", size="1")),
                                     rx.table.cell(rx.text(o["price"], class_name="tabular-nums nowrap")),
                                     style=TABLE_ROW_STYLE,

@@ -32,6 +32,7 @@ import json
 import math
 import re
 import uuid
+from decimal import Decimal
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
@@ -57,7 +58,8 @@ from strategies.iron_condor_math import (
     select_short_strikes_skew,
     signed_basket_value,
 )
-from strategies.position_ledger import LedgerLeg, PositionLedger, asset_key
+from strategies.position_ledger import LedgerLeg, PositionLedger, TERMINAL_STATES, asset_key
+from strategies.position_state import PositionState, position_attribute
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +194,26 @@ class SPXIronCondor(Strategy):
         "max_allocation": 0.03,
         "max_position_risk": 5000.0,
         "structure": "iron_condor",
+        "max_concurrent_positions": 1,
+        "entry_spacing_minutes": 60.0,
     }
+
+    _position_open = position_attribute("position_open")
+    _entry_credit = position_attribute("entry_credit")
+    _entry_credit_cash = position_attribute("entry_credit_cash")
+    _entry_orders = position_attribute("entry_orders")
+    _closing_orders = position_attribute("closing_orders")
+    _owned_legs = position_attribute("owned_legs")
+    _exit_requested = position_attribute("exit_requested")
+    _mfe_pnl = position_attribute("mfe_pnl")
+    _mae_pnl = position_attribute("mae_pnl")
+    _last_pnl = position_attribute("last_pnl")
+    _current_trade_id = position_attribute("current_trade_id")
+    _pending_exit_reason = position_attribute("pending_exit_reason")
+    _pending_gross_pnl = position_attribute("pending_gross_pnl")
+    _pending_fees = position_attribute("pending_fees")
+    _pending_net_pnl = position_attribute("pending_net_pnl")
+    _journaled_adjustments = position_attribute("journaled_adjustments")
 
     _iteration_count: int = 0
 
@@ -222,6 +243,12 @@ class SPXIronCondor(Strategy):
         p["entry_time"] = _resolve_param("entry_time", "IC_ENTRY_TIME", str)
         p["max_allocation"] = _resolve_param("max_allocation", "IC_MAX_ALLOCATION", float)
         p["max_position_risk"] = _resolve_param("max_position_risk", "IC_MAX_POSITION_RISK", float)
+        p["max_concurrent_positions"] = _resolve_param("max_concurrent_positions", "IC_MAX_CONCURRENT_POSITIONS", int)
+        p["entry_spacing_minutes"] = _resolve_param("entry_spacing_minutes", "IC_ENTRY_SPACING_MINUTES", float)
+        if p["max_concurrent_positions"] < 1 or not math.isfinite(p["entry_spacing_minutes"]) or p["entry_spacing_minutes"] < 0:
+            raise ValueError("position capacity must be positive and entry spacing nonnegative")
+        self._position_states: dict[str, PositionState] = {}
+        self._unbound_position = PositionState(settings=dict(p))
         p["structure"] = _resolve_param("structure", "IC_STRUCTURE", str) or "iron_condor"
         self.structure = str(p["structure"]).lower()
         if "strategy_name" in p and p["strategy_name"]:
@@ -447,8 +474,12 @@ class SPXIronCondor(Strategy):
             self._apply_neural_strategy_switch(queued_switch)
 
         # --- MANAGEMENT: Check existing position ---
-        if self._position_open:
-            self._manage_position()
+        for position_id in tuple(self._position_states):
+            self._manage_position(position_id)
+        if len(self._position_ledger.open_positions(self._strategy_id())) >= int(self.parameters.get("max_concurrent_positions", 1)):
+            return
+
+        if self.parameters.get("management_only", False):
             return
 
         if self._recovery_lock:
@@ -458,21 +489,26 @@ class SPXIronCondor(Strategy):
         # --- DATA SUFFICIENCY CHECK FOR NEURAL STRATEGY ---
         if self.pure_neural_mode:
             controller = getattr(self, "_policy_controller", None)
-            if controller is not None:
-                if not controller.has_sufficient_data:
-                    logger.info(
-                        "[%s] Neural network waiting for sufficient data: %d/%d ticks. Skipping entry.",
-                        getattr(self, "name", "NeuralPure"),
-                        controller.current_ticks,
-                        controller.required_ticks,
-                    )
-                    return
-                if getattr(controller, "last_recommendation", None) is None:
-                    logger.info(
-                        "[%s] Waiting for initial neural recommendation before trading.",
-                        getattr(self, "name", "NeuralPure"),
-                    )
-                    return
+            if controller is None:
+                logger.info(
+                    "[%s] Neural policy disabled or controller not attached; blocking new entries.",
+                    getattr(self, "name", "NeuralPure"),
+                )
+                return
+            if not controller.has_sufficient_data:
+                logger.info(
+                    "[%s] Neural network waiting for sufficient data: %d/%d ticks. Skipping entry.",
+                    getattr(self, "name", "NeuralPure"),
+                    controller.current_ticks,
+                    controller.required_ticks,
+                )
+                return
+            if getattr(controller, "last_recommendation", None) is None:
+                logger.info(
+                    "[%s] Waiting for initial neural recommendation before trading.",
+                    getattr(self, "name", "NeuralPure"),
+                )
+                return
 
         # --- COOLDOWN CHECK: Prevent duplicate entry on transient network blips ---
         # If we just checked positions and got an empty result, wait before re-entering
@@ -712,18 +748,18 @@ class SPXIronCondor(Strategy):
             orders = self._submit_package(
                 legs, intent="open", order_type="credit", price=package_price
             )
-            self._exit_requested = False
-            self._mfe_pnl = 0.0
-            self._mae_pnl = 0.0
-            self._last_pnl = 0.0
-            self._entry_orders.extend(orders)
-            self._position_open = True
+            self._hydrate_from_ledger()
+            position_id = getattr(orders[0], "_position_id", None)
+            position = self._runtime(position_id)
+            position.entry_orders.extend(orders)
+            position.position_open = True
+            self._last_action = "ENTER"
             logger.info("%s package submitted at a %.2f credit limit.", structure.upper(), package_price)
-            self._publish_snapshot(pnl=0.0, status="SUBMITTED")
+            self._publish_position_snapshot(position, pnl=0.0, status="SUBMITTED")
 
         except Exception as e:
             logger.error("Failed to submit iron condor: %s", e)
-            self._position_open = bool(self._position_ledger.open_baskets(self._strategy_id()))
+            self._hydrate_from_ledger()
             # Set cooldown to prevent duplicate entry on transient network blip
             self._position_open_cooldown = True
             self._position_open_cooldown_until = self.get_datetime().timestamp() + 5.0  # 5 second cooldown
@@ -732,8 +768,9 @@ class SPXIronCondor(Strategy):
     # Position management
     # ------------------------------------------------------------------ #
 
-    def _manage_position(self) -> None:
+    def _manage_position(self, position_id: str | None = None) -> None:
         """Check profit target and stop loss on the open iron condor."""
+        position = self._runtime(position_id)
         try:
             orders = self.get_orders()
             positions = self.get_positions()
@@ -742,76 +779,76 @@ class SPXIronCondor(Strategy):
                 return
             pending_orders = any(
                 order.is_active()
-                for order in [*orders, *self._entry_orders, *self._closing_orders]
+                for order in [*orders, *position.entry_orders, *position.closing_orders]
             )
         except Exception as e:
             logger.warning("Could not reconcile open position; retaining management: %s", e)
             return
 
-        option_positions = self._filter_owned_option_positions(positions)
+        option_positions = self._filter_owned_option_positions(positions, position_id=position.position_id)
         if not option_positions:
             if pending_orders:
-                if self._exit_requested:
-                    self._close_all_options(
-                        exit_reason=self._pending_exit_reason, gross_pnl=self._pending_gross_pnl,
-                        fees=self._pending_fees, net_pnl=self._pending_net_pnl,
+                if position.exit_requested:
+                    self._close_all_options(position_id=position.position_id,
+                        exit_reason=position.pending_exit_reason, gross_pnl=position.pending_gross_pnl,
+                        fees=position.pending_fees, net_pnl=position.pending_net_pnl,
                     )
                 return
-            if self._owned_legs and self._all_owned_legs_expired():
+            if position.owned_legs and self._all_owned_legs_expired(position_id=position.position_id):
                 self._position_ledger.expire_strategy_positions(
-                    self._strategy_id(), self.get_datetime().date()
+                    self._strategy_id(), self.get_datetime().date(), position_id=position.position_id
                 )
                 self._hydrate_from_ledger()
-                if not self._position_ledger.owned_quantities(self._strategy_id()):
-                    self._record_exit_log("EXPIRED", float(getattr(self, "_last_pnl", 0.0)))
-                    self._reset_flat_state()
+                if not self._position_quantities(position):
+                    self._record_exit_log("EXPIRED", float(getattr(position, "last_pnl", 0.0)), position_id=position.position_id)
+                    self._reset_flat_state(position_id=position.position_id)
                     return
-            if self._position_ledger.owned_quantities(self._strategy_id()):
+            if self._position_quantities(position):
                 logger.warning("Owned ledger contracts are not visible at the broker; retaining state.")
                 return
             if any(
-                basket.state in {"submitted", "partial", "closing"}
-                for basket in self._position_ledger.open_baskets(self._strategy_id())
+                self._position_ledger.is_inflight(basket)
+                for basket in self._position_baskets(position, active_only=True)
             ):
                 logger.warning("Package state remains active in ledger; retaining management.")
                 return
-            self._reset_flat_state()
+            self._reset_flat_state(position_id=position.position_id)
             return
 
-        if self._exit_requested:
-            self._close_all_options(
-                exit_reason=self._pending_exit_reason, gross_pnl=self._pending_gross_pnl,
-                fees=self._pending_fees, net_pnl=self._pending_net_pnl,
+        if position.exit_requested:
+            self._close_all_options(position_id=position.position_id,
+                exit_reason=position.pending_exit_reason, gross_pnl=position.pending_gross_pnl,
+                fees=position.pending_fees, net_pnl=position.pending_net_pnl,
             )
             return
 
-        roll_dte = self.parameters.get("roll_dte")
-        remaining_dte = self._days_to_expiration()
+        roll_dte = position.settings.get("roll_dte")
+        remaining_dte = self._days_to_expiration(position_id=position.position_id)
         if roll_dte is not None and remaining_dte is not None and remaining_dte <= int(roll_dte):
             logger.info(
                 "🔄 ROLL / DTE TARGET HIT — closing position at %d DTE left (roll threshold: %d DTE)",
                 remaining_dte, int(roll_dte),
             )
-            self._close_all_options(exit_reason="ROLL_DTE")
+            self._close_all_options(position_id=position.position_id, exit_reason="ROLL_DTE")
             return
 
         if (
-            self._entry_credit_cash is None
-            or not math.isfinite(self._entry_credit_cash)
-            or self._entry_credit_cash <= 0
+            position.entry_credit_cash is None
+            or not math.isfinite(position.entry_credit_cash)
+            or position.entry_credit_cash <= 0
         ):
             logger.warning(
                 "Filled opening credit is unavailable; retaining contracts without P&L exits."
             )
-            self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
-            # CRITICAL: Do NOT set self._position_open = False or clear _owned_legs.
+            self._publish_position_snapshot(position, pnl=0.0, status="VALUATION_UNAVAILABLE")
+            # CRITICAL: Do NOT set position.position_open = False or clear _owned_legs.
             # Open positions remain active and will be caught by EOD close.
             return
 
         marked_legs = []
         leg_quotes = []
         incomplete = False
-        for asset, signed_quantity in self._owned_legs:
+        for asset, signed_quantity in position.owned_legs:
             try:
                 quote = self._fetch_quote(asset)
                 midpoint = self._quote_midpoint(quote)
@@ -850,7 +887,7 @@ class SPXIronCondor(Strategy):
                     wings[key]["long"] = item
 
             conservative_debit = 0.0
-            wing_width_cfg = float(self.parameters.get("wing_width", 0.0))
+            wing_width_cfg = float(position.settings.get("wing_width", 0.0))
             for key, wing in wings.items():
                 short_item = wing.get("short")
                 long_item = wing.get("long")
@@ -869,41 +906,45 @@ class SPXIronCondor(Strategy):
                     if s_bounds and l_bounds:
                         closing_debit_per_share = max(s_bounds[1] - l_bounds[0], 0.0)
                         conservative_debit += min(w_width, closing_debit_per_share) * w_qty * 100.0
-                    elif self._is_expiring_today():
-                        spot = self._fetch_underlying_price()
-                        if spot is not None and math.isfinite(spot) and s_strike is not None:
+                    elif self._is_expiring_today(position_id=position.position_id):
+                        try:
+                            spot = self._fetch_last_price(self._underlying)
+                        except Exception:
+                            spot = None
+                        if spot is not None and math.isfinite(spot) and spot > 0 and s_strike is not None:
                             right = key[0]
                             intrinsic = (float(s_strike) - spot) if right == "put" else (spot - float(s_strike))
                             if intrinsic > 0:
                                 conservative_debit += min(w_width, intrinsic) * w_qty * 100.0
 
-            threshold = self._entry_credit_cash * (1 + self.parameters["stop_loss_mult"])
+            threshold = position.entry_credit_cash * (1 + position.settings["stop_loss_mult"])
             if conservative_debit > 0 and conservative_debit >= threshold:
-                self._close_all_options(exit_reason="STOP_LOSS")
+                self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS")
             else:
                 logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
-                self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
+                self._publish_position_snapshot(position, pnl=0.0, status="VALUATION_UNAVAILABLE")
             return
         current_value = signed_basket_value(marked_legs)
-        pnl = credit_strategy_pnl(self._entry_credit_cash, current_value)
+        pnl = credit_strategy_pnl(position.entry_credit_cash, current_value)
         if pnl is None:
             logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
-            self._publish_snapshot(pnl=0.0, status="VALUATION_UNAVAILABLE")
+            self._publish_position_snapshot(position, pnl=0.0, status="VALUATION_UNAVAILABLE")
             return
         fee_rate = option_fee_per_contract()
         roundtrip_fees = round(
-            2 * option_execution_fees((quantity for _, quantity in self._owned_legs), fee_rate), 2
+            2 * option_execution_fees((quantity for _, quantity in position.owned_legs), fee_rate), 2
         )
         gross_pnl = float(pnl)
         net_pnl = round(gross_pnl - roundtrip_fees, 2)
 
-        self._last_pnl = net_pnl
-        self._mfe_pnl = max(float(getattr(self, "_mfe_pnl", 0.0)), net_pnl)
-        self._mae_pnl = min(float(getattr(self, "_mae_pnl", 0.0)), net_pnl)
-        self._publish_snapshot(pnl=net_pnl, status="OPEN")
+        position.last_pnl = net_pnl
+        position.mfe_pnl = max(float(getattr(position, "mfe_pnl", 0.0)), net_pnl)
+        position.mae_pnl = min(float(getattr(position, "mae_pnl", 0.0)), net_pnl)
+        self._persist_position(position)
+        self._publish_position_snapshot(position, pnl=net_pnl, status="OPEN")
 
-        pt_threshold = self._entry_credit_cash * self.parameters["profit_target"]
-        sl_threshold = -self._entry_credit_cash * self.parameters["stop_loss_mult"]
+        pt_threshold = position.entry_credit_cash * position.settings["profit_target"]
+        sl_threshold = -position.entry_credit_cash * position.settings["stop_loss_mult"]
 
         logger.info(
             "IC P&L: Gross $%.2f | Fees -$%.2f | Net $%.2f | PT threshold: $%.2f | SL threshold: $%.2f",
@@ -912,22 +953,22 @@ class SPXIronCondor(Strategy):
 
         if net_pnl >= pt_threshold and net_pnl > 0:
             logger.info("🎯 NET PROFIT TARGET HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
-            self._close_all_options(exit_reason="PROFIT_TARGET", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
+            self._close_all_options(position_id=position.position_id, exit_reason="PROFIT_TARGET", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
         elif net_pnl <= sl_threshold:
             logger.warning("🛑 STOP LOSS HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
-            self._close_all_options(exit_reason="STOP_LOSS", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
-        elif bool(self.parameters.get("enable_mfe_ratchet", False)) or os.getenv("IC_MFE_RATCHET_ENABLED", "").strip().lower() in ("true", "1", "yes", "on"):
+            self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
+        elif bool(position.settings.get("enable_mfe_ratchet", False)) or os.getenv("IC_MFE_RATCHET_ENABLED", "").strip().lower() in ("true", "1", "yes", "on"):
             ratchet_reason = evaluate_mfe_ratchet(
-                self._entry_credit_cash,
-                self._mfe_pnl,
+                position.entry_credit_cash,
+                position.mfe_pnl,
                 net_pnl,
             )
             if ratchet_reason is not None:
                 logger.info(
                     "🔒 %s HIT — locking in profit/breakeven (MFE $%.2f -> Current Net $%.2f)",
-                    ratchet_reason, self._mfe_pnl, net_pnl,
+                    ratchet_reason, position.mfe_pnl, net_pnl,
                 )
-                self._close_all_options(
+                self._close_all_options(position_id=position.position_id,
                     exit_reason=ratchet_reason,
                     gross_pnl=gross_pnl,
                     fees=roundtrip_fees,
@@ -941,22 +982,24 @@ class SPXIronCondor(Strategy):
         fees: float | None = None,
         gross_pnl: float | None = None,
         net_pnl: float | None = None,
+        position_id: str | None = None,
     ) -> None:
         """Persist trade exit event to logs/trades.jsonl."""
+        position = self._runtime(position_id)
         try:
-            trade_id = getattr(self, "_current_trade_id", None)
+            trade_id = getattr(position, "current_trade_id", None)
             if trade_id:
                 from trade_logger import record_trade_exit
                 fee_rate = option_fee_per_contract()
                 calc_fees = float(
                     fees if fees is not None else option_execution_fees(
-                        (quantity for _, quantity in self._owned_legs), fee_rate
+                        (quantity for _, quantity in position.owned_legs), fee_rate
                     )
                 )
                 calc_gross = float(gross_pnl if gross_pnl is not None else pnl)
                 calc_net = float(net_pnl if net_pnl is not None else (calc_gross - calc_fees))
-                mfe = max(float(getattr(self, "_mfe_pnl", 0.0)), calc_net)
-                mae = min(float(getattr(self, "_mae_pnl", 0.0)), calc_net)
+                mfe = max(float(getattr(position, "mfe_pnl", 0.0)), calc_net)
+                mae = min(float(getattr(position, "mae_pnl", 0.0)), calc_net)
                 record_trade_exit(
                     trade_id=trade_id,
                     strategy_name=getattr(self, "name", "SPXIronCondor"),
@@ -968,17 +1011,20 @@ class SPXIronCondor(Strategy):
                     mfe_pnl=mfe,
                     mae_pnl=mae,
                 )
-                self._current_trade_id = None
+                position.current_trade_id = None
         except Exception as e:
             logger.warning("Could not persist trade exit: %s", e)
 
-    def _can_add_contracts(self, add_qty: int = 1) -> bool:
+    def _can_add_contracts(self, add_qty: int = 1, position_id: str | None = None) -> bool:
         """Verify adding `add_qty` contracts respects RSK-01 ($5k cap), RSK-02 (single-trade tier), and allocation."""
+        position = self._runtime(position_id)
+        if self.parameters.get("management_only", False):
+            return False
         if add_qty < 1:
             return False
-        wing = float(self.parameters.get("wing_width", 15.0))
+        wing = float(position.settings.get("wing_width", self.parameters.get("wing_width", 15.0)))
         current_qty = max(
-            (abs(int(q)) for _, q in getattr(self, "_owned_legs", ())),
+            (abs(int(q)) for _, q in getattr(position, "owned_legs", ())),
             default=int(self.parameters.get("quantity", 1)),
         )
         max_loss_per_contract = wing * 100.0
@@ -1056,6 +1102,7 @@ class SPXIronCondor(Strategy):
         self,
         action: str,
         dynamic_profit_target: float | None = None,
+        position_id: str | None = None,
     ) -> str:
         """Execute a granular position management action bounded by immutable RSK-01/RSK-02 guardrails.
 
@@ -1067,6 +1114,20 @@ class SPXIronCondor(Strategy):
           - FLATTEN_NOW: Immediately close all owned option legs.
         """
         normalized = (action or "HOLD").strip().upper()
+        if self._position_ledger.is_panic_halted():
+            if normalized == "FLATTEN_NOW":
+                self._panic_recovery()
+                self._last_action = normalized
+                return normalized
+            return "HOLD"
+        if position_id is None and len(getattr(self, "_position_states", {})) > 1:
+            if normalized == "FLATTEN_NOW":
+                self._close_all_options(exit_reason="NEURAL_EARLY_EXIT")
+                self._last_action = normalized
+                return normalized
+            self._last_action = "HOLD"
+            return "HOLD"
+        position = self._runtime(position_id)
         if normalized == "FLATTEN_NOW" and self._position_ledger.is_panic_halted():
             self._panic_recovery()
             self._last_action = "FLATTEN_NOW"
@@ -1077,34 +1138,40 @@ class SPXIronCondor(Strategy):
             return "HOLD"
         if dynamic_profit_target is not None:
             clamped_pt = max(0.15, min(0.80, float(dynamic_profit_target)))
-            self.parameters["profit_target"] = clamped_pt
+            position.settings["profit_target"] = clamped_pt
+            if position.position_id:
+                self._position_ledger.update_position(position.position_id, settings={
+                    key: value for key, value in position.settings.items() if key in self._management_settings()
+                })
+            if len(getattr(self, "_position_states", {})) < 2:
+                self.parameters["profit_target"] = clamped_pt
             if normalized in ("HOLD", "ADJUST_PROFIT_TARGET"):
                 self._last_action = "ADJUST_PROFIT_TARGET"
                 return "ADJUST_PROFIT_TARGET"
 
-        if not self._position_open or self._exit_requested:
+        if not position.position_open or position.exit_requested:
             self._last_action = "HOLD"
             return "HOLD"
 
         if normalized == "FLATTEN_NOW":
-            self._close_all_options(exit_reason="NEURAL_EARLY_EXIT")
+            self._close_all_options(position_id=position.position_id, exit_reason="NEURAL_EARLY_EXIT")
             self._last_action = "FLATTEN_NOW"
             return "FLATTEN_NOW"
 
-        owned_legs = list(getattr(self, "_owned_legs", []))
+        owned_legs = list(getattr(position, "owned_legs", []))
         if len(owned_legs) not in (2, 4):
             self._last_action = "HOLD"
             return "HOLD"
         if any(
-            basket.state in {"submitted", "partial", "closing"}
-            for basket in self._position_ledger.open_baskets(self._strategy_id())
+            self._position_ledger.is_inflight(basket)
+            for basket in self._position_baskets(position, active_only=True)
         ):
             self._last_action = "HOLD"
             return "HOLD"
 
         if normalized == "ADD_POSITION":
             add_qty = 1
-            if not self._can_add_contracts(add_qty):
+            if not self._can_add_contracts(add_qty, position_id=position.position_id):
                 self._last_action = "HOLD"
                 return "HOLD"
             try:
@@ -1116,9 +1183,9 @@ class SPXIronCondor(Strategy):
                 if price is None or price <= 0:
                     raise ValueError("complete quotes are required to add a package")
                 orders = self._submit_package(
-                    legs, intent="add", order_type="credit", price=price
+                    legs, position_id=position.position_id, intent="add", order_type="credit", price=price
                 )
-                self._entry_orders.extend(orders)
+                position.entry_orders.extend(orders)
                 self._last_action = "ADD_POSITION"
                 return "ADD_POSITION"
             except Exception as e:
@@ -1141,9 +1208,9 @@ class SPXIronCondor(Strategy):
                 if price is None or price <= 0:
                     raise ValueError("complete quotes are required to trim a package")
                 orders = self._submit_package(
-                    legs, intent="trim", order_type="debit", price=price
+                    legs, position_id=position.position_id, intent="trim", order_type="debit", price=price
                 )
-                self._closing_orders.extend(orders)
+                position.closing_orders.extend(orders)
                 self._last_action = "TRIM_POSITION"
                 return "TRIM_POSITION"
             except Exception as e:
@@ -1157,7 +1224,7 @@ class SPXIronCondor(Strategy):
     def _apply_neural_strategy_switch(self, target_strategy_name: str) -> None:
         """Dynamically adapt parameters to match the variant selected by the neural network
         based on real-time market regime, volatility, and cross-strategy signals."""
-        if self._position_ledger.is_panic_halted():
+        if self.parameters.get("management_only", False) or self._position_ledger.is_panic_halted():
             return
         from strategies.incubator import get_incubator_specs
         specs = {s["strategy_name"]: s for s in get_incubator_specs(include_neural=False)}
@@ -1195,33 +1262,72 @@ class SPXIronCondor(Strategy):
         gross_pnl: float | None = None,
         fees: float | None = None,
         net_pnl: float | None = None,
+        position_id: str | None = None,
     ) -> None:
         """Close all open option positions owned by this strategy variant."""
-        if self._exit_requested and self._pending_exit_reason:
-            if exit_reason and not self._pending_exit_reason:
-                self._pending_exit_reason = exit_reason
+        if position_id is None and len(getattr(self, "_position_states", {})) > 1:
+            for pid in tuple(self._position_states):
+                self._close_all_options(exit_reason, gross_pnl, fees, net_pnl, position_id=pid)
+            return
+        position = self._runtime(position_id)
+        if position.exit_requested and position.pending_exit_reason:
+            if exit_reason and not position.pending_exit_reason:
+                position.pending_exit_reason = exit_reason
         else:
-            self._pending_exit_reason = exit_reason or self._pending_exit_reason or "MANUAL"
-        self._exit_requested = True
-        self._position_open = True
+            position.pending_exit_reason = exit_reason or position.pending_exit_reason or "MANUAL"
+        position.exit_requested = True
+        position.position_open = True
+        self._persist_position(position)
         if gross_pnl is not None:
-            self._pending_gross_pnl = gross_pnl
-        elif not hasattr(self, "_pending_gross_pnl"):
-            self._pending_gross_pnl = None
+            position.pending_gross_pnl = gross_pnl
+        elif not hasattr(position, "pending_gross_pnl"):
+            position.pending_gross_pnl = None
 
         if fees is not None:
-            self._pending_fees = fees
-        elif not hasattr(self, "_pending_fees"):
-            self._pending_fees = None
+            position.pending_fees = fees
+        elif not hasattr(position, "pending_fees"):
+            position.pending_fees = None
 
         if net_pnl is not None:
-            self._pending_net_pnl = net_pnl
-        elif not hasattr(self, "_pending_net_pnl"):
-            self._pending_net_pnl = None
+            position.pending_net_pnl = net_pnl
+        elif not hasattr(position, "pending_net_pnl"):
+            position.pending_net_pnl = None
         try:
             # Refresh order state and stop entry fills before unwinding their legs.
             broker_orders = self.get_orders() or []
-            pending_entries = [order for order in self._entry_orders if order.is_active()]
+            fetch_order = getattr(self, "get_order", None)
+            pending_baskets = [b for b in self._position_baskets(position)
+                               if b.intent in {"open", "add"} and self._position_ledger.is_inflight(b)]
+            if pending_baskets:
+                order_lookup = {
+                    str(getattr(o, "identifier", None) or getattr(o, "id", "")): o
+                    for o in [*broker_orders, *position.entry_orders]
+                    if getattr(o, "identifier", None) or getattr(o, "id", None)
+                }
+                has_active = False
+                for basket in pending_baskets:
+                    parent = order_lookup.get(str(basket.broker_parent_id or ""))
+                    if parent is None and basket.broker_parent_id and callable(fetch_order):
+                        try:
+                            parent = fetch_order(str(basket.broker_parent_id))
+                        except Exception:
+                            parent = None
+                    if parent is None:
+                        parent = self._find_order_by_tag(broker_orders, basket.broker_tag)
+                    if parent is not None and parent.is_active():
+                        self.cancel_order(parent)
+                        has_active = True
+                    elif parent is None or not (str(getattr(parent, "status", "")).lower() in TERMINAL_STATES):
+                        has_active = True
+                if has_active:
+                    return
+                if self._reconcile_inflight_orders(broker_orders):
+                    self._recovery_lock = True
+                    return
+                if any(self._position_ledger.is_inflight(self._position_ledger.get_basket(b.package_id))
+                       for b in pending_baskets):
+                    return
+            pending_entries = [order for order in position.entry_orders if order.is_active()]
             if pending_entries:
                 for order in pending_entries:
                     self.cancel_order(order)
@@ -1229,8 +1335,8 @@ class SPXIronCondor(Strategy):
             active_close = next(
                 (
                     basket
-                    for basket in self._position_ledger.open_baskets(self._strategy_id())
-                    if basket.intent == "close" and basket.state in {"submitted", "partial", "closing"}
+                    for basket in self._position_baskets(position, active_only=True)
+                    if basket.intent == "close" and self._position_ledger.is_inflight(basket)
                 ),
                 None,
             )
@@ -1238,7 +1344,7 @@ class SPXIronCondor(Strategy):
                 parent = next(
                     (
                         order
-                        for order in [*broker_orders, *self._closing_orders]
+                        for order in [*broker_orders, *position.closing_orders]
                         if active_close.broker_parent_id
                         and str(getattr(order, "identifier", None) or getattr(order, "id", ""))
                         == str(active_close.broker_parent_id or "")
@@ -1258,14 +1364,10 @@ class SPXIronCondor(Strategy):
                     self._recovery_lock = True
                 return
             self._hydrate_from_ledger()
-            if not self._owned_legs:
+            if not position.owned_legs:
                 return
-            latest_close = self._position_ledger.latest_basket(
-                self._strategy_id(), {"close"}
-            )
-            latest_open = self._position_ledger.latest_basket(
-                self._strategy_id(), {"open", "add"}
-            )
+            latest_close = self._latest_position_basket(position, {"close"})
+            latest_open = self._latest_position_basket(position, {"open", "add"})
             previous = None
             if (
                 latest_close is not None
@@ -1291,7 +1393,7 @@ class SPXIronCondor(Strategy):
                         pass
                 reprice_count = previous.reprice_count + 1
                 replacement_of = previous.package_id
-            legs = [(asset, -signed_quantity) for asset, signed_quantity in self._owned_legs]
+            legs = [(asset, -signed_quantity) for asset, signed_quantity in position.owned_legs]
             try:
                 price = self._package_price(legs, order_type="debit")
             except Exception as error:
@@ -1299,13 +1401,13 @@ class SPXIronCondor(Strategy):
                 price = None
             if price is None or price <= 0:
                 urgent = (
-                    self._is_expiring_today()
-                    or self._pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"}
+                    self._is_expiring_today(position_id=position.position_id)
+                    or position.pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"}
                 )
                 if not urgent:
                     logger.warning("Complete quotes are required before closing the package.")
                     return
-                price = self._emergency_close_debit_fallback(legs)
+                price = self._emergency_close_debit_fallback(legs, position_id=position.position_id)
                 if price is None:
                     logger.error("Cannot establish a bounded emergency close price; retaining management.")
                     return
@@ -1317,12 +1419,13 @@ class SPXIronCondor(Strategy):
             orders = self._submit_package(
                 legs,
                 intent="close",
+                position_id=position.position_id,
                 order_type=order_type,
                 price=price,
                 replacement_of=replacement_of,
                 reprice_count=reprice_count,
             )
-            self._closing_orders.extend(orders)
+            position.closing_orders.extend(orders)
             logger.info("Closing iron-condor package at a %.2f debit limit.", price)
         except Exception as e:
             logger.error("Could not close all option positions; retaining management: %s", e)
@@ -1331,10 +1434,11 @@ class SPXIronCondor(Strategy):
     # Helpers
     # ------------------------------------------------------------------ #
 
-    def _emergency_close_debit_fallback(self, legs: list[tuple[Asset, int]]) -> float | None:
+    def _emergency_close_debit_fallback(self, legs: list[tuple[Asset, int]], position_id: str | None = None) -> float | None:
         """Bound an emergency debit limit strictly by wing_width and credit multiplier."""
+        position = self._runtime(position_id)
         try:
-            width = float(self.parameters.get("wing_width", 0.0))
+            width = float(position.settings.get("wing_width", 0.0))
             multiplier = float(os.getenv("IC_EMERGENCY_CLOSE_MAX_DEBIT_MULT", "3.0"))
             if not math.isfinite(width) or not math.isfinite(multiplier) or width <= 0 or multiplier <= 0:
                 return None
@@ -1343,10 +1447,10 @@ class SPXIronCondor(Strategy):
                 return None
 
             entry_credit_per_share = 0.0
-            if getattr(self, "_entry_credit_cash", None) and self._entry_credit_cash > 0:
-                entry_credit_per_share = self._entry_credit_cash / (quantity * 100.0)
-            elif getattr(self, "_entry_credit", None) and self._entry_credit > 0:
-                entry_credit_per_share = float(self._entry_credit)
+            if getattr(position, "entry_credit_cash", None) and position.entry_credit_cash > 0:
+                entry_credit_per_share = position.entry_credit_cash / (quantity * 100.0)
+            elif getattr(position, "entry_credit", None) and position.entry_credit > 0:
+                entry_credit_per_share = float(position.entry_credit)
 
             credit_target = entry_credit_per_share * multiplier if entry_credit_per_share > 0 else 0.0
 
@@ -1379,9 +1483,12 @@ class SPXIronCondor(Strategy):
                     if buy_bounds and sell_bounds:
                         w_debit = max(buy_bounds[1] - sell_bounds[0], 0.0)
                         paired_debit += min(width, w_debit) * (w_qty / quantity)
-                    elif self._is_expiring_today():
-                        spot = self._fetch_underlying_price()
-                        if spot is not None and math.isfinite(spot):
+                    elif self._is_expiring_today(position_id=position.position_id):
+                        try:
+                            spot = self._fetch_last_price(self._underlying)
+                        except Exception:
+                            spot = None
+                        if spot is not None and math.isfinite(spot) and spot > 0:
                             right = key[0]
                             short_strike = getattr(buy_item[0], "strike", None)
                             if short_strike is not None:
@@ -1422,61 +1529,107 @@ class SPXIronCondor(Strategy):
             raise ValueError("a registered strategy name is required for broker routing")
         return tag
 
-    def _hydrate_from_ledger(self) -> None:
-        quantities = self._position_ledger.owned_quantities(self._strategy_id())
-        owned = []
-        for key, quantity in quantities.items():
-            asset = self._asset_registry.get(key)
-            if asset is None:
-                asset = self._asset_from_key(key)
-                self._asset_registry[key] = asset
-            owned.append((asset, quantity))
-        self._owned_legs = sorted(
-            owned,
-            key=lambda item: (
-                str(getattr(item[0], "right", "")),
-                float(getattr(item[0], "strike", 0.0)),
-            ),
-        )
-        baskets = self._position_ledger.open_baskets(self._strategy_id())
-        opening_cash = self._position_ledger.active_opening_cash(self._strategy_id())
-        self._entry_credit_cash = opening_cash if opening_cash > 0 else 0.0
-        if self._owned_legs:
-            self.parameters["quantity"] = max(abs(quantity) for _, quantity in self._owned_legs)
-        quantity = max((abs(quantity) for _, quantity in self._owned_legs), default=0)
-        self._entry_credit = (
-            self._entry_credit_cash / (100.0 * quantity)
-            if self._entry_credit_cash > 0 and quantity > 0
-            else 0.0
-        )
-        self._current_trade_id = self._position_ledger.active_trade_id(self._strategy_id())
-        latest_close = self._position_ledger.latest_basket(self._strategy_id(), {"close"})
-        latest_open = self._position_ledger.latest_basket(
-            self._strategy_id(), {"open", "add"}
-        )
-        close_is_current = bool(
-            latest_close is not None
-            and latest_open is not None
-            and str(latest_close.created_at) >= str(latest_open.created_at)
-        )
-        if self._owned_legs and close_is_current:
-            self._exit_requested = True
-            self._pending_exit_reason = self._pending_exit_reason or "RECOVERY"
-        self._position_open = bool(self._owned_legs) or any(
-            basket.state in {"submitted", "partial", "closing"} for basket in baskets
-        )
-        if not self._position_open:
-            self._exit_requested = False
-            self._pending_exit_reason = None
-            self._pending_gross_pnl = None
-            self._pending_fees = None
-            self._pending_net_pnl = None
+    def _runtime(self, position_id: str | None = None) -> PositionState:
+        """Select one position. Ambiguous management must name its owner."""
+        states = getattr(self, "_position_states", None)
+        if states is None:
+            states = self._position_states = {}
+        if position_id is not None:
+            if position_id not in states:
+                record = self._position_ledger.get_position(position_id)
+                states[position_id] = PositionState(
+                    position_id=position_id,
+                    settings={**self.parameters, **record.settings} if record.settings else self.parameters,
+                    current_trade_id=record.trade_id,
+                    pending_exit_reason=record.exit_reason,
+                    exit_requested=bool(record.exit_reason),
+                    mfe_pnl=record.mfe_pnl, mae_pnl=record.mae_pnl,
+                )
+            return states[position_id]
+        if len(states) == 1:
+            return next(iter(states.values()))
+        if len(states) > 1:
+            raise ValueError("multiple positions require an explicit position_id")
+        if not hasattr(self, "_unbound_position"):
+            self._unbound_position = PositionState(settings=dict(self.parameters))
+        self._unbound_position.settings = dict(self.parameters)
+        return self._unbound_position
 
-    def _all_owned_legs_expired(self) -> bool:
-        if not self._owned_legs:
+    def _position_quantities(self, position: PositionState) -> dict[str, int]:
+        if position.position_id is None:
+            return self._position_ledger.owned_quantities(self._strategy_id())
+        return self._position_ledger.position_quantities(position.position_id)
+
+    def _position_baskets(self, position: PositionState, *, active_only: bool = False):
+        if position.position_id is None:
+            baskets = self._position_ledger.open_baskets(self._strategy_id())
+        else:
+            baskets = self._position_ledger.position_baskets(position.position_id)
+        return tuple(b for b in baskets if not active_only or b.state in {"submitted", "partial", "open", "closing"})
+
+    def _latest_position_basket(self, position: PositionState, intents: set[str]):
+        return next((b for b in reversed(self._position_baskets(position)) if b.intent in intents), None)
+
+    def _management_settings(self) -> dict[str, Any]:
+        keys = ("symbol", "dte", "roll_dte", "wing_width", "quantity", "profit_target",
+                "stop_loss_mult", "enable_mfe_ratchet")
+        return {key: self.parameters[key] for key in keys if key in self.parameters}
+
+    def _persist_position(self, position: PositionState) -> None:
+        if position.position_id is not None:
+            self._position_ledger.update_position(
+                position.position_id, exit_reason=position.pending_exit_reason,
+                mfe_pnl=position.mfe_pnl, mae_pnl=position.mae_pnl,
+            )
+
+    def _hydrate_from_ledger(self) -> None:
+        """Rebuild independent runtimes from durable position ownership."""
+        records = self._position_ledger.open_positions(self._strategy_id())
+        if not hasattr(self, "_position_states"):
+            self._position_states = {}
+        if len(records) == 1 and not self._position_states:
+            # Preserve the single-position telemetry object during first hydration.
+            state = self._runtime()
+            state.position_id = records[0].position_id
+            self._position_states[state.position_id] = state
+        active_ids = set()
+        for record in records:
+            active_ids.add(record.position_id)
+            position = self._runtime(record.position_id)
+            position.settings = {**self.parameters, **record.settings} if record.settings else self.parameters
+            owned = []
+            for key, quantity in self._position_ledger.position_quantities(record.position_id).items():
+                asset = self._asset_registry.get(key)
+                if asset is None:
+                    asset = self._asset_from_key(key)
+                    self._asset_registry[key] = asset
+                owned.append((asset, quantity))
+            position.owned_legs = sorted(owned, key=lambda item: (
+                str(getattr(item[0], "right", "")), float(getattr(item[0], "strike", 0.0))))
+            try:
+                position.entry_credit_cash = max(0.0, self._position_ledger.position_opening_cash(record.position_id))
+            except ValueError:
+                position.entry_credit_cash = 0.0
+            quantity = max((abs(q) for _, q in owned), default=0)
+            position.entry_credit = position.entry_credit_cash / (100 * quantity) if quantity else 0.0
+            position.current_trade_id = record.trade_id
+            position.mfe_pnl = record.mfe_pnl
+            position.mae_pnl = record.mae_pnl
+            position.pending_exit_reason = record.exit_reason or position.pending_exit_reason
+            position.exit_requested = bool(position.pending_exit_reason)
+            position.position_open = bool(owned) or any(
+                self._position_ledger.is_inflight(b) for b in self._position_baskets(position))
+        for pid in set(self._position_states) - active_ids:
+            del self._position_states[pid]
+        if not records:
+            self._unbound_position = PositionState(settings=dict(self.parameters))
+
+    def _all_owned_legs_expired(self, position_id: str | None = None) -> bool:
+        position = self._runtime(position_id)
+        if not position.owned_legs:
             return False
         today = self.get_datetime().date()
-        for asset, _ in self._owned_legs:
+        for asset, _ in position.owned_legs:
             raw_exp = getattr(asset, "expiration", None)
             if raw_exp is None:
                 return False
@@ -1493,12 +1646,13 @@ class SPXIronCondor(Strategy):
                 return False
         return True
 
-    def _is_expiring_today(self) -> bool:
+    def _is_expiring_today(self, position_id: str | None = None) -> bool:
         """Check if any owned leg expires today or earlier."""
-        if not self._owned_legs:
-            return int(self.parameters.get("dte", 0)) == 0
+        position = self._runtime(position_id)
+        if not position.owned_legs:
+            return int(position.settings.get("dte", 0)) == 0
         today = self.get_datetime().date()
-        for asset, _ in self._owned_legs:
+        for asset, _ in position.owned_legs:
             raw_exp = getattr(asset, "expiration", None)
             if raw_exp is None:
                 continue
@@ -1515,13 +1669,14 @@ class SPXIronCondor(Strategy):
                 return True
         return False
 
-    def _days_to_expiration(self) -> int | None:
+    def _days_to_expiration(self, position_id: str | None = None) -> int | None:
         """Return the minimum days remaining to expiration across owned option legs."""
-        if not self._owned_legs:
+        position = self._runtime(position_id)
+        if not position.owned_legs:
             return None
         today = self.get_datetime().date()
         min_days = None
-        for asset, _ in self._owned_legs:
+        for asset, _ in position.owned_legs:
             raw_exp = getattr(asset, "expiration", None)
             if raw_exp is None:
                 continue
@@ -1654,6 +1809,13 @@ class SPXIronCondor(Strategy):
             logger.warning("Broker reconciliation unavailable: %s", error)
             return False
         ambiguous = self._reconcile_inflight_orders(orders, positions)
+        for basket in self._position_ledger.unreported_baskets(self._strategy_id()):
+            if basket.intent == "open" and basket.state in {"open", "closed"}:
+                self._record_filled_entry(basket)
+            elif basket.intent == "add" and basket.state in {"open", "closed"}:
+                self._record_filled_addition(basket)
+            elif basket.intent in {"close", "trim"}:
+                self._record_filled_exit(basket)
         self._hydrate_from_ledger()
         broker_options = [
             position
@@ -1662,25 +1824,19 @@ class SPXIronCondor(Strategy):
             == Asset.AssetType.OPTION
             and int(getattr(position, "quantity", 0)) != 0
         ]
-        if (
-            self._owned_legs
-            and not any(
-                order.is_active()
-                for order in [*orders, *self._entry_orders, *self._closing_orders]
-            )
-            and not self._filter_owned_option_positions(positions)
-            and self._all_owned_legs_expired()
-        ):
-            self._position_ledger.expire_strategy_positions(
-                self._strategy_id(), self.get_datetime().date()
-            )
-            self._hydrate_from_ledger()
-            if not self._position_open:
-                self._record_exit_log("EXPIRED", float(getattr(self, "_last_pnl", 0.0)))
-                self._reset_flat_state()
+        for position in tuple(self._position_states.values()):
+            if (position.owned_legs
+                    and not any(self._position_ledger.is_inflight(b) for b in self._position_baskets(position))
+                    and not self._filter_owned_option_positions(positions, position_id=position.position_id)
+                    and self._all_owned_legs_expired(position_id=position.position_id)):
+                self._position_ledger.expire_strategy_positions(
+                    self._strategy_id(), self.get_datetime().date(), position_id=position.position_id)
+                self._record_exit_log("EXPIRED", position.last_pnl, position_id=position.position_id)
+                self._reset_flat_state(position_id=position.position_id)
+        self._hydrate_from_ledger()
         ledger_totals = self._position_ledger.all_owned_quantities()
         inflight = any(
-            basket.state in {"submitted", "partial", "closing"}
+            self._position_ledger.is_inflight(basket)
             for basket in self._position_ledger.open_baskets()
         )
         unmanaged = [
@@ -1721,6 +1877,11 @@ class SPXIronCondor(Strategy):
             if identifier:
                 order_lookup[str(identifier)] = order
         fetch_order = getattr(self, "get_order", None)
+        broker = getattr(self, "broker", None)
+        if type(broker).__module__.startswith("lumibot.brokers.tradier"):
+            def fetch_order(identifier):
+                row = broker._pull_broker_order(identifier)
+                return broker._parse_broker_order_dict(row, self.name) if row else None
         terminal_map = {
             "canceled": "canceled",
             "cancelled": "canceled",
@@ -1736,9 +1897,17 @@ class SPXIronCondor(Strategy):
             for basket in self._position_ledger.stale_day_baskets(self._strategy_id(), today)
         }
         for basket in self._position_ledger.open_baskets(self._strategy_id()):
-            if basket.state not in {"submitted", "partial", "closing"}:
+            if not self._position_ledger.is_inflight(basket):
                 continue
             parent = order_lookup.get(str(basket.broker_parent_id or ""))
+            if parent is not None and basket.broker_parent_id and type(broker).__module__.startswith("lumibot.brokers.tradier"):
+                try:
+                    parent = fetch_order(str(basket.broker_parent_id))
+                except Exception:
+                    parent = None
+                if parent is None:
+                    ambiguous = True
+                    continue
             if (
                 parent is None
                 and basket.broker_parent_id
@@ -1799,40 +1968,50 @@ class SPXIronCondor(Strategy):
                 )
                 basket = self._position_ledger.get_basket(basket.package_id)
             leg_statuses: list[str] = []
+            complete_evidence = True
             for leg in basket.legs:
                 broker_id = leg.get("broker_order_id")
-                broker_order = order_lookup.get(str(broker_id or ""))
-                if broker_order is None and broker_id and callable(fetch_order):
+                broker_order = None
+                if broker_id and callable(fetch_order):
                     try:
                         broker_order = fetch_order(str(broker_id))
                     except Exception:
                         broker_order = None
+                if broker_order is None and not (broker_id and type(broker).__module__.startswith("lumibot.brokers.tradier")):
+                    broker_order = order_lookup.get(str(broker_id or ""))
                 if broker_order is None:
+                    complete_evidence = False
                     continue
                 status = str(getattr(broker_order, "status", "") or "").strip().lower()
                 if status:
                     leg_statuses.append(status)
-                raw_filled = getattr(broker_order, "filled_quantity", None)
+                raw_dict = getattr(broker_order, "_raw", None) or getattr(broker_order, "raw", None)
+                if not isinstance(raw_dict, dict):
+                    raw_dict = {}
+                raw_filled = (
+                    getattr(broker_order, "exec_quantity", None)
+                    if getattr(broker_order, "exec_quantity", None) is not None
+                    else raw_dict.get("exec_quantity")
+                )
                 raw_price = getattr(broker_order, "avg_fill_price", None)
-                if raw_filled is not None and raw_price is not None:
-                    try:
-                        broker_filled = abs(int(raw_filled))
-                        fill_price = float(raw_price)
-                    except (TypeError, ValueError):
-                        broker_filled = 0
-                        fill_price = -1.0
+                if raw_price is None:
+                    raw_price = raw_dict.get("avg_fill_price")
+                try:
+                    count = float(raw_filled)
+                    broker_filled = int(count)
+                    fill_price = float(raw_price) if raw_price is not None else None
+                    valid = (math.isfinite(count) and count == broker_filled and
+                             abs(int(leg["filled_signed_quantity"])) <= broker_filled <= abs(int(leg["requested_signed_quantity"])) and
+                             (broker_filled == 0 or (fill_price is not None and math.isfinite(fill_price) and fill_price >= 0)))
+                except (TypeError, ValueError, OverflowError):
+                    valid = False
+                if not valid:
+                    complete_evidence = False
+                else:
                     already_filled = abs(int(leg["filled_signed_quantity"]))
-                    if broker_filled > already_filled and math.isfinite(fill_price) and fill_price >= 0:
+                    if broker_filled > already_filled:
                         sign = 1 if int(leg["requested_signed_quantity"]) > 0 else -1
-                        opening_cash_before = self._position_ledger.active_opening_cash(
-                            self._strategy_id()
-                        )
-                        owned_before = self._position_ledger.owned_quantities(
-                            self._strategy_id()
-                        )
-                        quantity_before = max(
-                            (abs(value) for value in owned_before.values()), default=0
-                        )
+                        position = self._runtime(basket.position_id)
                         filled_basket = self._position_ledger.record_fill(
                             str(leg["order_id"]),
                             sign * broker_filled,
@@ -1848,11 +2027,9 @@ class SPXIronCondor(Strategy):
                             filled_basket.state == "closed"
                             and filled_basket.intent in {"close", "trim"}
                         ):
-                            self._record_filled_exit(
-                                filled_basket, opening_cash_before, quantity_before
-                            )
+                            self._record_filled_exit(filled_basket)
             refreshed = self._position_ledger.get_basket(basket.package_id)
-            if len(leg_statuses) == len(refreshed.legs) and all(
+            if complete_evidence and len(leg_statuses) == len(refreshed.legs) and all(
                 status in terminal_map for status in leg_statuses
             ):
                 term_status = terminal_map[leg_statuses[0]]
@@ -1870,7 +2047,7 @@ class SPXIronCondor(Strategy):
                         self._record_filled_addition(resolved)
                 continue
             parent_status = str(getattr(parent, "status", "") or "").lower()
-            if parent_status in terminal_map:
+            if complete_evidence and parent_status in terminal_map and len(leg_statuses) == len(refreshed.legs):
                 term_status = terminal_map[parent_status]
                 now_dt = self._current_datetime()
                 if not hasattr(self, "_terminal_package_times"):
@@ -1885,8 +2062,8 @@ class SPXIronCondor(Strategy):
                     elif resolved.state == "open" and resolved.intent == "add":
                         self._record_filled_addition(resolved)
                 continue
-            if parent is None or refreshed.package_id in stale_ids:
-                # A missing order or a DAY rollover is not a terminal broker result.
+            if parent is None or refreshed.package_id in stale_ids or (parent_status in terminal_map and (not complete_evidence or len(leg_statuses) < len(refreshed.legs))):
+                # A missing order, incomplete leg evidence, or a DAY rollover is not a terminal broker result.
                 ambiguous = True
         return ambiguous
 
@@ -1904,6 +2081,7 @@ class SPXIronCondor(Strategy):
         price: float,
         replacement_of: str | None = None,
         reprice_count: int = 0,
+        position_id: str | None = None,
     ) -> list:
         if not self._supports_atomic_multileg():
             raise RuntimeError("broker does not have a verified atomic multi-leg adapter")
@@ -1913,27 +2091,10 @@ class SPXIronCondor(Strategy):
         owner = self._strategy_id()
         broker_tag = self._broker_routing_tag()
         opening = intent in {"open", "add"}
-        if opening:
-            combined_positions: dict[str, int] = {}
-            if getattr(self, "_position_ledger", None) is not None:
-                combined_positions.update(self._position_ledger.all_owned_quantities())
-            try:
-                for p in (self.get_positions() or []):
-                    if getattr(getattr(p, "asset", None), "asset_type", None) == Asset.AssetType.OPTION:
-                        key = asset_key(p.asset)
-                        if key not in combined_positions and int(getattr(p, "quantity", 0)) != 0:
-                            combined_positions[key] = int(p.quantity)
-            except Exception:
-                pass
-
-            for asset, signed_quantity in legs:
-                key = asset_key(asset)
-                current_signed = combined_positions.get(key, 0)
-                if (current_signed < 0 and signed_quantity > 0) or (current_signed > 0 and signed_quantity < 0):
-                    raise RuntimeError(
-                        f"Atomic package rejected: leg {key} signed_qty={signed_quantity} conflicts "
-                        f"with existing account position ({current_signed})."
-                    )
+        if intent == "open":
+            position_id = position_id or uuid.uuid4().hex
+        elif position_id is None:
+            position_id = self._runtime().position_id
         orders = []
         ledger_legs = []
         for index, (asset, signed_quantity) in enumerate(legs, start=1):
@@ -1942,15 +2103,12 @@ class SPXIronCondor(Strategy):
             else:
                 side = "buy_to_close" if signed_quantity > 0 else "sell_to_close"
             order = self.create_order(asset, abs(signed_quantity), side)
-            order_id = str(
-                getattr(order, "identifier", None)
-                or getattr(order, "id", None)
-                or f"{package_id}:{index}"
-            )
+            order_id = f"{package_id}:{index}"
             for attribute, value in (
                 ("_ledger_order_id", order_id),
                 ("_package_id", package_id),
                 ("_strategy_id", owner),
+                ("_position_id", position_id),
                 ("tag", broker_tag),
             ):
                 setattr(order, attribute, value)
@@ -1961,19 +2119,52 @@ class SPXIronCondor(Strategy):
             orders.append(order)
             ledger_legs.append(LedgerLeg(order_id, asset_key(asset), signed_quantity))
         with self._position_ledger.execution_gate():
-            if self._position_ledger.is_panic_halted():
-                raise RuntimeError("Durable panic halt is active")
-            self._position_ledger.record_submission(
+            if opening and self._position_ledger.is_panic_halted():
+                raise RuntimeError("Atomic package rejected: panic halt is active")
+            capacity = int(self.parameters.get("max_concurrent_positions", 1))
+            cap = float(self.parameters.get("max_position_risk", 5000.0))
+            global_cap = self.parameters.get("max_portfolio_risk") or os.getenv("IC_MAX_PORTFOLIO_RISK")
+            override = (os.getenv("IC_MAX_SINGLE_TRADE_PCT") or "").strip()
+            try:
+                pct = float(override) if override else get_max_single_trade_pct(cap)
+            except ValueError:
+                pct = get_max_single_trade_pct(cap)
+            if not math.isfinite(pct) or not 0 < pct <= 1:
+                pct = get_max_single_trade_pct(cap)
+            portfolio_value = self._get_portfolio_value() if opening else None
+            limits = dict(
+                max_positions=capacity, strategy_cap=cap,
+                portfolio_cap=float(global_cap) if global_cap else None,
+                single_trade_cap=cap * pct,
+                allocation_cap=portfolio_value * float(self.parameters.get("max_allocation", .03))
+                if portfolio_value is not None and portfolio_value > 0 else None,
+                min_spacing_seconds=float(self.parameters.get("entry_spacing_minutes", 60)) * 60 if capacity > 1 else 0,
+                now=self._current_datetime(),
+            )
+            if opening:
+                positions = self.get_positions()
+                if positions is None:
+                    raise RuntimeError("broker inventory is unavailable")
+                for existing in positions:
+                    if getattr(getattr(existing, "asset", None), "asset_type", None) != Asset.AssetType.OPTION:
+                        continue
+                    for asset, quantity in legs:
+                        if asset_key(asset) == asset_key(existing.asset) and int(existing.quantity) * quantity < 0:
+                            raise RuntimeError("Atomic package rejected: opposing leg conflicts with broker inventory")
+            self._position_ledger.reserve_submission(
                 package_id,
                 owner,
                 intent,
                 ledger_legs,
+                limits=limits,
                 duration="day",
                 limit_price=round(float(price), 2),
                 broker_tag=broker_tag,
                 replacement_of=replacement_of,
                 reprice_count=reprice_count,
                 created_at=self._current_datetime(),
+                position_id=position_id,
+                settings={**self._management_settings(), "quantity": max(abs(q) for _, q in legs)},
             )
             submit_kwargs = {
                 "is_multileg": True,
@@ -1992,6 +2183,7 @@ class SPXIronCondor(Strategy):
             for attribute, value in (
                 ("_package_id", package_id),
                 ("_strategy_id", owner),
+                ("_position_id", position_id),
                 ("tag", broker_tag),
             ):
                 setattr(parent, attribute, value)
@@ -2030,7 +2222,33 @@ class SPXIronCondor(Strategy):
         target = getattr(self, "_strategy_lookup", {}).get(owner, self)
         target._record_filled_order(order, price, quantity)
 
-    def _record_filled_order(self, order, price: float, quantity: int) -> None:
+    def on_partially_filled_order(
+        self,
+        position,
+        order,
+        price: float,
+        quantity: int,
+        multiplier: float,
+    ) -> None:
+        """Record confirmed broker partial fills and route host callbacks to leg owners."""
+        local_id = getattr(order, "_ledger_order_id", None)
+        broker_id = getattr(order, "identifier", None) or getattr(order, "id", None)
+        parent_id = getattr(order, "parent_identifier", None) or getattr(order, "parent_id", None)
+        order_asset = getattr(order, "asset", None)
+        resolved = self._position_ledger.resolve_leg(
+            local_id=str(local_id) if local_id else None,
+            broker_id=str(broker_id) if broker_id else None,
+            parent_id=str(parent_id) if parent_id else None,
+            asset_key=asset_key(order_asset) if order_asset is not None else None,
+            side=str(getattr(order, "side", "") or "").lower() or None,
+        )
+        owner = self._strategy_id()
+        if resolved is not None:
+            owner = self._position_ledger.get_basket(str(resolved["package_id"])).strategy_id
+        target = getattr(self, "_strategy_lookup", {}).get(owner, self)
+        target._record_filled_order(order, price, quantity, partial=True)
+
+    def _record_filled_order(self, order, price: float, quantity: int, *, partial: bool = False) -> None:
         local_id = getattr(order, "_ledger_order_id", None)
         broker_id = getattr(order, "identifier", None) or getattr(order, "id", None)
         parent_id = getattr(order, "parent_identifier", None) or getattr(order, "parent_id", None)
@@ -2047,14 +2265,45 @@ class SPXIronCondor(Strategy):
             logger.warning("Ignoring fill without broker child details; no ledger leg matched.")
             return
         package_id = str(resolved["package_id"])
-        opening_cash_before = self._position_ledger.active_opening_cash(self._strategy_id())
-        owned_before = self._position_ledger.owned_quantities(self._strategy_id())
-        quantity_before = max((abs(value) for value in owned_before.values()), default=0)
+        position = self._runtime(self._position_ledger.get_basket(package_id).position_id)
         sign = 1 if "buy" in side else -1
+
+        raw_dict = getattr(order, "_raw", None)
+        if not isinstance(raw_dict, dict):
+            raw_dict = {}
+
+        def numeric(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float, str, Decimal)):
+                return None
+            try:
+                value = float(value)
+                return value if math.isfinite(value) and value >= 0 else None
+            except ValueError:
+                return None
+
+        cumulative_quantity = numeric(raw_dict.get("exec_quantity"))
+        if cumulative_quantity is None:
+            cumulative_quantity = numeric(getattr(order, "exec_quantity", None))
+        if not partial and cumulative_quantity is None:
+            cumulative_quantity = numeric(getattr(order, "quantity", None)) or numeric(quantity)
+        fill_price = numeric(raw_dict.get("avg_fill_price"))
+        if fill_price is None:
+            fill_price = numeric(getattr(order, "avg_fill_price", None))
+        if fill_price is None:
+            fill_price = float(price)
+        if cumulative_quantity is None or fill_price is None or not cumulative_quantity.is_integer():
+            # A slice without cumulative execution evidence cannot be deduplicated.
+            self._recovery_lock = True
+            logger.warning("Fill lacks cumulative execution evidence; retaining reservation.")
+            return
+        fill_quantity = int(cumulative_quantity)
+        if fill_quantity <= 0:
+            return
+
         basket = self._position_ledger.record_fill(
             str(resolved["order_id"]),
-            sign * int(quantity),
-            float(price),
+            sign * fill_quantity,
+            fill_price,
             broker_id=str(broker_id) if broker_id else None,
             parent_id=str(parent_id) if parent_id else None,
             asset_key=str(resolved["asset_key"]),
@@ -2066,13 +2315,16 @@ class SPXIronCondor(Strategy):
         elif basket.state == "open" and basket.intent == "add":
             self._record_filled_addition(basket)
         elif basket.state == "closed" and basket.intent in {"close", "trim"}:
-            self._record_filled_exit(basket, opening_cash_before, quantity_before)
+            self._record_filled_exit(basket)
         self._hydrate_from_ledger()
 
     def _record_filled_exit(
-        self, basket, opening_cash_before: float, quantity_before: int
+        self, basket
     ) -> None:
-        trade_id = getattr(self, "_current_trade_id", None)
+        position = self._runtime(basket.position_id)
+        if self._position_ledger.journaled(basket.package_id, "REALIZATION"):
+            return
+        trade_id = basket.trade_id or getattr(position, "current_trade_id", None)
         if not trade_id:
             return
         try:
@@ -2086,28 +2338,18 @@ class SPXIronCondor(Strategy):
             close_fees = option_execution_fees(
                 (leg["filled_signed_quantity"] for leg in basket.legs), fee_rate
             )
-            realized_opening = (
-                opening_cash_before * min(closed_qty / quantity_before, 1.0)
-                if quantity_before > 0
-                else 0.0
-            )
+            realized_opening = self._position_ledger.closing_opening_cash(basket.package_id)
             actual_gross = realized_opening + closing_cash
             actual_net = round(actual_gross - close_fees, 2)
-            mfe = max(float(getattr(self, "_mfe_pnl", 0.0)), actual_net)
-            mae = min(float(getattr(self, "_mae_pnl", 0.0)), actual_net)
-            reason = self._pending_exit_reason or "MANUAL"
+            mfe = max(float(getattr(position, "mfe_pnl", 0.0)), actual_net)
+            mae = min(float(getattr(position, "mae_pnl", 0.0)), actual_net)
+            reason = position.pending_exit_reason or "MANUAL"
 
-            remaining = self._position_ledger.owned_quantities(self._strategy_id())
+            remaining = self._position_ledger.quantities_after(basket.package_id)
             remaining_qty = max((abs(value) for value in remaining.values()), default=0)
-            if getattr(self, "_journaled_adjustments", None) is None:
-                self._journaled_adjustments = set()
-
             if remaining_qty > 0:
-                adj_key = (basket.package_id, closed_qty, remaining_qty)
-                if adj_key in self._journaled_adjustments:
-                    return
-                self._journaled_adjustments.add(adj_key)
                 record_trade_adjustment(
+                    event_id=f"{basket.package_id}:REALIZATION",
                     trade_id=trade_id,
                     strategy_name=self._strategy_id(),
                     opening_credit_cash=realized_opening,
@@ -2117,6 +2359,7 @@ class SPXIronCondor(Strategy):
                     net_pnl=actual_net,
                     remaining_quantity=remaining_qty,
                 )
+                self._position_ledger.mark_journaled(basket.package_id, "REALIZATION")
                 logger.info(
                     "Recorded confirmed trim for %s: Net $%.2f, %d contracts remain.",
                     self._strategy_id(),
@@ -2125,11 +2368,8 @@ class SPXIronCondor(Strategy):
                 )
                 return
 
-            exit_key = (basket.package_id, trade_id, "EXIT")
-            if exit_key in self._journaled_adjustments:
-                return
-            self._journaled_adjustments.add(exit_key)
             record_trade_exit(
+                event_id=f"{basket.package_id}:REALIZATION",
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
                 exit_reason=reason,
@@ -2142,8 +2382,9 @@ class SPXIronCondor(Strategy):
                 mfe_pnl=mfe,
                 mae_pnl=mae,
             )
-            self._current_trade_id = None
-            self._reset_flat_state()
+            self._position_ledger.mark_journaled(basket.package_id, "REALIZATION")
+            position.current_trade_id = None
+            self._reset_flat_state(position_id=position.position_id)
             logger.info(
                 "Recorded confirmed fill exit for %s: Gross $%.2f, Fees -$%.2f, Net Realized $%.2f",
                 self._strategy_id(), actual_gross, close_fees, actual_net,
@@ -2152,10 +2393,9 @@ class SPXIronCondor(Strategy):
             logger.warning("Could not persist filled trade exit: %s", error)
 
     def _record_filled_entry(self, basket) -> None:
-        if getattr(self, "_current_trade_id", None):
-            return
-        if getattr(basket, "trade_id", None):
-            self._current_trade_id = basket.trade_id
+        position = self._runtime(basket.position_id)
+        if self._position_ledger.journaled(basket.package_id, "ENTRY"):
+            position.current_trade_id = basket.trade_id or position.current_trade_id
             return
         try:
             from trade_logger import record_trade_entry
@@ -2168,7 +2408,9 @@ class SPXIronCondor(Strategy):
                 strikes[f"{side}_{right}"] = asset["strike"]
             opening_cash = float(basket.opening_cash_flow or 0.0)
             quantity = max(abs(int(leg["filled_signed_quantity"])) for leg in basket.legs)
-            self._current_trade_id = record_trade_entry(
+            position.current_trade_id = record_trade_entry(
+                event_id=f"{basket.package_id}:ENTRY",
+                trade_id=position.current_trade_id or position.position_id,
                 strategy_name=self._strategy_id(),
                 symbol=self.parameters["symbol"],
                 expiry=json.loads(basket.legs[0]["asset_key"])["expiration"],
@@ -2180,20 +2422,20 @@ class SPXIronCondor(Strategy):
                     (leg["filled_signed_quantity"] for leg in basket.legs),
                     option_fee_per_contract(),
                 ),
-                max_risk=self.parameters["wing_width"] * 100 * quantity,
+                max_risk=position.settings["wing_width"] * 100 * quantity,
             )
-            self._position_ledger.set_trade_id(
-                basket.package_id, self._current_trade_id
-            )
+            self._position_ledger.set_trade_id(basket.package_id, position.current_trade_id)
+            self._position_ledger.mark_journaled(basket.package_id, "ENTRY")
         except Exception as error:
             logger.warning("Could not persist filled trade entry: %s", error)
 
     def _record_filled_addition(self, basket) -> None:
-        if getattr(basket, "trade_id", None):
+        position = self._runtime(basket.position_id)
+        if self._position_ledger.journaled(basket.package_id, "ADDITION"):
             return
-        trade_id = getattr(self, "_current_trade_id", None)
+        trade_id = getattr(position, "current_trade_id", None)
         if not trade_id:
-            trade_id = self._position_ledger.active_trade_id(self._strategy_id())
+            trade_id = self._position_ledger.active_trade_id(self._strategy_id(), position.position_id)
         if not trade_id:
             logger.warning("Could not journal filled addition without an active trade ID.")
             return
@@ -2204,6 +2446,7 @@ class SPXIronCondor(Strategy):
                 abs(int(leg["filled_signed_quantity"])) for leg in basket.legs
             )
             record_trade_addition(
+                event_id=f"{basket.package_id}:ADDITION",
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
                 opening_credit_cash=float(basket.opening_cash_flow or 0.0),
@@ -2214,6 +2457,7 @@ class SPXIronCondor(Strategy):
                 added_quantity=quantity,
             )
             self._position_ledger.set_trade_id(basket.package_id, trade_id)
+            self._position_ledger.mark_journaled(basket.package_id, "ADDITION")
         except Exception as error:
             logger.warning("Could not persist filled trade addition: %s", error)
 
@@ -2328,23 +2572,24 @@ class SPXIronCondor(Strategy):
             return None
         return (bounds[0] + bounds[1]) / 2.0
 
-    def _reset_flat_state(self) -> None:
+    def _reset_flat_state(self, position_id: str | None = None) -> None:
+        position = self._runtime(position_id)
         logger.info("Position closed or reconciled flat. Resetting strategy state.")
-        self._position_open = False
-        self._entry_credit = 0.0
-        self._entry_credit_cash = 0.0
-        self._entry_orders = []
-        self._closing_orders = []
-        self._owned_legs = []
-        self._exit_requested = False
-        self._pending_exit_reason = None
-        self._pending_gross_pnl = None
-        self._pending_fees = None
-        self._pending_net_pnl = None
-        self._mfe_pnl = 0.0
-        self._mae_pnl = 0.0
-        self._last_pnl = 0.0
-        self._publish_snapshot(pnl=0.0, status="FLAT")
+        position.position_open = False
+        position.entry_credit = 0.0
+        position.entry_credit_cash = 0.0
+        position.entry_orders = []
+        position.closing_orders = []
+        position.owned_legs = []
+        position.exit_requested = False
+        position.pending_exit_reason = None
+        position.pending_gross_pnl = None
+        position.pending_fees = None
+        position.pending_net_pnl = None
+        position.mfe_pnl = 0.0
+        position.mae_pnl = 0.0
+        position.last_pnl = 0.0
+        self._publish_position_snapshot(position, pnl=0.0, status="FLAT")
 
     def _asset_matches(self, a, b) -> bool:
         """Compare two option assets by symbol, expiration, strike, and right (or equality)."""
@@ -2357,15 +2602,16 @@ class SPXIronCondor(Strategy):
                 return False
         return True
 
-    def _filter_owned_option_positions(self, positions) -> list:
+    def _filter_owned_option_positions(self, positions, position_id: str | None = None) -> list:
         """Return only option positions belonging to this strategy variant (or all if single-strategy fallback)."""
+        position = self._runtime(position_id)
         option_positions = [
             p for p in positions
             if hasattr(p.asset, 'asset_type')
             and p.asset.asset_type == Asset.AssetType.OPTION
             and p.quantity != 0
         ]
-        owned_legs = getattr(self, "_owned_legs", None)
+        owned_legs = getattr(position, "owned_legs", None)
         if not owned_legs:
             return []
         return [
@@ -2373,9 +2619,10 @@ class SPXIronCondor(Strategy):
             if any(self._asset_matches(p.asset, leg_asset) for leg_asset, _ in owned_legs)
         ]
 
-    def _owned_quantity_for_position(self, pos) -> int:
+    def _owned_quantity_for_position(self, pos, position_id: str | None = None) -> int:
         """Return signed contract quantity owned by this strategy for `pos.asset`."""
-        owned_legs = getattr(self, "_owned_legs", None)
+        position = self._runtime(position_id)
+        owned_legs = getattr(position, "owned_legs", None)
         if not owned_legs:
             return 0
         for leg_asset, signed_qty in owned_legs:
@@ -2452,6 +2699,14 @@ class SPXIronCondor(Strategy):
             return hub.get_strikes(self, self._underlying, chains=chains)
         return self.get_strikes(self._underlying, chains=chains)
 
+    def _publish_position_snapshot(self, position: PositionState, *, pnl: float, status: str) -> None:
+        position.status = status
+        states = list(getattr(self, "_position_states", {}).values())
+        if len(states) > 1:
+            self._publish_snapshot(pnl=sum(state.last_pnl for state in states), status="MULTIPLE_POSITIONS")
+        else:
+            self._publish_snapshot(pnl=pnl, status=status)
+
     def _publish_snapshot(self, pnl: float, status: str) -> None:
         """Publish this strategy variant's state to the shared `MarketDataHub`."""
         hub = getattr(self, "_market_data_hub", None)
@@ -2473,6 +2728,16 @@ class SPXIronCondor(Strategy):
                 "quantity": int(self.parameters.get("quantity", 1)),
                 "mfe_pnl": float(getattr(self, "_mfe_pnl", 0.0)),
                 "mae_pnl": float(getattr(self, "_mae_pnl", 0.0)),
+                "positions": [{
+                    "position_id": position.position_id,
+                    "trade_id": position.current_trade_id,
+                    "status": position.status,
+                    "entry_credit_cash": position.entry_credit_cash,
+                    "pnl": position.last_pnl if position.status == "OPEN" else None,
+                    "quantity": max((abs(q) for _, q in position.owned_legs), default=0),
+                    "profit_target": position.settings.get("profit_target"),
+                    "stop_loss_mult": position.settings.get("stop_loss_mult"),
+                } for position in getattr(self, "_position_states", {}).values()],
             },
         )
 
@@ -2732,13 +2997,13 @@ class SPXIronCondor(Strategy):
         Especially important for 0DTE to avoid settlement issues.
         Multi-day swing positions are carried overnight unless expiring today.
         """
-        dte = int(self.parameters.get("dte", 0))
-        should_close = (dte == 0) or self._is_expiring_today()
-        if self._position_open and should_close:
-            logger.info("Market closing — closing option positions expiring today (dte=%s)", dte)
-            self._close_all_options(exit_reason=getattr(self, "_pending_exit_reason", None) or "EOD_CLOSE")
-        elif self._position_open:
-            logger.info("Market closing — holding swing position overnight (dte=%s)", dte)
+        states = tuple(self._position_states.values()) if getattr(self, "_position_states", {}) else (self._runtime(),)
+        for position in states:
+            dte = int(position.settings.get("dte", self.parameters.get("dte", 0)))
+            should_close = dte == 0 or self._is_expiring_today(position_id=position.position_id)
+            if position.position_open and should_close:
+                self._close_all_options(
+                    exit_reason=position.pending_exit_reason or "EOD_CLOSE", position_id=position.position_id)
         for follower in getattr(self, "_attached_strategies", ()):
             try:
                 follower.before_market_closes()

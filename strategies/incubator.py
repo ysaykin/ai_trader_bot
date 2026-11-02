@@ -1,17 +1,10 @@
 """
-20-Variant Iron Condor Strategy Incubator
-==========================================
+Dynamic strategy comparison incubator.
 
-Defines a deterministic 20-variant parameter grid (`IC_V01` .. `IC_V20`) across
-5 DTE tiers (0, 7, 14, 21, 30 DTE) with 4 setup variations per tier:
-  - Setup 1 (Conservative Far-OTM): Delta 0.10, Wing 2.0, PT 30%, SL 1.5x, Entry 10:00
-  - Setup 2 (Moderate Core Theta): Delta 0.12, Wing 3.0, PT 35%, SL 2.0x, Entry 10:15
-  - Setup 3 (Standard 15-Delta Benchmark): Delta 0.15, Wing 5.0, PT 50%, SL 2.0x, Entry 10:30
-  - Setup 4 (High-Yield 20-Delta): Delta 0.20, Wing 5.0, PT 50%, SL 2.5x, Entry 11:00
-
-All 20 strategies share a single `MarketDataHub` instance so option chain and
-quote lookups are deduplicated across the 5-minute execution tick, and each
-strategy tracks its own owned option legs to prevent cross-strategy interference.
+Compare StrategyBro with dynamic peers, Neural Pure, and one plain IC control.
+INCUBATOR_PROFILE=full_grid restores the parameter sweep. All strategies share
+market data and retain their own ledger ownership. Excluded owners with active
+packages continue managing positions without opening or adding exposure.
 """
 
 from __future__ import annotations
@@ -448,34 +441,74 @@ def get_dynamic_strategy_specs() -> list[dict[str, Any]]:
 
 def get_incubator_specs(
     limit: int | None = None,
-    include_testing: bool = True,
+    include_testing: bool | None = None,
     include_neural: bool = True,
-    include_verticals: bool = True,
+    include_verticals: bool | None = None,
     include_strategybro: bool = True,
     include_dynamic_suite: bool = True,
+    *,
+    profile: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return incubator parameter specifications including 20 benchmark variants,
-    the 25 DTE testing variant, the pure neural strategy, standalone vertical spreads,
-    StrategyBro 90 DTE dynamic (`IC_V25`), and the dynamic regime suite (`IC_V26`..`IC_V29`)."""
+    """Select entries, prioritizing dynamic comparisons before count limits.
+
+    The dynamic profile retains one plain IC control. The full_grid profile also
+    includes the legacy sweep and static tests. Explicit include flags override
+    the profile's static-test defaults.
+    """
+    selected_profile = (profile if profile is not None else os.getenv("INCUBATOR_PROFILE", "dynamic")).strip().lower()
+    if selected_profile not in {"dynamic", "full_grid"}:
+        raise ValueError("INCUBATOR_PROFILE must be 'dynamic' or 'full_grid'")
+    full_grid = selected_profile == "full_grid"
+    if include_testing is None:
+        include_testing = full_grid
+    if include_verticals is None:
+        include_verticals = full_grid
     global_entry_time = os.getenv("IC_ENTRY_TIME", DEFAULT_EXPANDED_RUN_TIMES).strip() or DEFAULT_EXPANDED_RUN_TIMES
     specs = []
-    for spec in INCUBATOR_GRID_20:
+    if include_strategybro and os.getenv("STRATEGYBRO_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
+        specs.append(get_strategybro_spec())
+    if include_dynamic_suite and os.getenv("DYNAMIC_STRATEGIES_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
+        specs.extend(get_dynamic_strategy_specs())
+    if include_neural and os.getenv("NEURAL_STRATEGY_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
+        specs.append(get_neural_pure_spec())
+    benchmarks = INCUBATOR_GRID_20 if full_grid else [INCUBATOR_GRID_20[18]]
+    for spec in benchmarks:
         s = dict(spec)
         s["entry_time"] = global_entry_time
         specs.append(s)
     if include_testing:
         specs.append(get_testing_variant_spec())
-    if include_neural and os.getenv("NEURAL_STRATEGY_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
-        specs.append(get_neural_pure_spec())
     if include_verticals and os.getenv("VERTICAL_STRATEGIES_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
         specs.extend(get_vertical_specs())
-    if include_strategybro and os.getenv("STRATEGYBRO_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
-        specs.append(get_strategybro_spec())
-    if include_dynamic_suite and os.getenv("DYNAMIC_STRATEGIES_ENABLED", "true").strip().lower() in ("true", "1", "yes", "on"):
-        specs.extend(get_dynamic_strategy_specs())
     if limit is not None:
         return specs[: max(0, int(limit))]
     return specs
+
+
+def _get_management_specs(
+    entry_specs: list[dict[str, Any]], position_ledger: Any,
+) -> list[dict[str, Any]]:
+    """Restore excluded active owners, including disabled strategy families."""
+    entry_names = {spec["strategy_name"] for spec in entry_specs}
+    retired_names = sorted({basket.strategy_id for basket in position_ledger.open_baskets()} - entry_names)
+    if not retired_names:
+        return []
+    catalog = [
+        *INCUBATOR_GRID_20, get_testing_variant_spec(), get_neural_pure_spec(),
+        *get_vertical_specs(), get_strategybro_spec(), get_trendflow_spec(),
+        get_skew_dynamic_spec(), get_vol_crush_spec(), get_orb_dynamic_spec(),
+    ]
+    by_name = {spec["strategy_name"]: spec for spec in catalog}
+    by_variant = {"_".join(spec["strategy_name"].split("_")[:2]): spec for spec in catalog}
+    managers = []
+    for name in retired_names:
+        spec = by_name.get(name)
+        if spec is None and name.startswith("IC_V"):
+            spec = by_variant.get("_".join(name.split("_")[:2]))
+        if spec is None:
+            raise ValueError(f"Cannot restore active ledger owner {name!r}; restore its strategy configuration before starting")
+        managers.append({**spec, "strategy_name": name, "management_only": True})
+    return managers
 
 
 _HOST_DELEGATED_METHODS = (
@@ -508,7 +541,7 @@ def bind_follower_to_host(follower: SPXIronCondor, host: SPXIronCondor) -> SPXIr
 
 def attach_strategies_to_host(strategies: list[SPXIronCondor]) -> SPXIronCondor:
     """Attach follower strategies (`strategies[1:]`) to `strategies[0]` so Lumibot `Trader`
-    runs a single `StrategyExecutor` while executing all 20 variants every 5-minute tick.
+    runs a single `StrategyExecutor` while executing the selected roster every tick.
     """
     if not strategies:
         raise ValueError("strategies list must be non-empty")
@@ -641,11 +674,12 @@ def build_incubator_strategies(
     limit: int | None = None,
     position_ledger: Any | None = None,
 ) -> list[SPXIronCondor]:
-    """
-    Build all 20 Iron Condor incubator strategies attached to a shared `MarketDataHub`.
-    """
+    """Build the entry roster and retain managers for excluded active ledger owners."""
     hub = market_data_hub or get_shared_market_data_hub()
     specs = get_incubator_specs(limit=limit)
+    entry_names = [spec["strategy_name"] for spec in specs]
+    management_specs = _get_management_specs(specs, position_ledger) if position_ledger is not None else []
+    specs.extend(management_specs)
     strategies: list[SPXIronCondor] = []
     for idx, spec in enumerate(specs):
         host = strategies[0] if idx > 0 else None
@@ -660,10 +694,12 @@ def build_incubator_strategies(
             )
         )
     logger.info(
-        "Built %d Iron Condor incubator variants sharing MarketDataHub (TTL=%ds)",
+        "Built %d incubator strategies sharing MarketDataHub (TTL=%ds)",
         len(strategies),
         hub.ttl_seconds,
     )
+    logger.info("Entry-enabled incubator strategies (%d): %s", len(entry_names), ", ".join(entry_names))
+    logger.info("Management-only incubator strategies (%d): %s", len(management_specs), ", ".join(spec["strategy_name"] for spec in management_specs) or "none")
     return strategies
 
 
@@ -674,7 +710,7 @@ def register_incubator_with_trader(
     budget: float = 100_000.0,
     limit: int | None = None,
 ) -> list[SPXIronCondor]:
-    """Instantiate and register all 20 incubator strategies with a Lumibot `Trader`."""
+    """Instantiate and register the selected incubator roster with a Lumibot `Trader`."""
     strategies = build_incubator_strategies(
         broker=broker,
         market_data_hub=market_data_hub,

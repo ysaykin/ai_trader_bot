@@ -9,6 +9,7 @@ import os
 import sys
 import json
 import re
+import sqlite3
 from datetime import datetime, timezone, time, date, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -20,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from dotenv import dotenv_values
 from dashboard.presentation import finite_number, format_numeric, option_mark
+from dashboard.positions import build_positions, quote_symbols, read_packages
 
 
 try:
@@ -202,19 +204,33 @@ def get_broker_telemetry() -> dict[str, Any]:
         "broker": broker_type.upper(),
         "account_id": account_id,
         "is_paper": is_paper,
-        "equity": 98098.00 if is_paper else 100000.0,
-        "cash": 98098.00 if is_paper else 100000.0,
-        "buying_power": 95385.00 if is_paper else 100000.0,
-        "option_requirement": 0.0,
-        "open_exposure": 0.0,
-        "unrealized_pnl": 0.0,
+        "equity": None,
+        "cash": None,
+        "buying_power": None,
+        "option_requirement": None,
+        "open_exposure": None,
+        "unrealized_pnl": None,
         "positions": [],
+        "raw_positions": None,
+        "quotes": {},
+        "positions_status": "unavailable",
+        "balances_status": "unavailable",
+        "synced_at": "No successful sync",
         "orders": [],
         "risk_cap": float(env.get("IC_MAX_POSITION_RISK") or os.getenv("IC_MAX_POSITION_RISK", 15000.0)),
         "portfolio_risk_cap": float(env.get("IC_MAX_PORTFOLIO_RISK") or os.getenv("IC_MAX_PORTFOLIO_RISK", 100000.0)),
         "single_trade_pct": 30.0,
-        "buying_power_headroom_pct": 100.0,
+        "buying_power_headroom_pct": None,
     }
+    from strategies.position_ledger import resolve_ledger_path
+
+    ledger_path = resolve_ledger_path(os.environ.get("POSITION_LEDGER_PATH", env.get("POSITION_LEDGER_PATH", "")))
+    try:
+        res["ledger_packages"] = read_packages(ledger_path)
+        res["ledger_error"] = ""
+    except (OSError, ValueError, sqlite3.Error):
+        res["ledger_packages"] = []
+        res["ledger_error"] = "Ownership ledger unavailable; broker inventory remains unattributed."
 
     if broker_type == "tradier" and token:
         try:
@@ -227,22 +243,27 @@ def get_broker_telemetry() -> dict[str, Any]:
             r_bal = requests.get(f"{base_url}/accounts/{account_id}/balances", headers=headers, timeout=4)
             if r_bal.status_code == 200:
                 b = r_bal.json().get("balances", {})
-                margin = b.get("margin", {}) or b.get("cash", {})
-                res["equity"] = float(b.get("total_equity") or b.get("equity") or res["equity"])
-                res["cash"] = float(b.get("total_cash") or margin.get("cash") or res["cash"])
-                res["buying_power"] = float(margin.get("option_buying_power") or res["buying_power"])
-                res["option_requirement"] = float(margin.get("option_requirement") or 0.0)
+                margin = b.get("margin") or b.get("cash") or {}
+                margin = margin if isinstance(margin, dict) else {}
+                res["equity"] = number(b.get("total_equity", b.get("equity")))
+                res["cash"] = number(b.get("total_cash", margin.get("cash")))
+                res["buying_power"] = number(margin.get("option_buying_power"))
+                res["option_requirement"] = number(margin.get("option_requirement"))
+                res["balances_status"] = "ready"
 
             # Positions
             r_pos = requests.get(f"{base_url}/accounts/{account_id}/positions", headers=headers, timeout=4)
             if r_pos.status_code == 200:
-                p_data = r_pos.json().get("positions", {})
-                pos_list = p_data.get("position", [])
+                p_data = r_pos.json().get("positions")
+                pos_list = [] if p_data in (None, "null") else p_data.get("position", [])
                 if isinstance(pos_list, dict):
                     pos_list = [pos_list]
                 raw_positions = pos_list or []
+                res["raw_positions"] = raw_positions
+                res["positions_status"] = "ready"
+                res["synced_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-                symbols = [str(p.get("symbol")) for p in raw_positions if p.get("symbol")]
+                symbols = sorted({str(p["symbol"]) for p in raw_positions if p.get("symbol")} | quote_symbols(res["ledger_packages"]))
                 quotes_map = {}
                 if symbols:
                     try:
@@ -261,6 +282,13 @@ def get_broker_telemetry() -> dict[str, Any]:
                                     quotes_map[q["symbol"]] = q
                     except Exception:
                         pass
+                res["quotes"] = {
+                    sym: {"mark": option_mark(q.get("bid"), q.get("ask"), q.get("last")),
+                          "delta": number((q.get("greeks") or {}).get("delta")),
+                          "theta": number((q.get("greeks") or {}).get("theta")),
+                          "timestamp": _quote_timestamp(q)}
+                    for sym, q in quotes_map.items()
+                }
 
                 formatted_positions = []
                 total_unrealized = 0.0
@@ -292,6 +320,9 @@ def get_broker_telemetry() -> dict[str, Any]:
 
                     formatted_positions.append({
                         "symbol": sym,
+                        "quantity_num": qty,
+                        "cost_basis_num": cost_basis,
+                        "mark_num": mark,
                         "quantity": f"{int(qty)}" if qty.is_integer() else f"{qty:.1f}",
                         "cost_basis": money(cost_basis),
                         "last_price": money(mark),
@@ -307,7 +338,7 @@ def get_broker_telemetry() -> dict[str, Any]:
                 broker_pnl = number(b.get("open_pl"))
                 all_marked = all(row["unrealized_pl_num"] is not None for row in formatted_positions)
                 res["unrealized_pnl"] = broker_pnl if broker_pnl is not None else total_unrealized if all_marked else None
-                res["open_exposure"] = float(res["option_requirement"])
+                res["open_exposure"] = res["option_requirement"]
 
             # Orders
             r_ord = requests.get(f"{base_url}/accounts/{account_id}/orders", headers=headers, timeout=4)
@@ -340,8 +371,78 @@ def get_broker_telemetry() -> dict[str, Any]:
             pass
 
     # Calculations
-    res["buying_power_headroom_pct"] = max(0.0, min(100.0, (res["buying_power"] / max(res["equity"], 1.0)) * 100))
+    if res["buying_power"] is not None and res["equity"] is not None and res["equity"] > 0:
+        res["buying_power_headroom_pct"] = max(0.0, min(100.0, res["buying_power"] / res["equity"] * 100))
     return res
+
+
+def _quote_timestamp(quote: dict[str, Any]) -> str:
+    values = [number(quote.get(key)) for key in ("bid_date", "ask_date", "trade_date")]
+    values = [value / 1000 if value > 1e11 else value for value in values if value is not None and value > 0]
+    if not values:
+        return "Timestamp unavailable"
+    try:
+        return datetime.fromtimestamp(min(values), timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (ValueError, OverflowError, OSError):
+        return "Timestamp unavailable"
+
+
+def get_position_workspace(telemetry: dict[str, Any]) -> dict[str, Any]:
+    """Use the same ledger and quote snapshot for all position views."""
+    fee_events: dict[str, list[dict[str, Any]]] = {}
+    path = PROJECT_ROOT / "logs/trades.jsonl"
+    if path.exists():
+        seen = set()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            key = json.dumps(event, sort_keys=True)
+            if key not in seen and event.get("trade_id"):
+                fee_events.setdefault(event["trade_id"], []).append(event)
+                seen.add(key)
+    fees, fee_contracts = {}, {}
+    for trade_id, events in fee_events.items():
+        entries = [e for e in events if e.get("event") == "ENTRY"]
+        if len(entries) != 1 or number(entries[0].get("entry_fees")) is None:
+            continue
+        charges = [number(e.get("entry_fees") if e.get("event") == "ENTRY" else e.get("fees"))
+                   for e in events if e.get("event") in {"ENTRY", "ADDITION", "ADJUSTMENT", "EXIT"}]
+        if all(charge is not None and charge >= 0 for charge in charges):
+            fees[trade_id] = sum(charges)
+        leg_count = len(entries[0].get("strikes") or {})
+        remaining = number(entries[0].get("quantity"))
+        if leg_count not in (2, 4) or remaining is None or remaining <= 0:
+            continue
+        contracts = remaining * leg_count
+        for event in events:
+            if event.get("event") == "ADDITION":
+                added = number(event.get("added_quantity"))
+                if added is None or added <= 0:
+                    break
+                contracts += added * leg_count
+                remaining += added
+            elif event.get("event") == "ADJUSTMENT":
+                after = number(event.get("remaining_quantity"))
+                if after is None or after < 0 or after > remaining:
+                    break
+                contracts += (remaining - after) * leg_count
+                remaining = after
+            elif event.get("event") == "EXIT":
+                contracts += remaining * leg_count
+                remaining = 0
+        else:
+            fee_contracts[trade_id] = contracts
+    env = dotenv_values(PROJECT_ROOT / ".env")
+    rate = number(env.get("OPTION_FEE_PER_CONTRACT"))
+    rows, issues = build_positions(telemetry.get("ledger_packages", []), telemetry.get("raw_positions"),
+                                   telemetry.get("quotes", {}), fee_rate=rate if rate is not None and rate >= 0 else .40,
+                                   reported_fees=fees, reported_fee_contracts=fee_contracts,
+                                   as_of=datetime.now(EASTERN_TZ).date())
+    if telemetry.get("ledger_error"):
+        issues.append(telemetry["ledger_error"])
+    return {"rows": rows, "issues": issues}
 
 
 def extract_variant_tag(strat_name: str) -> str:
@@ -617,7 +718,8 @@ def get_incubator_data() -> dict[str, Any]:
     """Compile performance matrix and metrics for all incubator variants."""
     try:
         from strategies.incubator import get_incubator_specs
-        specs = get_incubator_specs()
+        configured_count = os.getenv("INCUBATOR_STRATEGY_COUNT", "").strip()
+        specs = get_incubator_specs(limit=int(configured_count) if configured_count.isdigit() else None)
     except ImportError:
         try:
             from strategies.incubator import INCUBATOR_GRID_20
@@ -777,7 +879,8 @@ def get_incubator_data() -> dict[str, Any]:
         else:
             monitored_rows.append(row)
 
-    overall_win_rate = (total_wins / len(closed_all) * 100.0) if closed_all else 0.0
+    selected_closed_count = sum(row["closed_trades"] for row in all_rows)
+    overall_win_rate = (total_wins / selected_closed_count * 100.0) if selected_closed_count else 0.0
 
     # -------------------------------------------------------------
     # Curated Leaderboard: AI Strategy + Top 5 + Bottom 3 Strategies
@@ -820,6 +923,21 @@ def get_incubator_data() -> dict[str, Any]:
         rc["group_type"] = "BOTTOM3"
         rc["group_label"] = "Bottom 3 Underperforming Strategies"
         curated_rows.append(rc)
+
+    # A compact comparison shows each selected strategy once, in roster order.
+    if len(all_rows) <= 9:
+        curated_rows = []
+        for row in all_rows:
+            if row["variant_code"] == "IC_V25":
+                badge, color = "STRATEGYBRO", "teal"
+            elif row["is_neural"]:
+                badge, color = "NEURAL", "indigo"
+            elif row["structure"] == "iron_condor":
+                badge, color = "IC CONTROL", "gray"
+            else:
+                badge, color = "DYNAMIC PEER", "cyan"
+            curated_rows.append({**row, "rank_badge": badge, "badge_color": color,
+                                 "group_type": "COMPARISON", "group_label": "Selected strategy comparison"})
 
     # -------------------------------------------------------------
     # Strategy Group Aggregates
@@ -881,7 +999,7 @@ def get_incubator_data() -> dict[str, Any]:
 
     return {
         "all_rows": all_rows,
-        "rows": curated_rows,  # Returns the 9 AI + Top 5 + Bottom 3 rows for the main view
+        "rows": curated_rows,
         "curated_rows": curated_rows,
         "top5_rows": top5_rows,
         "bottom3_rows": bottom3_rows,

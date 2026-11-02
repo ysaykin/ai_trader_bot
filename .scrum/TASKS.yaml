@@ -1,10 +1,10 @@
 version: 1
 dashboard_review:
   date: "2026-10-30"
-  follow_up_date: "2026-10-31"
+  follow_up_date: "2026-11-01"
   scope: "Running Reflex dashboard at localhost:8501, dashboard source, backlog and feature claims"
   limitations:
-    - "Read-only UI and source review. New dashboard features and broker write tests were not executed."
+    - "The initial 2026-10-30 audit was read-only. The 2026-11-01 follow-up implemented and browser-verified the position workspace; no broker write tests were executed."
     - "Completed engine tasks outside the dashboard were checked for scope and evidence, not fully revalidated."
   references:
     - "https://toslc.thinkorswim.com/center/howToTos/thinkManual/Monitor/Activity-and-Positions/Position-Statement"
@@ -18,12 +18,12 @@ tasks:
     priority: P1
     owner: antigravity
     review_notes:
-      - "Reopened 2026-10-30. GUI-04 is Active in both catalogs, but the Reflex positions view contains no payoff explorer."
-      - "DASHBOARD.md claims strategy tags, parsed contract fields and IV in the positions view; the current seven-column table lacks them."
+      - "Reopened 2026-10-30. Follow-up 2026-11-01 delivered and verified the actual-leg expiration explorer. Catalog this scope separately from the pending theoretical today/mixed-expiry analysis."
+      - "DASHBOARD.md needs to describe the new grouped trades, strategy filters and parsed leg details. IV is still unavailable in this view."
       - "README.md and dashboard/README.md still direct users to Streamlit although docker-compose.yml serves Reflex."
       - "The catalogs, GOAL.md and SPRINT.yaml retain $5k global risk and fixed 20/25-variant claims after later per-strategy/global risk work and IC_V29 additions."
     acceptance:
-      - "Mark delivered, partial, planned and legacy capabilities explicitly. GUI-04 remains pending for Reflex until the actual explorer is verified."
+      - "Mark delivered, partial, planned and legacy capabilities explicitly. Record the verified Reflex expiration explorer and identify its remaining analysis scope."
       - "Document configured per-strategy and portfolio caps separately and distinguish the original 20 baseline variants from the current configured set."
       - "Give startup instructions for the actual Docker services and keep the mirrored feature catalogs consistent."
     deliverables:
@@ -137,6 +137,8 @@ tasks:
     title: "Implement offline trajectory trainer, live inference adapter, and robust state serialization for MultiHeadPolicyNetwork with isolated ledger tracking"
     status: completed
     owner: antigravity
+    review_notes:
+      - "2026-11-02 audit: training and inference implementation is delivered, but the documented ML_POLICY_ENABLED opt-in is bypassed by automatic controller attachment. Track the correction in bug-15-neural-inference-explicit-opt-in."
     deliverables:
       - ml/train.py
       - ml/inference.py
@@ -296,6 +298,7 @@ tasks:
     status: completed
     owner: antigravity
     review_notes:
+      - "2026-11-02 audit: roll/DTE ordering is delivered, but missing-quote expiry management and emergency closing call an undefined underlying-price method. Track the correction in bug-12-expiry-underlying-price-fallback."
       - "Removed submitted-limit credit recovery to prevent fabricated P&L baselines; requires finite positive confirmed cash while preserving contract ownership."
       - "Moved roll/DTE target checks ahead of valuation gates to ensure timely expiration rolling even when quote marks are delayed."
       - "Redacted Tradier account numbers from connection logs and added TRADIER_POLLING_INTERVAL."
@@ -335,6 +338,9 @@ tasks:
     status: completed
     priority: P0
     owner: antigravity
+    implementation_notes:
+      - "Follow-up 2026-11-01 found remaining fixed-color scalar displays. Shared numeric_text/numeric_color now cover cards and table bindings in the active Reflex views, and normalize displayed negative zero."
+      - "The repeatable tools/normalize_dashboard_number_colors.py transform is idempotent. Live comparison losses, fees and negative returns were verified red."
     evidence:
       - "positions_view.py: unrealized_pl always uses GREEN; signed quantities, cost basis and Greeks use no sign-aware style."
       - "ab_lab_view.py: both net P&L cards always use GREEN, return percentages use CYAN/AMBER and fees use AMBER."
@@ -354,9 +360,12 @@ tasks:
 
   - id: dashboard-telemetry-validity
     title: "Distinguish loading, empty, stale and failed data without showing fabricated balances or zero P&L"
-    status: completed
+    status: in_progress
     priority: P0
     owner: antigravity
+    implementation_notes:
+      - "Reopened after follow-up verification found retained sample broker balances and startup profits. Broker balances now start unavailable, successful empty inventory is distinct from failure, and missing marks never fabricate zero P&L."
+      - "The position workspace shows snapshot/quote timestamps, valuation coverage and reconciliation issues. Remaining: stale-cache policy across all views and removal of legacy benchmark/model placeholders outside the position workspace."
     evidence:
       - "adapters.py:get_broker_telemetry starts with fixed balances and empty positions; missing marks fall back to cost basis."
       - "state.py starts with populated example account, A/B, market and model values. benchmark_view.py renders fixed performance numbers."
@@ -377,9 +386,12 @@ tasks:
 
   - id: dashboard-configured-risk-telemetry
     title: "Display configured strategy and portfolio risk limits with matching live utilization"
-    status: completed
+    status: in_progress
     priority: P0
     owner: antigravity
+    implementation_notes:
+      - "Reopened for remaining acceptance gaps. Effective configured caps and actual runtime variant counts are displayed; unknown exposure is no longer calculated as known zero in state."
+      - "Remaining: separate selected-strategy and portfolio ledger risk utilization and remove fixed sizing/health labels from the older risk controls."
     depends_on:
       - dashboard-telemetry-validity
       - bug-05-config-view-env-key-alignment
@@ -401,9 +413,12 @@ tasks:
 
   - id: dashboard-owned-position-model
     title: "Attribute marked option legs to durable trade packages and strategy variants"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: codex
+    implementation_notes:
+      - "Read-only ledger fill snapshots now produce stable per-trade inventory and reconcile signed quantities to broker positions. Shared contracts stay separate; ambiguous legacy closes and unmatched inventory remain unavailable."
+      - "Confirmed additions, trims, pending closes and explicitly linked rolls are covered by deterministic tests. Supported standard equity/index option contracts use the 100-share multiplier; fees missing from the journal are explicitly estimated."
     depends_on:
       - dashboard-telemetry-validity
       - bug-02-dynamic-leg-count-fee-accounting
@@ -419,15 +434,19 @@ tasks:
       - "Compute gross open P&L, realized P&L on closed portions, booked fees and total net lifecycle P&L without counting cash flows or fees twice. Label estimated exit fees separately."
       - "Reconcile package, strategy and account totals with numerical tolerances and make reconciliation gaps visible."
     deliverables:
-      - strategies/position_ledger.py
+      - dashboard/positions.py
       - reflex_dashboard/reflex_dashboard/data/
+      - tests/test_position_workspace.py
       - tests/test_reflex_dashboard.py
 
   - id: dashboard-grouped-position-overview
     title: "Show each complete IC or vertical as one expandable position with combined P&L"
-    status: pending
+    status: completed
     priority: P1
-    owner: unassigned
+    owner: codex
+    implementation_notes:
+      - "Positions is the landing view. Strategy groups contain whole-trade rows with open/realized/net P&L, reported or estimated fees, entry cash, signed liquidation value, opening risk and signed-quantity Greeks."
+      - "Leg expansion and actual filled structure are verified against the running paper dashboard. Account risk controls are collapsed above the position workspace."
     depends_on:
       - dashboard-owned-position-model
       - dashboard-signed-value-formatting
@@ -444,9 +463,12 @@ tasks:
 
   - id: dashboard-strategy-filters
     title: "Filter positions immediately by strategy variant and actual option structure"
-    status: pending
+    status: in_progress
     priority: P1
-    owner: unassigned
+    owner: codex
+    implementation_notes:
+      - "Delivered multi-select held-strategy checkboxes, structure/underlying/expiry filters, All/Clear, no-match states and filtered totals. Selection survives background data refresh."
+      - "Remaining: DTE-range and status filters, multi-structure selection, and configured strategies with no current holdings."
     depends_on:
       - dashboard-grouped-position-overview
     acceptance:
@@ -460,9 +482,12 @@ tasks:
 
   - id: dashboard-current-strategy-comparison
     title: "Compare currently held positions across selected strategies on a consistent basis"
-    status: pending
+    status: in_progress
     priority: P1
-    owner: unassigned
+    owner: codex
+    implementation_notes:
+      - "Delivered current-holdings comparison from one broker/ledger snapshot, separating open P&L, realized portions, fee provenance, net P&L and defined opening risk. Aggregate percentages use summed P&L and risk."
+      - "Remaining: reporting-period controls for fully closed trades and stored historical P&L time series."
     depends_on:
       - dashboard-strategy-filters
       - dashboard-configured-risk-telemetry
@@ -480,9 +505,12 @@ tasks:
 
   - id: dashboard-position-payoff-analysis
     title: "Graph actual position payoff and compare strategy shapes using filled legs"
-    status: pending
+    status: in_progress
     priority: P1
-    owner: unassigned
+    owner: codex
+    implementation_notes:
+      - "Delivered actual-leg IC/bull-put/bear-call expiration curves, strikes, available spot, breakevens, maximum profit/loss, dollar and opening-risk units, and red negative axes/tooltips."
+      - "Curves are scoped to one underlying/expiry. Remaining: a theoretical today model, mixed-expiry common-date valuation, and a separate labeled example gallery."
     depends_on:
       - dashboard-owned-position-model
       - dashboard-current-strategy-comparison
@@ -496,7 +524,8 @@ tasks:
     deliverables:
       - reflex_dashboard/reflex_dashboard/components/
       - reflex_dashboard/reflex_dashboard/data/
-      - dashboard/payoff_chart.py
+      - dashboard/positions.py
+      - tests/test_position_workspace.py
       - tests/test_iron_condor_math.py
       - tests/test_reflex_dashboard.py
 
@@ -520,9 +549,14 @@ tasks:
 
   - id: dashboard-regression-fixtures-and-browser-checks
     title: "Verify dashboard grouping, sign colors, filters and data states with deterministic fixtures and browser checks"
-    status: pending
+    status: in_progress
     priority: P2
-    owner: unassigned
+    owner: codex
+    implementation_notes:
+      - "Added tests/test_position_workspace.py with deterministic fixtures for shared contracts, partial fills/closes, additions, linked rolls, unknown marks, broker failures, fees, filters, payoff and read-only SQLite behavior."
+      - "Targeted verification: 71 passed and 6 subtests passed; Reflex 0.10.1 dry compilation passed. Browser checks cover current held positions, All/Clear, multi-strategy selection, structure filters, comparison units, leg expansion and red losses."
+      - "Inconsistent marks outside a complete credit spread's defined payoff bounds now suppress marked P&L and aggregate totals with an explicit quote-quality issue; confirmed-fill payoff remains available."
+      - "Remaining: migrate older log-dependent incubator tests and extend repeatable visual checks to every view and appearance."
     depends_on:
       - dashboard-grouped-position-overview
       - dashboard-current-strategy-comparison
@@ -543,6 +577,8 @@ tasks:
     status: completed
     priority: P0
     owner: unassigned
+    review_notes:
+      - "2026-11-02 audit: the original import and flattening defects were repaired. Deployed shared-halt/lock path and recovery packaging remain defective and are tracked separately in bug-11-panic-shared-ledger-path and bug-14-panic-recovery-runtime-packaging; historical completion does not certify these paths."
     evidence:
       - "reflex_dashboard/reflex_dashboard/state.py:478 imports non-existent BrokerClient from dashboard.broker_client and calls client.close_all_positions(), raising ImportError on click."
       - "dashboard/broker_client.py:256-260 TradierClient.emergency_flatten_positions() only cancels open orders and returns True without submitting closing orders for open positions."
@@ -581,6 +617,8 @@ tasks:
     status: completed
     priority: P0
     owner: unassigned
+    review_notes:
+      - "2026-11-02 audit: ledger terminal-state transitions are delivered, but broker fill ingestion uses a quantity attribute absent from the deployed SDK. Track ingestion in bug-13-tradier-confirmed-fill-recovery and restart cancellation in bug-16-restart-entry-cancellation-before-close."
     evidence:
       - "strategies/iron_condor.py:1600-1635 only transitions canceled/rejected/expired baskets out of inflight state when refreshed.state == 'submitted' and all leg fills are zero."
       - "Baskets that partially fill and then cancel/expire remain in state 'partial' indefinitely, blocking _manage_position(), apply_policy_action(), and _reconcile_broker_state()."
@@ -733,6 +771,9 @@ tasks:
     status: pending
     priority: P0
     owner: unassigned
+    depends_on:
+      - bug-11-panic-shared-ledger-path
+      - bug-14-panic-recovery-runtime-packaging
     review_notes:
       - "Repair cycle verified retries during halted strategy iterations, but no separately managed recovery supervisor with startup and shutdown was implemented; retries therefore depend on strategy iterations continuing."
       - "The approved plan text available to the implementation cycle was truncated in the Jev-bot section and omitted the detailed coordinator specification. Obtain the missing remainder before claiming the emergency verification gate or whole plan complete."
@@ -744,3 +785,131 @@ tasks:
       - strategies/position_ledger.py
       - dashboard/broker_client.py
       - tests/test_emergency_liquidation.py
+
+  # --- Trading readiness audit follow-ups, 2026-11-02 ---
+  - id: bug-11-panic-shared-ledger-path
+    title: "Use one shared absolute ledger path and execution lock for panic and trading"
+    status: in_progress
+    priority: P0
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-02: Added resolve_ledger_path() in strategies/position_ledger.py, anchoring relative paths to project root. Keyed cross-process execution lock to the resolved database path. Configured POSITION_LEDGER_PATH in docker-compose.yml for both bot and dashboard services. Re-evaluated panic halt directly inside the execution lock before order submissions in strategies/iron_condor.py. Verified cross-process execution gate in tests/test_reflex_dashboard.py and tests/test_iron_condor_execution_safety.py."
+    evidence:
+      - "2026-11-02 audit, reflex_dashboard/reflex_dashboard/state.py:707-710: panic opens the relative default logs/position_ledger.sqlite3 without resolving it against the engine project root."
+      - "Deployed bot cwd is /app; dashboard cwd is /app/reflex_dashboard; POSITION_LEDGER_PATH was unset in both. Panic resolves a different database and filesystem lock from /app/logs/position_ledger.sqlite3."
+      - "Offline reproduction set the dashboard halt while the engine halt remained false, with distinct execution locks. Normal submissions can race liquidation or reopen exposure."
+    acceptance:
+      - "Resolve the ledger path consistently to the same shared absolute database in the engine, dashboard controls, telemetry and recovery paths, including unset and relative configuration."
+      - "Verify the built Compose deployment writes panic halt state to the engine ledger and uses the same cross-process execution gate."
+      - "Add a regression with different process working directories proving the engine observes the durable halt and cannot submit during or after panic until explicitly resumed."
+    deliverables:
+      - docker-compose.yml
+      - main.py
+      - strategies/position_ledger.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_reflex_dashboard.py
+      - tests/test_iron_condor_execution_safety.py
+
+  - id: bug-12-expiry-underlying-price-fallback
+    title: "Repair missing-quote expiry stops and emergency close underlying-price fallback"
+    status: pending
+    priority: P1
+    owner: unassigned
+    evidence:
+      - "2026-11-02 audit, strategies/iron_condor.py:876 and :1388: incomplete-quote management and emergency close fallback call _fetch_underlying_price(), which is absent from the strategy and deployed SDK base class."
+      - "An expiring owned spread with unavailable option quotes reproduces AttributeError and no emergency closing submission. The audit snapshot included an ORB condor expiring 2026-11-02."
+    acceptance:
+      - "Use the existing supported underlying-price fetch path and validate its result without calling an undefined method."
+      - "Preserve a bounded emergency close price when option quotes or spot are unavailable, without inventing marked P&L or exceeding the applicable spread width."
+      - "Cover incomplete-quote stop management and EOD/emergency closing for expiring verticals and iron condors, including unavailable spot. Assert the intended closing decision and absence of AttributeError."
+    deliverables:
+      - strategies/iron_condor.py
+      - tests/test_iron_condor_execution_safety.py
+      - tests/test_strike_selection_and_pnl.py
+
+  - id: bug-13-tradier-confirmed-fill-recovery
+    title: "Recover confirmed full and partial fills using the actual Tradier SDK schema"
+    status: in_progress
+    priority: P1
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-02: Tightened reconciliation so terminal packages remain in flight / partial when leg execution evidence is missing. Added duck-typing to LedgerLeg coercion for cross-module import resilience. Verified terminal opening packages retain unbalanced confirmed fills as partial. Full-fill cumulative broker evidence fallback verification remains open."
+    evidence:
+      - "2026-11-02 audit, strategies/iron_condor.py:1820: reconciliation reads Order.filled_quantity, an attribute absent from deployed LumiBot 4.6.25. Tradier exposes executed quantity in its broker payload instead."
+      - "Parsed filled children without this invented attribute leave the ledger submitted with no ownership in an offline reproduction. Partial fills also lack a strategy callback override."
+      - "Existing routing tests manually assign child.filled_quantity, hiding the deployed adapter mismatch."
+    acceptance:
+      - "Normalize confirmed executed quantities and cumulative average prices from supported SDK/broker data for full fills, partial fills and missed callbacks after restart. Never infer an execution from requested quantity or submitted limits."
+      - "Handle partial-fill notifications and terminal partial packages without losing owned contracts or counting cumulative fills twice."
+      - "Use real installed-SDK parsing with broker I/O mocked in contract tests. Cover partial cancellation, repeated reconciliation, restart before callback persistence, and confirmed closing fills without injecting nonexistent Order attributes."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - tests/test_tradier_order_routing.py
+      - tests/test_iron_condor_execution_safety.py
+      - tests/test_position_ledger.py
+
+  - id: bug-14-panic-recovery-runtime-packaging
+    title: "Package the emergency recovery dependencies in the trading bot image"
+    status: in_progress
+    priority: P1
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-02: Copied dashboard/broker_client.py and dashboard/presentation.py into dashboard/ in the bot Dockerfile. Container smoke test in test_container_recovery.py remains skipped until Docker environment is available."
+    evidence:
+      - "2026-11-02 audit, strategies/iron_condor.py:420: _panic_recovery imports dashboard.broker_client, but the bot Dockerfile copies only main.py, trade_logger.py, strategies and ml, and Compose does not mount dashboard into the bot."
+      - "The deployed bot reports dashboard_available=False. An incomplete first liquidation therefore cannot retry through this recovery path."
+    acceptance:
+      - "Make the emergency execution client and all of its dependencies available in the production bot image, preferably through a shared module used by both services."
+      - "Test recovery from the built bot image with a durable halt and a mocked incomplete first liquidation; verify a later attempt can close the remaining exposure without ModuleNotFoundError."
+      - "Retain confirmed broker-flat verification, protective-long sequencing and the shared execution gate. This repair does not by itself complete the independent supervisor task."
+    deliverables:
+      - Dockerfile
+      - docker-compose.yml
+      - strategies/iron_condor.py
+      - dashboard/broker_client.py
+      - tests/test_emergency_liquidation.py
+
+  - id: bug-15-neural-inference-explicit-opt-in
+    title: "Honor the explicit ML enable flag for every inference attachment path"
+    status: in_progress
+    priority: P1
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-02: Removed automatic LivePolicyController attachment in main.py for neural strategies when ML_POLICY_ENABLED is false or unset. Excluded management-only roster strategies from policy routing and trajectory callbacks."
+    evidence:
+      - "2026-11-02 audit, main.py:246-255: a Pure Neural roster member and an existing model file attach LivePolicyController even when ML_POLICY_ENABLED is unset or false, contrary to README.md and TASK_PLAN.md."
+      - "The audit runtime met those conditions. Offline reproduction with ML_POLICY_ENABLED=false attached the real controller and queued ADD_POSITION after its warmup."
+    acceptance:
+      - "Require explicit enabled configuration before attaching any order-changing model controller; test unset, false and true values with a Pure Neural member and an existing artifact."
+      - "Keep explicit enabled inference fail-fast on missing or incompatible artifacts, and document the behavior of the neural variant while inference is disabled."
+      - "When disabled, retain management of existing positions and prevent model-generated actions or target changes. Verify both controller attachment and the completed-snapshot callback path."
+    deliverables:
+      - main.py
+      - ml/inference.py
+      - strategies/iron_condor.py
+      - README.md
+      - tests/test_policy_pipeline.py
+      - tests/test_incubator_roster.py
+      - tests/test_regressions.py
+
+  - id: bug-16-restart-entry-cancellation-before-close
+    title: "Cancel durable pending entry and add orders before closing their filled contracts"
+    status: in_progress
+    priority: P1
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-02: Added reconciliation barrier before closing restarted entries to prevent racing fills from reopening unmanaged exposure."
+    evidence:
+      - "2026-11-02 audit, strategies/iron_condor.py:1228-1233: _close_all_options fetches broker orders but only cancels entries in local _entry_orders, which initializes empty after restart."
+      - "Offline reproduction with a partially filled durable entry and a visible active broker parent submits a closing package without canceling the outstanding entry. Late fills can reopen exposure after stop or EOD closing."
+    acceptance:
+      - "Discover pending open/add orders from durable ledger ownership and broker parent/child identity, including after restart when _entry_orders is empty."
+      - "Request cancellation and confirm terminal broker state before calculating and submitting the remaining close. Retain ownership and block unsafe duplicate actions while cancellation is uncertain."
+      - "Reconcile fills racing cancellation, then close the resulting confirmed quantity. Cover entry and addition, stop/EOD/shutdown triggers, delayed cancellation and repeated calls without duplicate closes."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/position_ledger.py
+      - tests/test_tradier_order_routing.py
+      - tests/test_iron_condor_execution_safety.py

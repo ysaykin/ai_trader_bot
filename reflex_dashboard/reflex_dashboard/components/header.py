@@ -4,6 +4,7 @@ Fully responsive across mobile, tablet, and desktop screens.
 """
 
 import reflex as rx
+from ..styles.numeric import numeric_color, numeric_text
 from ..state import DashboardState
 from ..styles.theme import (
     SURFACE_DARK,
@@ -44,7 +45,7 @@ def header() -> rx.Component:
                         gap="2",
                         wrap="wrap",
                     ),
-                    rx.text("20-Variant Multi-Strategy Incubator & Deep Neural Policy Cockpit", size="1", color=TEXT_MUTED),
+                    rx.text("Options positions & strategy performance", size="1", color=TEXT_MUTED),
                     spacing="0",
                     align="start",
                 ),
@@ -148,7 +149,7 @@ def header() -> rx.Component:
                         width="100%",
                         align="center",
                     ),
-                    rx.heading(DashboardState.equity_str, size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.equity_str), size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=numeric_color(DashboardState.equity_str), class_name="tabular-nums"),
                     rx.hstack(
                         rx.badge("Tradier Sandbox", color_scheme="gray", variant="soft", size="1"),
                         rx.text("Base: $100k", size="1", color=TEXT_MUTED, class_name="tabular-nums"),
@@ -171,7 +172,7 @@ def header() -> rx.Component:
                         width="100%",
                         align="center",
                     ),
-                    rx.heading(DashboardState.cash_str, size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.cash_str), size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=numeric_color(DashboardState.cash_str), class_name="tabular-nums"),
                     rx.text("Settled funds ready", size="1", color=TEXT_MUTED),
                     spacing="1",
                     align="start",
@@ -188,7 +189,7 @@ def header() -> rx.Component:
                         width="100%",
                         align="center",
                     ),
-                    rx.heading(DashboardState.buying_power_str, size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                    rx.heading(numeric_text(DashboardState.buying_power_str), size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=numeric_color(DashboardState.buying_power_str), class_name="tabular-nums"),
                     rx.hstack(
                         rx.badge("Margin", color_scheme="cyan", variant="soft", size="1"),
                         rx.text(f"Req: {DashboardState.option_requirement_str}", size="1", color=TEXT_MUTED, class_name="tabular-nums"),
@@ -214,7 +215,7 @@ def header() -> rx.Component:
                     rx.heading(DashboardState.active_grid_str, size={"initial": "5", "sm": "6", "md": "7"}, weight="bold", color=CYAN, class_name="tabular-nums"),
                     rx.hstack(
                         rx.badge("EXP-05", color_scheme="indigo", variant="surface", size="1"),
-                        rx.text("20 Parallel Variants", size="1", color=TEXT_MUTED),
+                        rx.text(f"{DashboardState.configured_variant_count} configured", size="1", color=TEXT_MUTED),
                         align="center",
                         spacing="2",
                         wrap="wrap",

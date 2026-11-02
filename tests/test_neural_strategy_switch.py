@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
-from datetime import time
+from datetime import datetime, time, timezone
 from unittest.mock import Mock, patch
 
 from strategies.iron_condor import SPXIronCondor, parse_run_times
@@ -85,6 +85,41 @@ class TestNeuralStrategySwitch(unittest.TestCase):
 
         # Parameters must remain unchanged because switch was blocked by panic halt
         self.assertEqual(self.strategy.parameters["short_delta"], initial_delta)
+
+    def test_pure_neural_blocks_entries_when_controller_absent(self) -> None:
+        self.strategy.pure_neural_mode = True
+        self.strategy._policy_controller = None
+        self.strategy._position_open = False
+        self.strategy._current_datetime = Mock(return_value=datetime(2026, 11, 2, 10, 0, tzinfo=timezone.utc))
+        self.strategy._run_entry_rules = Mock()
+
+        # on_trading_iteration must return early and not run entry rules
+        self.strategy.on_trading_iteration()
+        self.strategy._run_entry_rules.assert_not_called()
+
+    def test_main_does_not_attach_controller_when_ml_policy_disabled(self) -> None:
+        from main import build_strategies_for_mode
+        from pathlib import Path
+
+        dummy_model = Path(self.tmpdir.name) / "policy.json"
+        dummy_model.write_text("{}")
+
+        pure_neural = SPXIronCondor.__new__(SPXIronCondor)
+        pure_neural._name = "IC_V22_NEURAL_PURE"
+        pure_neural.pure_neural_mode = True
+        pure_neural.parameters = {"pure_neural_mode": True}
+
+        with patch("strategies.incubator.build_incubator_strategies", return_value=[pure_neural]), \
+             patch.dict(os.environ, {
+                 "ML_POLICY_ENABLED": "false",
+                 "ML_MODEL_PATH": str(dummy_model),
+                 "POSITION_LEDGER_PATH": str(Path(self.tmpdir.name) / "ledger.sqlite3"),
+             }):
+            broker = Mock()
+            broker.name = "Tradier"
+            strategies = build_strategies_for_mode(broker, mode="incubator")
+            for strat in strategies:
+                self.assertIsNone(getattr(strat, "_policy_controller", None))
 
 
 if __name__ == "__main__":

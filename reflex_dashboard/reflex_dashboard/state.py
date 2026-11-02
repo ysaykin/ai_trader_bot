@@ -6,8 +6,10 @@ Manages live telemetry polling, user interactions, tabs, and broker controls.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import reflex as rx
+import plotly.graph_objects as go
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -15,6 +17,7 @@ from .data.adapters import (
     get_market_clock,
     get_bot_status_from_log,
     get_broker_telemetry,
+    get_position_workspace,
     get_incubator_data,
     get_ab_lab_data,
     get_neural_policy_data,
@@ -24,40 +27,41 @@ from .data.adapters import (
     generate_trades_csv,
     money,
 )
+from dashboard.positions import display, payoff_bounds, payoff_figure, summarize
 
 
 class DashboardState(rx.State):
     """Global reactive state for the Lumibot Quantitative Trading Dashboard."""
 
     # Navigation
-    current_tab: str = "incubator"
+    current_tab: str = "positions"
 
     # Market Clock & Lifecycle
-    market_time: str = "09:30:00 ET"
-    market_date: str = "Oct 27, 2026"
-    market_status: str = "REGULAR TRADING HOURS"
-    market_badge_color: str = "jade"
+    market_time: str = "--:--:-- ET"
+    market_date: str = ""
+    market_status: str = "Loading"
+    market_badge_color: str = "gray"
 
     # Bot Heartbeat
-    bot_state: str = "RUNNING"
-    bot_last_action: str = "Monitoring active variants"
-    bot_timestamp: str = "Recent"
-    bot_badge_color: str = "jade"
+    bot_state: str = "INITIALIZING"
+    bot_last_action: str = "Waiting for engine status"
+    bot_timestamp: str = ""
+    bot_badge_color: str = "gray"
 
     # Broker Telemetry
     broker_name: str = "TRADIER"
     account_id: str = "VA21359019"
     is_paper: bool = True
-    equity: float = 98098.00
-    equity_str: str = "$98,098.00"
-    cash: float = 98098.00
-    cash_str: str = "$98,098.00"
-    buying_power: float = 95385.00
-    buying_power_str: str = "$95,385.00"
-    option_requirement: float = 0.0
-    option_requirement_str: str = "$0.00"
-    open_risk: float = 0.0
-    open_risk_str: str = "$0.00"
+    equity: float | None = None
+    equity_str: str = "N/A"
+    cash: float | None = None
+    cash_str: str = "N/A"
+    buying_power: float | None = None
+    buying_power_str: str = "N/A"
+    option_requirement: float | None = None
+    option_requirement_str: str = "N/A"
+    open_risk: float | None = None
+    open_risk_str: str = "N/A"
     open_risk_cap: float = 15000.0
     open_risk_cap_str: str = "$15,000.00"
     open_risk_pct: int = 0
@@ -68,46 +72,47 @@ class DashboardState(rx.State):
     # Incubator Grid
     incubator_rows: list[dict[str, Any]] = []
     incubator_monitored_rows: list[dict[str, Any]] = []
-    active_grid_str: str = "11/20 Active"
-    monitored_count_str: str = "9 Scanning"
-    total_completed_trades: int = 14
-    overall_win_rate: str = "100.0%"
-    total_gross_pnl_str: str = "$150.00"
-    total_fees_str: str = "$0.00"
-    total_net_pnl_str: str = "$150.00"
+    active_grid_str: str = "Loading"
+    configured_variant_count: int = 0
+    monitored_count_str: str = "Loading"
+    total_completed_trades: int = 0
+    overall_win_rate: str = "N/A"
+    total_gross_pnl_str: str = "N/A"
+    total_fees_str: str = "N/A"
+    total_net_pnl_str: str = "N/A"
     selected_variant: str = "IC_V01"
 
     # Incubator Curated Groups & Per-Trade History
     ai_aggregate: dict[str, Any] = {
         "title": "🤖 AI Pure Neural Strategy",
         "variant": "IC_V22 (Neural Pure)",
-        "net_pnl_str": "$127.35",
-        "win_rate": "83%",
-        "trades": 6,
-        "fees_str": "-$19.20",
+        "net_pnl_str": "N/A",
+        "win_rate": "N/A",
+        "trades": 0,
+        "fees_str": "N/A",
         "status": "DYNAMIC REGIME ADAPT",
         "badge_color": "indigo",
     }
     top5_aggregate: dict[str, Any] = {
         "title": "🏆 Top 5 Performing Strategies",
-        "net_pnl_str": "$704.80",
-        "avg_win_rate": "83.3%",
-        "trades": 24,
-        "fees_str": "-$76.80",
-        "best_variant": "IC_V07",
+        "net_pnl_str": "N/A",
+        "avg_win_rate": "N/A",
+        "trades": 0,
+        "fees_str": "N/A",
+        "best_variant": "N/A",
         "badge_color": "jade",
     }
     bottom3_aggregate: dict[str, Any] = {
         "title": "⚠️ Bottom 3 Underperforming Strategies",
-        "net_pnl_str": "-$1,044.30",
-        "avg_win_rate": "30.8%",
-        "trades": 13,
-        "fees_str": "-$33.60",
-        "worst_variant": "IC_V20",
+        "net_pnl_str": "N/A",
+        "avg_win_rate": "N/A",
+        "trades": 0,
+        "fees_str": "N/A",
+        "worst_variant": "N/A",
         "badge_color": "crimson",
     }
     visible_trades_50: list[dict[str, Any]] = []
-    total_closed_trades_count: int = 111
+    total_closed_trades_count: int = 0
     load_more_modal_open: bool = False
 
     # A/B Multi-Strategy Testing Lab (EXP-01 through EXP-04)
@@ -152,6 +157,161 @@ class DashboardState(rx.State):
     # Positions & Orders
     positions: list[dict[str, Any]] = []
     orders: list[dict[str, Any]] = []
+    position_records: list[dict[str, Any]] = []
+    position_issues: list[str] = []
+    position_data_status: str = "loading"
+    position_synced_at: str = "Waiting for broker data"
+    position_filter_mode: str = "all"
+    position_strategy_filters: list[str] = []
+    position_structure_filter: str = "All structures"
+    position_underlying_filter: str = "All underlyings"
+    position_expiry_filter: str = "All expiries"
+    position_workspace_mode: str = "Positions"
+    position_expanded: list[str] = []
+    selected_position_id: str = ""
+    position_payoff_scope: str = ""
+    position_chart_units: str = "Dollars"
+
+    @rx.var
+    def position_strategy_options(self) -> list[dict[str, Any]]:
+        return [{"id": strategy, "label": "_".join(strategy.split("_")[:2]),
+                 "checked": self.position_filter_mode == "all" or strategy in self.position_strategy_filters}
+                for strategy in sorted({p["strategy"] for p in self.position_records})]
+
+    @rx.var
+    def position_underlying_options(self) -> list[str]:
+        return ["All underlyings", *sorted({p["underlying"] for p in self.position_records})]
+
+    @rx.var
+    def position_expiry_options(self) -> list[str]:
+        return ["All expiries", *sorted({p["expiry"] for p in self.position_records})]
+
+    @rx.var
+    def filtered_position_records(self) -> list[dict[str, Any]]:
+        return [p for p in self.position_records
+                if (self.position_filter_mode == "all" or p["strategy"] in self.position_strategy_filters)
+                and (self.position_structure_filter == "All structures" or p["structure_label"] == self.position_structure_filter)
+                and (self.position_underlying_filter == "All underlyings" or p["underlying"] == self.position_underlying_filter)
+                and (self.position_expiry_filter == "All expiries" or p["expiry"] == self.position_expiry_filter)]
+
+    def _position_display_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        result = dict(row)
+        for key in ("open_pnl", "realized_pnl", "net_pnl", "opening_risk", "return_pct", "remaining_entry_cash", "liquidation_value", "delta", "theta"):
+            result[key + "_display"] = display(row[key], percent=key == "return_pct", currency=key != "delta")
+        result["fees_display"] = display(-row["fees"] if row["fees"] is not None else None)
+        result["fee_label"] = "Estimated fees" if row["estimated_fees"] else "Reported fees"
+        result["dte_label"] = f"{row['dte']} DTE" if row["dte"] is not None else "DTE unavailable"
+        result["leg_rows"] = [{"symbol": leg["symbol"], "quantity": str(leg["quantity"]),
+                               "quantity_color": display(float(leg["quantity"]))["color"],
+                               **{f"{key}_{attr}": value for key in ("cost", "mark", "pnl", "delta", "theta")
+                                  for attr, value in display(leg[key], currency=key != "delta").items()},
+                               "quote_time": leg["quote_time"]} for leg in row["legs"]]
+        return result
+
+    @rx.var
+    def position_groups(self) -> list[dict[str, Any]]:
+        rows = self.filtered_position_records
+        return [{"strategy": strategy, "label": "_".join(strategy.split("_")[:2]),
+                 "net": display(summarize([p for p in rows if p["strategy"] == strategy])["net_pnl"]),
+                 "rows": [self._position_display_row(p) for p in rows if p["strategy"] == strategy]}
+                for strategy in sorted({p["strategy"] for p in rows})]
+
+    @rx.var
+    def position_summary(self) -> dict[str, Any]:
+        summary = summarize(self.filtered_position_records)
+        if self.position_data_status != "ready" and not self.filtered_position_records:
+            summary.update(open_pnl=None, net_pnl=None)
+        return {"count": f"{summary['count']} of {len(self.position_records)} positions",
+                "coverage": f"{summary['marked']} of {summary['count']} valued",
+                "open": display(summary["open_pnl"]), "net": display(summary["net_pnl"]),
+                "fee_note": "Includes estimated fees" if summary["estimated_fees"] else "Includes reported fees"}
+
+    @rx.var
+    def position_comparison_rows(self) -> list[dict[str, Any]]:
+        rows = self.filtered_position_records
+        result = []
+        for strategy in sorted({p["strategy"] for p in rows}):
+            group = [p for p in rows if p["strategy"] == strategy]
+            totals = summarize(group)
+            result.append({"strategy": strategy, "count": str(len(group)),
+                           "fee_label": "Estimated" if totals["estimated_fees"] else "Reported",
+                           **{key: display(totals[key], percent=key == "return_pct") for key in
+                              ("open_pnl", "realized_pnl", "net_pnl", "opening_risk", "return_pct")},
+                           "fees": display(-totals["fees"] if totals["fees"] is not None else None)})
+        return result
+
+    @rx.var
+    def position_chart_records(self) -> list[dict[str, Any]]:
+        rows = self.filtered_position_records
+        if self.position_workspace_mode == "Positions":
+            selected = next((p for p in rows if p["id"] == self.selected_position_id), None)
+            rows = [selected] if selected else rows[:1]
+        return rows
+
+    @rx.var
+    def position_scope_options(self) -> list[str]:
+        return sorted({p["scope"] for p in self.position_chart_records if p["payoff_eligible"]})
+
+    @rx.var
+    def effective_position_scope(self) -> str:
+        options = self.position_scope_options
+        return self.position_payoff_scope if self.position_payoff_scope in options else next(iter(options), "")
+
+    @rx.var
+    def position_payoff_figure(self) -> go.Figure:
+        return payoff_figure(self.position_chart_records, self.effective_position_scope, self.position_chart_units)
+
+    @rx.var
+    def position_chart_info(self) -> dict[str, Any]:
+        rows = [r for r in self.position_chart_records if r["payoff_eligible"] and r["scope"] == self.effective_position_scope]
+        bounds = payoff_bounds(rows[0]) if len(rows) == 1 else {"max_profit": None, "max_loss": None, "breakevens": []}
+        label = (f"{'_'.join(rows[0]['strategy'].split('_')[:2])} · {rows[0]['structure_label']} · {rows[0]['expiry']}"
+                 if len(rows) == 1 else f"{len(rows)} positions in this chart; the table includes all selected expiries")
+        return {"label": label, "max_profit": display(bounds["max_profit"]), "max_loss": display(bounds["max_loss"]),
+                "breakevens": ", ".join(money(v) for v in bounds["breakevens"]) or "None"}
+
+    def toggle_position_strategy(self, strategy: str):
+        selected = [p["id"] for p in self.position_strategy_options if p["checked"]]
+        if strategy in selected:
+            selected.remove(strategy)
+        else:
+            selected.append(strategy)
+        self.position_strategy_filters = selected
+        self.position_filter_mode = "custom"
+
+    def reset_position_filters(self):
+        self.position_filter_mode = "all"
+        self.position_strategy_filters = []
+        self.position_structure_filter = "All structures"
+        self.position_underlying_filter = "All underlyings"
+        self.position_expiry_filter = "All expiries"
+
+    def clear_position_strategies(self):
+        self.position_filter_mode = "custom"
+        self.position_strategy_filters = []
+
+    def set_position_workspace_mode(self, value: str):
+        self.position_workspace_mode = value
+
+    def set_position_structure_filter(self, value: str):
+        self.position_structure_filter = value
+
+    def set_position_underlying_filter(self, value: str):
+        self.position_underlying_filter = value
+
+    def set_position_expiry_filter(self, value: str):
+        self.position_expiry_filter = value
+
+    def set_position_payoff_scope(self, value: str):
+        self.position_payoff_scope = value
+
+    def set_position_chart_units(self, value: str):
+        self.position_chart_units = value
+
+    def select_position(self, position_id: str):
+        self.selected_position_id = position_id
+        self.position_expanded = ([value for value in self.position_expanded if value != position_id]
+                                  if position_id in self.position_expanded else [*self.position_expanded, position_id])
 
     # Real-Time Logs
     log_filter: str = ""
@@ -256,18 +416,25 @@ class DashboardState(rx.State):
             self.open_risk_str = money(tel["open_exposure"])
             self.open_risk_cap = tel["risk_cap"]
             self.open_risk_cap_str = money(tel["risk_cap"])
-            self.open_risk_pct = int(min(100.0, (self.open_risk / max(self.open_risk_cap, 1.0)) * 100.0))
-            self.open_risk_pct_str = f"{self.open_risk_pct:.1f}% OF CAP USED"
-            self.buying_power_headroom_pct = int(tel["buying_power_headroom_pct"])
-            self.buying_power_headroom_str = f"{self.buying_power_headroom_pct:.1f}% Available"
+            self.open_risk_pct = int(min(100.0, self.open_risk / max(self.open_risk_cap, 1.0) * 100)) if self.open_risk is not None else 0
+            self.open_risk_pct_str = f"{self.open_risk_pct:.1f}% OF CAP USED" if self.open_risk is not None else "EXPOSURE UNAVAILABLE"
+            headroom = tel["buying_power_headroom_pct"]
+            self.buying_power_headroom_pct = int(headroom) if headroom is not None else 0
+            self.buying_power_headroom_str = f"{headroom:.1f}% Available" if headroom is not None else "Headroom unavailable"
             self.positions = tel["positions"]
             self.orders = tel["orders"]
+            workspace = get_position_workspace(tel)
+            self.position_records = workspace["rows"]
+            self.position_issues = workspace["issues"]
+            self.position_data_status = tel["positions_status"]
+            self.position_synced_at = tel["synced_at"]
 
             # 4. Incubator Grid
             inc = get_incubator_data()
+            self.configured_variant_count = len(inc.get("all_rows", []))
             self.incubator_rows = inc["rows"]
             self.incubator_monitored_rows = inc["monitored_rows"]
-            self.active_grid_str = inc["active_grid_str"]
+            self.active_grid_str = f"{len(inc['traded_rows'])}/{self.configured_variant_count} traded"
             self.monitored_count_str = f"{len(inc['monitored_rows'])} Scanning"
             self.total_completed_trades = inc["total_trades"]
             self.overall_win_rate = inc["overall_win_rate"]
@@ -536,9 +703,8 @@ class DashboardState(rx.State):
 
             ledger = None
             try:
-                from strategies.position_ledger import PositionLedger
-                ledger_path = os.getenv("POSITION_LEDGER_PATH", "logs/position_ledger.sqlite3")
-                ledger = PositionLedger(ledger_path)
+                from strategies.position_ledger import PositionLedger, resolve_ledger_path
+                ledger = PositionLedger(resolve_ledger_path())
                 with ledger.execution_gate():
                     ledger.set_panic_halt(True, reason="dashboard_panic_liquidation")
                     success = client.emergency_flatten_positions()

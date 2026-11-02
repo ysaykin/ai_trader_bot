@@ -246,5 +246,57 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy._panic_recovery.assert_called_once()
 
 
+    def test_restarted_entry_canceled_before_close(self) -> None:
+        strategy = SPXIronCondor()
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "RestartStrat"}
+        strategy.broker = Mock()
+        strategy.broker.name = "Tradier"
+        strategy.initialize()
+        strategy.cancel_order = Mock()
+        strategy.submit_order = Mock(return_value=[])
+
+        legs = [
+            LedgerLeg("e1", "leg1", 2),
+            LedgerLeg("e2", "leg2", -2),
+        ]
+        self.ledger.record_submission("pkg-entry", "RestartStrat", "open", legs, broker_tag="test-tag")
+        broker_parent = Order(identifier="broker-parent-1", strategy="RestartStrat", status="open", tag="test-tag")
+        self.ledger.bind_broker_submission("pkg-entry", broker_parent)
+
+        # entry_orders is empty simulating restart
+        position = strategy._runtime()
+        position.entry_orders = []
+        strategy.get_orders = Mock(return_value=[broker_parent])
+
+        # Trigger close
+        strategy._close_all_options(exit_reason="STOP_LOSS")
+
+        # Must cancel the durable active entry and return without submitting close
+        strategy.cancel_order.assert_called_once_with(broker_parent)
+        strategy.submit_order.assert_not_called()
+
+    def test_missing_underlying_price_fallback_for_expiry_exits_no_attribute_error(self) -> None:
+        strategy = SPXIronCondor()
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "ExpiryStrat"}
+        strategy.broker = Mock()
+        strategy.broker.name = "Tradier"
+        strategy.initialize()
+        strategy._underlying = Asset("SPXW", asset_type="index")
+        strategy._is_expiring_today = Mock(return_value=True)
+
+        # Mock _fetch_last_price to return None (spot unavailable)
+        strategy._fetch_last_price = Mock(return_value=None)
+        strategy._quote_bounds = Mock(return_value=None)
+        strategy._fetch_quote = Mock(return_value=None)
+
+        # Call emergency pricing calculation
+        buy_item = (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1)
+        sell_item = (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put"), -1)
+        # Should not raise AttributeError!
+        price = strategy._emergency_close_debit_fallback([buy_item, sell_item])
+        self.assertIsNotNone(price)
+        self.assertTrue(price > 0)
+
+
 if __name__ == "__main__":
     unittest.main()

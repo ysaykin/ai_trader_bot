@@ -447,6 +447,30 @@ class TrajectoryLogger:
         return row
 
 
+def _append_trade_event(log_path: Path, data: Dict[str, Any], event_id: Optional[str]) -> None:
+    """Append a broker event once, including after a process restart."""
+    import fcntl
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a+", encoding="utf-8") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            if event_id:
+                stream.seek(0)
+                for line in stream:
+                    try:
+                        previous = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(previous, dict) and previous.get("event_id") == event_id:
+                        return
+                data["event_id"] = event_id
+            stream.write(json.dumps(data) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
 def record_trade_entry(
     strategy_name: str,
     symbol: str,
@@ -459,6 +483,7 @@ def record_trade_entry(
     entry_fees: Optional[float] = None,
     trade_id: Optional[str] = None,
     log_path: Path = DEFAULT_LOG_PATH,
+    event_id: Optional[str] = None,
 ) -> str:
     """Record a trade entry event to logs/trades.jsonl."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,8 +520,7 @@ def record_trade_entry(
         "status": "OPEN",
     }
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry_data) + "\n")
+    _append_trade_event(log_path, entry_data, event_id)
 
     return trade_id
 
@@ -511,6 +535,7 @@ def record_trade_adjustment(
     net_pnl: float,
     remaining_quantity: int,
     log_path: Path = DEFAULT_LOG_PATH,
+    event_id: Optional[str] = None,
 ) -> None:
     """Record a confirmed partial realization while leaving the trade open."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -528,8 +553,7 @@ def record_trade_adjustment(
         "remaining_quantity": int(remaining_quantity),
         "status": "OPEN",
     }
-    with open(log_path, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(adjustment) + "\n")
+    _append_trade_event(log_path, adjustment, event_id)
 
 
 def record_trade_addition(
@@ -539,6 +563,7 @@ def record_trade_addition(
     fees: float,
     added_quantity: int,
     log_path: Path = DEFAULT_LOG_PATH,
+    event_id: Optional[str] = None,
 ) -> None:
     """Record confirmed scale-in cash and fees for an existing trade."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -552,8 +577,7 @@ def record_trade_addition(
         "added_quantity": int(added_quantity),
         "status": "OPEN",
     }
-    with open(log_path, "a", encoding="utf-8") as stream:
-        stream.write(json.dumps(addition) + "\n")
+    _append_trade_event(log_path, addition, event_id)
 
 
 def record_trade_exit(
@@ -572,6 +596,7 @@ def record_trade_exit(
     log_path: Path = DEFAULT_LOG_PATH,
     quantity: Optional[int] = None,
     legs: Optional[int] = None,
+    event_id: Optional[str] = None,
 ) -> None:
     """Record a trade exit event to logs/trades.jsonl with fee and net P&L tracking."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -619,8 +644,7 @@ def record_trade_exit(
     if mae_pnl is not None:
         exit_data["mae_pnl"] = float(mae_pnl)
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(exit_data) + "\n")
+    _append_trade_event(log_path, exit_data, event_id)
 
 
 def load_all_trades(log_path: Path = DEFAULT_LOG_PATH) -> List[Dict[str, Any]]:

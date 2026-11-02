@@ -432,8 +432,12 @@ class IronCondorTests(unittest.TestCase):
     def test_confirmed_close_cancellation_allows_replacement(self) -> None:
         self.open_filled_position()
         package_id = self.record_pending_close()
-        parent = SimpleNamespace(identifier="broker-close", status="canceled", child_orders=[])
         ledger = self.strategy._position_ledger
+        children = [SimpleNamespace(identifier=f"broker-close-{index}", status="canceled",
+                                    asset=self.strategy._asset_registry[leg["asset_key"]],
+                                    side=leg["side"], exec_quantity=0, avg_fill_price=0)
+                    for index, leg in enumerate(ledger.get_basket(package_id).legs)]
+        parent = SimpleNamespace(identifier="broker-close", status="canceled", child_orders=children)
         ledger.bind_broker_submission(package_id, parent)
         self.strategy._reconcile_inflight_orders([parent])
         self.assertEqual(ledger.get_basket(package_id).state, "canceled")
@@ -442,6 +446,19 @@ class IronCondorTests(unittest.TestCase):
         replacement = ledger.latest_basket(self.strategy._strategy_id(), {"close"})
         self.assertEqual(replacement.replacement_of, package_id)
         self.assertEqual(replacement.reprice_count, 1)
+
+    def test_terminal_close_without_execution_evidence_stays_inflight(self) -> None:
+        self.open_filled_position()
+        package_id = self.record_pending_close()
+        ledger = self.strategy._position_ledger
+        children = [SimpleNamespace(identifier=f"broker-close-{index}", status="canceled",
+                                    asset=self.strategy._asset_registry[leg["asset_key"]],
+                                    side=leg["side"], avg_fill_price=None)
+                    for index, leg in enumerate(ledger.get_basket(package_id).legs)]
+        parent = SimpleNamespace(identifier="broker-close", status="canceled", child_orders=children)
+        ledger.bind_broker_submission(package_id, parent)
+        self.assertTrue(self.strategy._reconcile_inflight_orders([parent]))
+        self.assertTrue(ledger.is_inflight(ledger.get_basket(package_id)))
 
     def test_pending_close_is_retained_during_grace_period(self) -> None:
         self.open_filled_position()
@@ -582,6 +599,8 @@ class IronCondorTests(unittest.TestCase):
         ledger = self.strategy._position_ledger
         owned = ledger.owned_quantities(self.strategy._strategy_id())
         baskets = ledger.open_baskets(self.strategy._strategy_id())
+        for basket in baskets:
+            ledger.mark_journaled(basket.package_id, "ENTRY")
         legs = list(self.strategy._owned_legs)
         self.strategy._publish_snapshot = Mock()
         for _ in range(3):
@@ -1176,7 +1195,8 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
 
     def test_incubator_defines_20_distinct_strategy_variants(self) -> None:
         hub = market_data_hub.MarketDataHub(ttl_seconds=240)
-        strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
+        with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid", "STRATEGYBRO_ENABLED": "false", "DYNAMIC_STRATEGIES_ENABLED": "false", "NEURAL_STRATEGY_ENABLED": "false"}):
+            strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
         self.assertEqual(len(strategies), 20)
         names = {s.name for s in strategies}
         self.assertEqual(len(names), 20)
@@ -1191,7 +1211,8 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
 
     def test_market_data_hub_deduplicates_chains_and_prices_across_20_strategies(self) -> None:
         hub = market_data_hub.MarketDataHub(ttl_seconds=240)
-        strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
+        with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid", "STRATEGYBRO_ENABLED": "false", "DYNAMIC_STRATEGIES_ENABLED": "false", "NEURAL_STRATEGY_ENABLED": "false"}):
+            strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
         fixed_dt = datetime(2026, 10, 26, 14, 0, tzinfo=timezone.utc)
         chain_call_count = 0
         price_call_count = 0
@@ -1354,7 +1375,8 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
             price = 0.50 if order.asset.strike in (580.0, 590.0) else 0.10
             strat.on_filled_order(None, order, price, order.quantity, 100)
         sync_broker_positions()
-        self.assertEqual(strat.parameters["quantity"], 2)
+        self.assertEqual(strat.parameters["quantity"], 1)
+        self.assertEqual(max(abs(q) for _, q in strat._owned_legs), 2)
         self.assertEqual(sorted(q for _, q in strat._owned_legs), [-2, -2, 2, 2])
         self.assertAlmostEqual(strat._entry_credit, 0.80)
         self.assertAlmostEqual(strat._entry_credit_cash, 160.0)
@@ -1362,7 +1384,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         # 3. TRIM_POSITION (50% scale-out) submits an atomic debit package; ownership updates on fills
         res = strat.apply_policy_action("TRIM_POSITION")
         self.assertEqual(res, "TRIM_POSITION")
-        self.assertEqual(strat.parameters["quantity"], 2)
+        self.assertEqual(strat.parameters["quantity"], 1)
         for order in strat._closing_orders:
             order.is_active.return_value = False
             price = 0.50 if order.asset.strike in (580.0, 590.0) else 0.10
@@ -1374,7 +1396,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         self.assertAlmostEqual(strat._entry_credit_cash, 80.0)
 
         # 4. ADD_POSITION is blocked when single-trade risk would exceed RSK-02 limit
-        strat.parameters["wing_width"] = 10.0  # $1,000 per contract -> 2 contracts = $2,000 > $1,500 (30% of $5k)
+        strat.parameters["max_position_risk"] = 1000.0  # $400 combined risk exceeds the $300 single-position limit.
         res = strat.apply_policy_action("ADD_POSITION")
         self.assertEqual(res, "HOLD")
         self.assertEqual(strat.parameters["quantity"], 1)
@@ -1524,7 +1546,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
 
     def test_incubator_extended_with_25_dte_testing_and_pure_neural_variants(self) -> None:
         """Incubator specs include 20 benchmarks + 25 DTE testing variant + pure neural strategy."""
-        specs = incubator.get_incubator_specs()
+        specs = incubator.get_incubator_specs(profile="full_grid")
         self.assertGreaterEqual(len(specs), 22)
         testing = next((s for s in specs if s.get("is_testing_variant")), None)
         self.assertIsNotNone(testing, "Testing variant should be present in incubator specs")
@@ -1611,14 +1633,16 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         strat.initialize()
 
         # Neural net selects IC_V07 (7DTE, delta 0.15, wing 5.0, stop loss 2.0)
-        strat._apply_neural_strategy_switch("IC_V07_7DTE_D15_W5_PT50_T1030")
+        with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid"}):
+            strat._apply_neural_strategy_switch("IC_V07_7DTE_D15_W5_PT50_T1030")
         self.assertEqual(strat.parameters["dte"], 7)
         self.assertEqual(strat.parameters["short_delta"], 0.15)
         self.assertEqual(strat.parameters["wing_width"], 5.0)
         self.assertEqual(strat.parameters["stop_loss_mult"], 2.0)
 
         # Later, market shifts and neural net switches to IC_V16 (21DTE, delta 0.20, wing 5.0, stop loss 2.5)
-        strat._apply_neural_strategy_switch("IC_V16_21DTE_D20_W5_PT50_T1100")
+        with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid"}):
+            strat._apply_neural_strategy_switch("IC_V16_21DTE_D20_W5_PT50_T1100")
         self.assertEqual(strat.parameters["dte"], 21)
         self.assertEqual(strat.parameters["short_delta"], 0.20)
         self.assertEqual(strat.parameters["wing_width"], 5.0)
@@ -1686,7 +1710,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
 
     def test_incubator_specs_includes_vertical_spread_variants(self) -> None:
         """Incubator includes IC_V23 (Bull Put) and IC_V24 (Bear Call) vertical spreads."""
-        specs = incubator.get_incubator_specs()
+        specs = incubator.get_incubator_specs(include_verticals=True)
         bull_put = next((s for s in specs if s.get("structure") == "bull_put"), None)
         bear_call = next((s for s in specs if s.get("structure") == "bear_call"), None)
         self.assertIsNotNone(bull_put, "Bull Put vertical spread should be in incubator specs")

@@ -14,6 +14,7 @@ COPY main.py .
 COPY trade_logger.py .
 COPY strategies/ strategies/
 COPY ml/ ml/
+COPY dashboard/broker_client.py dashboard/presentation.py dashboard/
 RUN pip install --no-cache-dir -r requirements.txt
 
 CMD ["python", "main.py"]

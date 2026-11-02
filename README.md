@@ -67,7 +67,28 @@ lumibot/
 3. Select execution mode in `.env`:
    - `TRADING_MODE=single` — Single `SPXIronCondor` strategy
    - `TRADING_MODE=ab` — Baseline vs. Challenger A/B execution
-   - `TRADING_MODE=incubator` — Full 20-variant (`IC_V01`..`IC_V20`) incubator grid
+   - `TRADING_MODE=incubator` — StrategyBro and dynamic strategy comparison
+
+The default `INCUBATOR_PROFILE=dynamic` roster prioritizes StrategyBro, TrendFlow,
+Skew Dynamic, VolCrush, ORB, and Neural Pure, followed by one 30 DTE plain IC
+control. Strategy-count limits preserve this priority. Use
+`INCUBATOR_PROFILE=full_grid` to opt into the full 29-strategy parameter sweep.
+
+Inspect entries and position recovery without starting a broker:
+
+```bash
+python3 tools/check_strategy_roster.py --ledger logs/position_ledger.sqlite3
+```
+
+Excluded owners with active ledger packages remain attached for management only.
+They cannot open new trades, add contracts, or switch strategies. Historical
+ownership is retained, and they stop being included on restart once their
+packages are terminal. Unknown owners stop startup with a configuration error.
+The dashboard comparison shows the selected entry roster; Positions retains
+existing packages. Compare fee-adjusted returns and risk over common periods,
+since different DTEs and entry filters produce different trade counts.
+Research snapshots and policy routing use only entry-enabled strategies. Neural
+Pure uses the existing model artifact; changing the roster does not retrain it.
 
 4. Train a policy artifact and enable it explicitly when ready:
 

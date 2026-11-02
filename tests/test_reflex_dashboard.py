@@ -54,16 +54,19 @@ class TestReflexDashboard(unittest.TestCase):
         self.assertIn(status["state"], ["RUNNING", "STANDBY (SLEEPING)", "ACTIVE & MONITORING", "OFFLINE", "INITIALIZING", "WARNING / CHECK LOGS"])
 
     def test_incubator_data(self):
+        from strategies.incubator import get_incubator_specs
+
         inc = get_incubator_data()
         self.assertIn("rows", inc)
         self.assertIn("all_rows", inc)
-        self.assertGreaterEqual(len(inc["all_rows"]), 20)
-        self.assertEqual(len(inc["curated_rows"]), 9)
+        self.assertEqual(len(inc["all_rows"]), len(get_incubator_specs()))
+        self.assertEqual(len(inc["curated_rows"]), min(9, len(inc["all_rows"])))
+        self.assertEqual(len({row["strategy_name"] for row in inc["curated_rows"]}), len(inc["curated_rows"]))
         self.assertIn("strategy_aggregates", inc)
         self.assertIn("ai", inc["strategy_aggregates"])
         self.assertIn("top5", inc["strategy_aggregates"])
         self.assertIn("bottom3", inc["strategy_aggregates"])
-        self.assertEqual(len(inc["visible_trades_50"]), len(inc["all_closed_trades"]))
+        self.assertEqual(len(inc["visible_trades_50"]), min(50, len(inc["all_closed_trades"])))
         self.assertGreaterEqual(len(inc["all_closed_trades"]), 1)
         self.assertIn("total_net_pnl_str", inc)
         self.assertIn("active_grid_str", inc)
@@ -105,7 +108,7 @@ class TestReflexDashboard(unittest.TestCase):
 
     def test_dashboard_state_attributes(self):
         fields = DashboardState.get_fields()
-        self.assertEqual(fields["current_tab"].default, "incubator")
+        self.assertEqual(fields["current_tab"].default, "positions")
         self.assertEqual(fields["broker_name"].default, "TRADIER")
         self.assertGreaterEqual(fields["open_risk_cap"].default, 5000.0)
 
