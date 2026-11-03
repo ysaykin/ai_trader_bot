@@ -15,6 +15,23 @@ services:
       - ./ml:/app/ml
       - ./logs:/app/logs
 
+  lumibot-recovery:
+    build: .
+    image: lumibot-lumibot-bot:latest
+    container_name: lumibot-recovery
+    restart: unless-stopped
+    command: ["python", "-m", "strategies.recovery_worker"]
+    env_file: .env
+    environment:
+      - TZ=America/New_York
+      - POSITION_LEDGER_PATH=${POSITION_LEDGER_PATH:-/app/logs/position_ledger.sqlite3}
+    volumes:
+      - ./main.py:/app/main.py:ro
+      - ./trade_logger.py:/app/trade_logger.py:ro
+      - ./strategies:/app/strategies
+      - ./dashboard:/app/dashboard:ro
+      - ./logs:/app/logs
+
   lumibot-dashboard:
     build:
       context: .
@@ -22,10 +39,11 @@ services:
     image: lumibot-lumibot-reflex-dashboard:latest
     container_name: lumibot-dashboard
     restart: unless-stopped
+    command: ["reflex", "run", "--env", "prod", "--single-port", "--backend-port", "8000"]
     ports:
-      - "3000:3000"
+      - "3000:8000"
       - "8005:8000"
-      - "8501:3000"
+      - "8501:8000"
     env_file: .env
     environment:
       - REFLEX_DIR=/tmp/reflex

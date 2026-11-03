@@ -50,7 +50,7 @@ This document is the **single source of truth** for all user-facing features sup
 | **ML-05** | Model Decision Explainer & Confidence GUI | Dashboard UI | 📋 Planned | Transparent AI decision-making (why bot entered/scaled/exited) | Dedicated 🧠 ML Intelligence Dashboard Tab |
 | **ML-06** | Multi-Head Neural Policy Network | Machine Learning | ✅ Active | Learn dynamic Add / Trim / Profit-Take / Strategy Selection across market regimes | Neural Action Probabilities & Dynamic TP Pill |
 | **ML-07** | Counterfactual Strategy & Regret Evaluator | Trading Evaluation | ✅ Active | Evaluate decisions vs all 20 simultaneous variants (MFE/MAE, Sortino, Regret) | Counterfactual Regret Scorecard |
-| **ML-08** | Self-Improving Continual Learning Loop | Machine Learning | 📋 Planned | Automated EOD retraining with Champion/Challenger shadow promotion gate | Model Version, Shadow Win-Rate & Promotion Badge |
+| **ML-08** | Self-Improving Continual Learning Loop | Machine Learning | ✅ Active | Automated EOD retraining with Champion/Challenger shadow promotion gate | Model Version, Shadow Win-Rate & Promotion Badge |
 
 ---
 

@@ -101,16 +101,17 @@ def single_trade_percentage(cap: float, override: str = "") -> float:
     return .05
 
 
-def fetch_json(settings: BrokerSettings, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
+def fetch_json(settings: BrokerSettings, path: str, params: dict[str, str] | None = None, snapshots: dict[str, Any] | None = None) -> dict[str, Any]:
     """Read retained account snapshots; cache slower benchmark metadata separately."""
     from strategies.broker_reads import get_broker_reads, BrokerReadUnavailable
     reads = get_broker_reads(settings.token, settings.account_number, settings.paper)
     reads.start()
     resource = path.rsplit("/", 1)[-1]
-    snapshots = reads.display()
+    if snapshots is None:
+        snapshots = reads.display()
     if resource in {"balances", "positions", "orders"}:
         snap = snapshots.get(resource, {})
-        if snap.get("data") is None or snap["status"] == "expired":
+        if snap.get("data") is None:
             raise BrokerReadUnavailable("Broker snapshot unavailable")
         data = dict(snap["data"]) if isinstance(snap["data"], dict) else {"data": snap["data"]}
         data["_snapshot_meta"] = {
@@ -118,24 +119,27 @@ def fetch_json(settings: BrokerSettings, path: str, params: dict[str, str] | Non
             "synced_at": snap.get("synced_at"),
             "success_at": snap.get("success_at"),
             "error": snap.get("error"),
+            "generation": snap.get("generation"),
+            "age": snap.get("age"),
+            "is_expired": (snap.get("status") == "expired"),
         }
         return data
     if resource == "quotes":
         symbols = (params or {}).get("symbols", "").split(",")
         reads.demand(symbols)
         quotes = [snapshots["quote:" + symbol]["data"] for symbol in symbols
-                  if snapshots.get("quote:" + symbol, {}).get("data") is not None
-                  and snapshots["quote:" + symbol]["status"] != "expired"]
+                  if snapshots.get("quote:" + symbol, {}).get("data") is not None]
         if not quotes:
             raise BrokerReadUnavailable("Quote snapshots unavailable")
         used = [snapshots["quote:" + symbol] for symbol in symbols
-                if snapshots.get("quote:" + symbol, {}).get("data") is not None
-                and snapshots["quote:" + symbol]["status"] != "expired"]
+                if snapshots.get("quote:" + symbol, {}).get("data") is not None]
         oldest = min(used, key=lambda snap: snap.get("success_at") or 0)
         return {"quotes": {"quote": quotes}, "_snapshot_meta": {
-            "status": "stale" if any(snap["status"] == "stale" for snap in used) else "ready",
-            "synced_at": oldest.get("synced_at"), "success_at": oldest.get("success_at"),
+            "status": "expired" if all(snap.get("status") == "expired" for snap in used) else "stale" if any(snap.get("status") in ("stale", "expired") for snap in used) else "ready",
+            "synced_at": oldest.get("synced_at"),
+            "success_at": oldest.get("success_at"),
             "error": "; ".join(str(snap["error"]) for snap in used if snap.get("error")),
+            "is_expired": all(snap.get("status") == "expired" for snap in used),
         }}
     return reads.get(path, params, caller="legacy-dashboard")
 
@@ -201,6 +205,11 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
         return result
 
     account_path = f"accounts/{settings.account_number}"
+    from strategies.broker_reads import get_broker_reads
+    reads = get_broker_reads(settings.token, settings.account_number, settings.paper)
+    reads.start()
+    bundle_snapshots = reads.display()
+
     endpoints = (
         ("account", f"{account_path}/balances", None),
         ("clock", "markets/clock", None),
@@ -213,7 +222,7 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
     source_statuses = {}
     for name, path, params in endpoints:
         try:
-            payload = fetch_json(settings, path, params)
+            payload = fetch_json(settings, path, params, snapshots=bundle_snapshots)
             meta = payload.pop("_snapshot_meta", None) if isinstance(payload, dict) else None
             if meta:
                 source_statuses[name] = meta
@@ -223,10 +232,18 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
                         result["errors"].append(f"{name.title()} telemetry is stale: {meta['error']}")
                     else:
                         result["errors"].append(f"{name.title()} telemetry is stale (last synced: {meta.get('synced_at')}).")
+                elif meta.get("status") == "expired":
+                    is_stale = True
+                    result["errors"].append(f"{name.title()} telemetry is expired (last synced: {meta.get('synced_at')}).")
                 if meta.get("synced_at") and meta.get("synced_at") != "No successful sync":
                     latest_success_time = min(filter(None, (latest_success_time, meta.get("synced_at"))))
             if name == "account":
-                result[name] = account_balances(payload["balances"], settings)
+                acct = account_balances(payload["balances"], settings)
+                result["historical_account"] = acct
+                if meta and meta.get("is_expired"):
+                    result[name] = None
+                else:
+                    result[name] = acct
             elif name == "clock":
                 clock = payload["clock"]
                 if not isinstance(clock, dict) or not clock.get("state"):
@@ -235,13 +252,18 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
             else:
                 container, key = {"positions": ("positions", "position"), "orders": ("orders", "order"),
                                   "history": ("history", "day")}[name]
-                result[name] = records(payload, container, key)
+                recs = records(payload, container, key)
+                result[name] = recs
+                if name == "positions":
+                    result["historical_positions"] = recs
+                elif name == "orders":
+                    result["historical_orders"] = recs
         except Exception:
             result["errors"].append(f"{name.title()} telemetry unavailable; refresh to retry.")
     symbols = {"SPX", "XSP", "SPY", os.getenv("IC_SYMBOL", "SPX")}
     symbols.update(str(p["symbol"]) for p in result["positions"] or [] if p.get("symbol"))
     try:
-        payload = fetch_json(settings, "markets/quotes", {"symbols": ",".join(sorted(symbols)), "greeks": "true"})
+        payload = fetch_json(settings, "markets/quotes", {"symbols": ",".join(sorted(symbols)), "greeks": "true"}, snapshots=bundle_snapshots)
         meta = payload.pop("_snapshot_meta", None) if isinstance(payload, dict) else None
         if meta:
             source_statuses["quotes"] = meta
@@ -254,6 +276,15 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
     except Exception:
         result["errors"].append("Quote telemetry unavailable; refresh to retry.")
     result["synced_at"] = latest_success_time
+    result["is_stale"] = is_stale
+    result["source_statuses"] = source_statuses
+    total_pos = len(result.get("positions") or [])
+    valued_pos = sum(1 for p in (result.get("positions") or []) if (result.get("quotes", {}).get(p.get("symbol")) or {}).get("bid") is not None)
+    result["valuation_coverage"] = {
+        "total": total_pos,
+        "valued": valued_pos,
+        "coverage_pct": (valued_pos / total_pos * 100.0) if total_pos > 0 else 100.0,
+    }
     result["is_stale"] = is_stale
     result["source_statuses"] = source_statuses
     if latest_success_time:

@@ -69,3 +69,31 @@ def test_unconfirmed_short_close_preserves_protective_long() -> None:
         assert not client.emergency_flatten_positions(timeout_seconds=1)
         assert post.call_count == 1
         assert post.call_args.kwargs["data"]["side"] == "buy_to_close"
+
+
+def test_emergency_submission_persists_intent_and_records_broker_id() -> None:
+    client = TradierClient("token", "account")
+    positions = [{"symbol": "ABC", "quantity": 1}]
+    with patch.object(client, "emergency_cancel_orders", return_value=True), \
+         patch.object(client, "_fetch_all_positions", side_effect=[positions, []]), \
+         patch.object(client, "_fetch_all_orders", return_value=[]), \
+         patch("dashboard.broker_client.requests.post") as post, \
+         patch("dashboard.broker_client.time.sleep"):
+        post.return_value.status_code = 200
+        post.return_value.json.return_value = {"order": {"id": 12345, "status": "ok"}}
+        assert client.emergency_flatten_positions() is True
+        assert "ABC" in client.submitted_emergency_orders
+        assert client.submitted_emergency_orders["ABC"]["broker_id"] == "12345"
+        assert client.submitted_emergency_orders["ABC"]["status"] == "submitted"
+
+
+def test_emergency_submission_timeout_retains_ambiguous_outcome_as_unresolved() -> None:
+    import requests
+    client = TradierClient("token", "account")
+    positions = [{"symbol": "ABC", "quantity": 1}]
+    with patch.object(client, "emergency_cancel_orders", return_value=True), \
+         patch.object(client, "_fetch_all_positions", return_value=positions), \
+         patch("dashboard.broker_client.requests.post", side_effect=requests.Timeout("Connection timed out")):
+        assert client.emergency_flatten_positions() is False
+        assert "ABC" in client.flatten_failures
+        assert "ambiguous" in client.flatten_failures["ABC"].lower() or "timed out" in client.flatten_failures["ABC"].lower()

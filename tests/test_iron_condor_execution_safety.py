@@ -275,6 +275,51 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy.cancel_order.assert_called_once_with(broker_parent)
         strategy.submit_order.assert_not_called()
 
+    def test_non_expiring_stop_loss_uses_bounded_fallback(self) -> None:
+        strategy = SPXIronCondor()
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "StopStrat"}
+        strategy.broker = Mock()
+        strategy.broker.name = "Tradier"
+        strategy.initialize()
+        position = strategy._runtime()
+        position.owned_legs = [
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1),
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put"), -1),
+        ]
+        position.position_open = True
+        strategy._is_expiring_today = Mock(return_value=False)
+        strategy._package_price = Mock(return_value=None)
+        strategy._emergency_close_debit_fallback = Mock(return_value=4.0)
+        strategy._submit_package = Mock(return_value=[])
+        strategy._close_all_options(exit_reason="STOP_LOSS")
+        strategy._submit_package.assert_called_once()
+        self.assertEqual(strategy._submit_package.call_args.kwargs["order_type"], "debit")
+        self.assertEqual(strategy._submit_package.call_args.kwargs["price"], 4.0)
+
+    def test_close_repricing_stays_a_bounded_debit_limit(self) -> None:
+        strategy = SPXIronCondor()
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "RepriceStrat"}
+        strategy.broker = Mock()
+        strategy.broker.name = "Tradier"
+        strategy.initialize()
+        position = strategy._runtime()
+        position.owned_legs = [
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1),
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put"), -1),
+        ]
+        position.position_open = True
+        strategy.parameters["wing_width"] = 5.0
+        previous = SimpleNamespace(state="canceled", created_at="2020-01-01T00:00:00+00:00", updated_at="2020-01-01T00:00:00+00:00", reprice_count=20, package_id="old")
+        entry = SimpleNamespace(created_at="2019-01-01T00:00:00+00:00")
+        strategy._latest_position_basket = Mock(side_effect=lambda _position, intents: previous if "close" in intents else entry)
+        strategy._package_price = Mock(return_value=4.99)
+        strategy._close_allow_market = True
+        strategy._submit_package = Mock(return_value=[])
+        strategy._close_all_options(exit_reason="STOP_LOSS")
+        strategy._submit_package.assert_called_once()
+        self.assertEqual(strategy._submit_package.call_args.kwargs["order_type"], "debit")
+        self.assertLessEqual(strategy._submit_package.call_args.kwargs["price"], 5.0)
+
     def test_missing_underlying_price_fallback_for_expiry_exits_no_attribute_error(self) -> None:
         strategy = SPXIronCondor()
         strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "ExpiryStrat"}

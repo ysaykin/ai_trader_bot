@@ -9,6 +9,7 @@ import math
 import os
 import sqlite3
 import threading
+import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -211,6 +212,38 @@ class PositionLedger:
                     package_id TEXT NOT NULL REFERENCES packages(package_id),
                     event TEXT NOT NULL,
                     PRIMARY KEY(package_id, event)
+                );
+                CREATE TABLE IF NOT EXISTS recovery_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    scope TEXT NOT NULL,
+                    target_id TEXT,
+                    status TEXT NOT NULL,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS recovery_worker_heartbeat (
+                    worker_id TEXT PRIMARY KEY,
+                    hostname TEXT,
+                    pid INTEGER,
+                    last_heartbeat TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 1
+                );
+                CREATE TABLE IF NOT EXISTS emergency_submissions (
+                    intent_id TEXT PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    price REAL,
+                    broker_id TEXT,
+                    status TEXT NOT NULL,
+                    cumulative_fills INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    payload TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 );
                 """
             )
@@ -1034,6 +1067,231 @@ class PositionLedger:
             if row is None:
                 return False
             return str(row["value"]).strip() in ("1", "true", "True")
+
+    # ------------------------------------------------------------------ #
+    # Recovery Jobs & Coordinator State
+    # ------------------------------------------------------------------ #
+
+    def enqueue_recovery_job(
+        self, scope: str, target_id: str | None = None, payload: dict | None = None
+    ) -> str:
+        """Enqueue a durable recovery job if not already pending or in progress."""
+        now = datetime.now(timezone.utc).isoformat()
+        payload_json = json.dumps(payload or {})
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """SELECT job_id FROM recovery_jobs
+                   WHERE scope = ? AND (target_id = ? OR (target_id IS NULL AND ? IS NULL))
+                   AND status IN ('pending', 'in_progress')""",
+                (scope, target_id, target_id),
+            ).fetchone()
+            if row is not None:
+                return str(row["job_id"])
+            job_id = uuid.uuid4().hex
+            self._connection.execute(
+                """INSERT INTO recovery_jobs (job_id, scope, target_id, status, payload, attempts, created_at, updated_at)
+                   VALUES (?, ?, ?, 'pending', ?, 0, ?, ?)""",
+                (job_id, scope, target_id, payload_json, now, now),
+            )
+            return job_id
+
+    def claim_next_recovery_job(
+        self, worker_id: str, lock_timeout_seconds: float = 30.0
+    ) -> dict[str, Any] | None:
+        """Claim the oldest pending or timed-out recovery job."""
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """SELECT * FROM recovery_jobs
+                   WHERE status = 'pending'
+                   ORDER BY created_at ASC LIMIT 1"""
+            )
+            row = cursor.fetchone()
+            if row is None:
+                cursor = self._connection.execute(
+                    """SELECT * FROM recovery_jobs
+                       WHERE status = 'in_progress'
+                       ORDER BY updated_at ASC LIMIT 1"""
+                )
+                cand = cursor.fetchone()
+                if cand is not None:
+                    try:
+                        updated_at = datetime.fromisoformat(cand["updated_at"])
+                        if updated_at.tzinfo is None:
+                            updated_at = updated_at.replace(tzinfo=timezone.utc)
+                        if (now - updated_at).total_seconds() > lock_timeout_seconds:
+                            row = cand
+                    except Exception:
+                        row = cand
+            if row is None:
+                return None
+            job_id = row["job_id"]
+            attempts = int(row["attempts"]) + 1
+            self._connection.execute(
+                """UPDATE recovery_jobs
+                   SET status = 'in_progress', attempts = ?, updated_at = ?
+                   WHERE job_id = ?""",
+                (attempts, now_str, job_id),
+            )
+            job_dict = dict(row)
+            job_dict["attempts"] = attempts
+            job_dict["status"] = "in_progress"
+            try:
+                job_dict["payload"] = json.loads(row["payload"])
+            except Exception:
+                job_dict["payload"] = {}
+            return job_dict
+
+    def update_recovery_job(
+        self,
+        job_id: str,
+        status: str,
+        last_error: str | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """Update recovery job terminal status or retry error."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            if payload is not None:
+                self._connection.execute(
+                    """UPDATE recovery_jobs
+                       SET status = ?, last_error = ?, payload = ?, updated_at = ?
+                       WHERE job_id = ?""",
+                    (status, last_error, json.dumps(payload), now_str, job_id),
+                )
+            else:
+                self._connection.execute(
+                    """UPDATE recovery_jobs
+                       SET status = ?, last_error = ?, updated_at = ?
+                       WHERE job_id = ?""",
+                    (status, last_error, now_str, job_id),
+                )
+
+    def list_recovery_jobs(
+        self, scope: str | None = None, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List recovery jobs with optional scope and status filters."""
+        query = "SELECT * FROM recovery_jobs WHERE 1=1"
+        params: list[Any] = []
+        if scope:
+            query += " AND scope = ?"
+            params.append(scope)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at ASC"
+        with self._lock:
+            rows = self._connection.execute(query, params).fetchall()
+            results = []
+            for r in rows:
+                item = dict(r)
+                try:
+                    item["payload"] = json.loads(r["payload"])
+                except Exception:
+                    item["payload"] = {}
+                results.append(item)
+            return results
+
+    def acquire_worker_exclusion(
+        self, worker_id: str, timeout_seconds: float = 15.0
+    ) -> bool:
+        """Enforce single-worker exclusion via heartbeat lease."""
+        now = datetime.now(timezone.utc)
+        now_str = now.isoformat()
+        with self._lock, self._connection:
+            rows = self._connection.execute(
+                "SELECT * FROM recovery_worker_heartbeat WHERE is_active = 1"
+            ).fetchall()
+            for r in rows:
+                if str(r["worker_id"]) != worker_id:
+                    try:
+                        hb = datetime.fromisoformat(r["last_heartbeat"])
+                        if hb.tzinfo is None:
+                            hb = hb.replace(tzinfo=timezone.utc)
+                        if (now - hb).total_seconds() < timeout_seconds:
+                            return False
+                    except Exception:
+                        pass
+            self._connection.execute(
+                """INSERT INTO recovery_worker_heartbeat (worker_id, pid, hostname, last_heartbeat, is_active)
+                   VALUES (?, ?, ?, ?, 1)
+                   ON CONFLICT(worker_id) DO UPDATE SET last_heartbeat = excluded.last_heartbeat, is_active = 1""",
+                (worker_id, os.getpid(), os.uname().nodename if hasattr(os, "uname") else "localhost", now_str),
+            )
+            return True
+
+    def update_worker_heartbeat(self, worker_id: str) -> None:
+        """Update heartbeat timestamp for active worker."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE recovery_worker_heartbeat SET last_heartbeat = ? WHERE worker_id = ?",
+                (now_str, worker_id),
+            )
+
+    def release_worker(self, worker_id: str) -> None:
+        """Release worker exclusion lease on graceful shutdown."""
+        with self._lock, self._connection:
+            self._connection.execute(
+                "UPDATE recovery_worker_heartbeat SET is_active = 0 WHERE worker_id = ?",
+                (worker_id,),
+            )
+
+    # ------------------------------------------------------------------ #
+    # Emergency Submissions Tracking
+    # ------------------------------------------------------------------ #
+
+    def persist_emergency_intent(
+        self,
+        intent_id: str,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float | None = None,
+        payload: dict | None = None,
+    ) -> None:
+        """Persist submission intent BEFORE dispatching order to broker."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO emergency_submissions (intent_id, symbol, side, quantity, price, status, payload, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'intent', ?, ?, ?)
+                   ON CONFLICT(intent_id) DO UPDATE SET updated_at = excluded.updated_at""",
+                (intent_id, symbol, side, quantity, price, json.dumps(payload or {}), now_str, now_str),
+            )
+
+    def update_emergency_submission(
+        self,
+        intent_id: str,
+        broker_id: str | None = None,
+        status: str = "submitted",
+        cumulative_fills: int = 0,
+        last_error: str | None = None,
+    ) -> None:
+        """Record returned broker ID, acceptance, fills, or errors."""
+        now_str = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """UPDATE emergency_submissions
+                   SET broker_id = COALESCE(?, broker_id), status = ?, cumulative_fills = ?, last_error = ?, updated_at = ?
+                   WHERE intent_id = ?""",
+                (broker_id, status, cumulative_fills, last_error, now_str, intent_id),
+            )
+
+    def get_unresolved_emergency_submissions(
+        self, symbol: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Fetch submissions that are still in-flight, unresolved, or partially filled."""
+        query = """SELECT * FROM emergency_submissions
+                   WHERE status IN ('intent', 'submitted', 'unresolved', 'partially_filled')"""
+        params: list[Any] = []
+        if symbol:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        with self._lock:
+            rows = self._connection.execute(query, params).fetchall()
+            return [dict(r) for r in rows]
 
     def set_trade_id(self, package_id: str, trade_id: str) -> None:
         """Attach every submission in a position to the same journal identity."""

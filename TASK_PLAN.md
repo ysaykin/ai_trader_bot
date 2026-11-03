@@ -573,3 +573,53 @@ entry also has no broker identity or confirmed terminal evidence and remains
 locked. Neural Pure retains its existing opt-in policy requirement. These are
 not claims that every legacy reservation was cleared or every strategy must
 enter regardless of its filters. No remote Git operations were performed.
+
+## Scanner roster and remaining retired positions, 2026-11-03
+
+Reproduce why configured entry strategies disappear from Scanner / Monitor after
+trading, then keep every configured strategy visible with durable position-slot
+counts and honest monitoring states. Replace the obsolete fixed roster, risk and
+evaluation labels. Preserve the in-progress neural dashboard changes. Add offline
+regressions, compile Reflex, and verify the running scanner in the browser.
+
+Compare retired holdings with fresh Tradier paper execution evidence. Retry only
+their existing close orders; replace orders only after confirmed termination.
+Keep reservations for broker-pending orders that reject cancellation. Verify the
+actual remaining contract quantities and report unresolved broker restrictions.
+
+### Scanner verification and retired-position result
+
+Reproduced the empty scanner locally and inside the deployed dashboard:
+7 configured strategies, 7 with trade history, and 0 scanner rows. The adapter
+excluded every strategy after any open or closed trade. Added a regression that
+failed with all seven rows missing, plus failures for pending position capacity
+and the disabled neural policy being labeled active.
+
+The scanner now lists the complete configured entry roster independently of
+trade history. It reads durable positions for slot counts, including pending
+entries, and shows capacity full, disabled policy, unresolved order identity,
+or monitoring status. Replaced fixed 20-strategy, $5,000, completed-profit and
+one-minute-evaluation claims with configured values and accurate labels.
+Preserved the unrelated in-progress neural dashboard edits.
+
+Offline gate: 68 passed, 3 optional skips. Reflex dry compilation, production
+frontend build, focused Ruff checks and diff checks passed. Recreated only the
+dashboard in production mode. Reflex requires a single internal production port;
+the 3000, 8005 and 8501 host URLs now all forward to internal port 8000. The bot
+remained running throughout. Browser verification showed 7 Strategies, 7 Monitored,
+$15,000 risk caps and all seven rows with position slots. V26/V27/V29 were at
+capacity, V22 showed POLICY DISABLED, V19 showed ORDER REVIEW REQUIRED, and
+V25/V28 remained visible for entry monitoring. Screenshot saved under
+/private/tmp/lumibot-scanner-20261103.png.
+
+Fresh account verification showed 30 option contracts and no broker/ledger
+quantity mismatch. V06 and V08 no longer have held retired positions. V07 and
+V20 still hold four legs each, with saved RETIRED_STRATEGY exit intent and close
+orders 40862870 and 40910663 respectively. Retried cancellation once for each:
+both returned HTTP 400, "order not available to be canceled". An update to the
+same existing order at its current limit also returned HTTP 400 for both:
+"Order not in valid state for modifications: PendingNew". Fresh detail reads
+reported pending and zero executed quantities for every leg. No replacement
+close was submitted because the existing orders have no confirmed terminal
+outcome. These two closes require broker-side repair; they were not reported as
+filled or removed from inventory. No remote Git work was performed.

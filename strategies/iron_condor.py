@@ -450,12 +450,9 @@ class SPXIronCondor(Strategy):
     def _panic_recovery(self) -> None:
         """Retry account liquidation under the shared execution gate."""
         try:
-            from dashboard.broker_client import get_broker_client
             with self._position_ledger.execution_gate():
                 if self._position_ledger.is_panic_halted():
-                    client = get_broker_client()
-                    if client is not None:
-                        client.emergency_flatten_positions()
+                    self._position_ledger.enqueue_recovery_job(scope="account")
         except Exception as error:
             logger.error("Panic recovery failed: %s", error)
 
@@ -1459,6 +1456,25 @@ class SPXIronCondor(Strategy):
                 reprice_count = previous.reprice_count + 1
                 replacement_of = previous.package_id
             legs = [(asset, -signed_quantity) for asset, signed_quantity in position.owned_legs]
+            is_balanced = len(legs) in (2, 4) and len({abs(quantity) for _, quantity in legs}) == 1
+            if not is_balanced and legs:
+                logger.warning(
+                    "Position %s has unbalanced residual legs %s; queuing position-scoped recovery job.",
+                    position.position_id,
+                    legs,
+                )
+                self._position_ledger.enqueue_recovery_job(
+                    scope="position",
+                    target_id=position.position_id,
+                    payload={"strategy_id": self._strategy_id(), "legs": [(asset_key(a), qty) for a, qty in legs]},
+                )
+                orders = self._submit_reduce_only_orders(
+                    legs,
+                    position_id=position.position_id,
+                    order_type="debit",
+                )
+                position.closing_orders.extend(orders)
+                return
             try:
                 price = self._package_price(legs, order_type="debit")
             except Exception as error:
@@ -1469,7 +1485,7 @@ class SPXIronCondor(Strategy):
             if price is None or price < 0:
                 urgent = (
                     self._is_expiring_today(position_id=position.position_id)
-                    or position.pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"}
+                    or position.pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW", "STOP_LOSS"}
                 )
                 if not urgent:
                     logger.warning("Complete quotes are required before closing the package.")
@@ -1478,11 +1494,14 @@ class SPXIronCondor(Strategy):
                 if price is None:
                     logger.error("Cannot establish a bounded emergency close price; retaining management.")
                     return
+            # Tradier does not support market orders for this multileg route.
+            # Keep IC_CLOSE_ALLOW_MARKET compatible, but use a bounded debit limit.
             order_type = "debit"
-            if reprice_count > self._close_max_reprices and self._close_allow_market:
-                order_type = "market"
-            else:
-                price += min(reprice_count, self._close_max_reprices) * self._close_price_step
+            width = float(position.settings.get("wing_width", 0.0))
+            if not math.isfinite(width) or width <= 0 or not math.isfinite(price):
+                logger.error("Cannot establish a bounded close price; retaining management.")
+                return
+            price = min(width, price + min(reprice_count, self._close_max_reprices) * self._close_price_step)
             orders = self._submit_package(
                 legs,
                 intent="close",
@@ -2165,6 +2184,17 @@ class SPXIronCondor(Strategy):
         return "tradier" in name
 
     @fresh_broker_reads()
+    def _submit_reduce_only_orders(
+        self,
+        legs: list[tuple[Asset, int]],
+        position_id: str,
+        order_type: str = "debit",
+        price: float | None = None,
+    ) -> list:
+        """Leave residuals queued until durable, scoped fill reconciliation exists."""
+        logger.error("Scoped recovery for position %s is pending reconciliation; no orders submitted", position_id)
+        return []
+
     def _submit_package(
         self,
         legs: list[tuple[Asset, int]],
@@ -2178,8 +2208,24 @@ class SPXIronCondor(Strategy):
     ) -> list:
         if not self._supports_atomic_multileg():
             raise RuntimeError("broker does not have a verified atomic multi-leg adapter")
-        if len(legs) not in (2, 4) or len({abs(quantity) for _, quantity in legs}) != 1:
-            raise ValueError("an atomic package requires 2 or 4 balanced legs with matching quantity")
+        opening = intent in {"open", "add"}
+        if opening:
+            if len(legs) not in (2, 4) or len({abs(quantity) for _, quantity in legs}) != 1:
+                raise ValueError("an atomic package requires 2 or 4 balanced legs with matching quantity")
+        elif len(legs) not in (2, 4) or len({abs(quantity) for _, quantity in legs}) != 1:
+            # Unbalanced close package requested: route through scoped reduce-only recovery path
+            pid = position_id or self._runtime().position_id
+            self._position_ledger.enqueue_recovery_job(
+                scope="position",
+                target_id=pid,
+                payload={"strategy_id": self._strategy_id(), "legs": [(asset_key(a), qty) for a, qty in legs]},
+            )
+            return self._submit_reduce_only_orders(
+                legs,
+                position_id=pid,
+                order_type=order_type,
+                price=price,
+            )
         package_id = uuid.uuid4().hex
         owner = self._strategy_id()
         broker_tag = self._broker_routing_tag()

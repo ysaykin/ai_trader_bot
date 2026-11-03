@@ -158,6 +158,7 @@ class DashboardState(rx.State):
     benchmark_correlation: str = "0.08"
 
     # Neural Policy
+    model_version: str = "v1"
     market_regime: str = "Low-Vol Pinning"
     dynamic_pt: str = "40.0%"
     contextual_selector: str = "IC_V05 (15Δ, $5 Wing)"
@@ -496,7 +497,7 @@ class DashboardState(rx.State):
             self.incubator_rows = inc["rows"]
             self.incubator_monitored_rows = inc["monitored_rows"]
             self.active_grid_str = f"{len(inc['traded_rows'])}/{self.configured_variant_count} traded"
-            self.monitored_count_str = f"{len(inc['monitored_rows'])} Scanning"
+            self.monitored_count_str = f"{len(inc['monitored_rows'])} Monitored"
             self.total_completed_trades = inc["total_trades"]
             self.overall_win_rate = inc["overall_win_rate"]
             self.total_gross_pnl_str = inc["total_gross_pnl_str"]
@@ -556,6 +557,7 @@ class DashboardState(rx.State):
 
             # 6. Neural Policy
             ml = get_neural_policy_data()
+            self.model_version = ml.get("model_version", "v1")
             self.market_regime = ml["market_regime"]
             self.dynamic_pt = ml["dynamic_pt"]
             self.contextual_selector = ml["contextual_selector"]

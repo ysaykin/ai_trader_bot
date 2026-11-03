@@ -45,6 +45,7 @@ class TradierClient:
             "Accept": "application/json",
         }
         self.flatten_failures: Dict[str, str] = {}
+        self.submitted_emergency_orders: Dict[str, Any] = {}
 
     def _reads(self):
         from strategies.broker_reads import get_broker_reads
@@ -376,6 +377,29 @@ class TradierClient:
             self.flatten_failures["__global__"] = "Unable to verify cancellation of working orders"
             return False
 
+        # A prior dispatch without a broker ID cannot be safely matched after a
+        # timeout. Keep it unresolved rather than risk placing a duplicate order.
+        try:
+            from strategies.position_ledger import PositionLedger
+            with_ledger = PositionLedger()
+            try:
+                prior = with_ledger.get_unresolved_emergency_submissions()
+                orders = {str(o.get("id")): o for o in self._fetch_all_orders()} if prior else {}
+                for submission in prior:
+                    order = orders.get(str(submission.get("broker_id"))) if submission.get("broker_id") else None
+                    status = str(order.get("status", "")).lower() if order else ""
+                    if status not in {"filled", "canceled", "cancelled", "expired", "rejected", "failed"}:
+                        self.flatten_failures["__reconciliation__"] = "Prior emergency submission remains unresolved"
+                        return False
+                    fills = int(float(order.get("executed_quantity") or order.get("filled_quantity") or 0))
+                    with_ledger.update_emergency_submission(submission["intent_id"], status=status,
+                                                           cumulative_fills=fills)
+            finally:
+                with_ledger.close()
+        except Exception as exc:
+            self.flatten_failures["__reconciliation__"] = f"Cannot reconcile emergency submissions: {exc}"
+            return False
+
         # 2. Re-read positions to capture fills during cancellation
         try:
             positions = self._fetch_all_positions()
@@ -495,19 +519,76 @@ class TradierClient:
                         else:
                             self.flatten_failures[sym] = f"Cannot price index option close: {exc}"
                             continue
+                intent_id = f"emerg_{sym}_{int(time.time() * 1000)}"
+                ledger = None
+                try:
+                    from strategies.position_ledger import PositionLedger
+                    ledger = PositionLedger()
+                    limit_p = float(data["price"]) if "price" in data else None
+                    ledger.persist_emergency_intent(
+                        intent_id, sym, side, abs_qty, price=limit_p, payload=data
+                    )
+                except Exception as exc:
+                    self.flatten_failures[sym] = f"Cannot persist emergency intent: {exc}"
+                    if ledger:
+                        ledger.close()
+                    continue
+
+                broker_id = None
                 try:
                     url = f"{self.base_url}/accounts/{self.account}/orders"
                     res = self._submit_once("post", url, headers=self.headers, data=data, timeout=6)
                     if res.status_code not in (200, 201):
                         self.flatten_failures[sym] = f"Order rejected (status {res.status_code})"
                         logger.error(f"Tradier reject for {sym}: {res.status_code} {res.text}")
+                        if ledger:
+                            ledger.update_emergency_submission(intent_id, status="rejected", last_error=f"HTTP {res.status_code}")
                     else:
                         res_json = res.json()
+                        if not isinstance(res_json, dict):
+                            res_json = {}
                         if "errors" in res_json:
                             self.flatten_failures[sym] = f"Broker errors: {res_json['errors']}"
+                            if ledger:
+                                ledger.update_emergency_submission(intent_id, status="rejected", last_error=str(res_json["errors"]))
+                        elif "fault" in res_json or "error" in res_json:
+                            err_msg = str(res_json.get("fault") or res_json.get("error"))
+                            self.flatten_failures[sym] = f"Broker error: {err_msg}"
+                            if ledger:
+                                ledger.update_emergency_submission(intent_id, status="rejected", last_error=err_msg)
+                        else:
+                            order_info = res_json.get("order") if isinstance(res_json.get("order"), dict) else {}
+                            broker_id = str(order_info.get("id")) if order_info.get("id") else None
+                            order_stat = str(order_info.get("status", "ok")).lower()
+                            if not broker_id or order_stat not in {"ok", "open", "pending", "submitted", "accepted", "partially_filled", "filled"}:
+                                self.flatten_failures[sym] = "Broker acceptance could not be verified"
+                                ledger.update_emergency_submission(intent_id, broker_id=broker_id, status="unresolved", last_error=str(order_info))
+                            elif order_stat in ("rejected", "error"):
+                                self.flatten_failures[sym] = f"Broker order rejected: {order_stat}"
+                                if ledger:
+                                    ledger.update_emergency_submission(intent_id, broker_id=broker_id, status="rejected", last_error=order_stat)
+                            else:
+                                self.submitted_emergency_orders[sym] = {
+                                    "intent_id": intent_id,
+                                    "broker_id": broker_id,
+                                    "symbol": sym,
+                                    "side": side,
+                                    "quantity": abs_qty,
+                                    "status": "submitted",
+                                }
+                                if ledger:
+                                    ledger.update_emergency_submission(intent_id, broker_id=broker_id, status="submitted")
                 except Exception as exc:
-                    self.flatten_failures[sym] = f"Order exception: {exc}"
+                    self.flatten_failures[sym] = f"Order exception/ambiguous: {exc}"
                     logger.error(f"Exception submitting close order for {sym}: {exc}")
+                    if ledger:
+                        ledger.update_emergency_submission(intent_id, status="unresolved", last_error=str(exc))
+                finally:
+                    if ledger:
+                        try:
+                            ledger.close()
+                        except Exception:
+                            pass
 
         if self.flatten_failures:
             return False
@@ -526,6 +607,12 @@ class TradierClient:
                     o for o in self._fetch_all_orders()
                     if str(o.get("status", "")).lower() in working_statuses
                 ]
+                for o in working_orders:
+                    o_id = str(o.get("id", ""))
+                    fills = int(float(o.get("executed_quantity") or o.get("filled_quantity") or 0))
+                    for tracked in self.submitted_emergency_orders.values():
+                        if tracked.get("broker_id") == o_id:
+                            tracked["cumulative_fills"] = fills
                 if not remaining_positions and not working_orders:
                     return True
             except Exception as poll_err:

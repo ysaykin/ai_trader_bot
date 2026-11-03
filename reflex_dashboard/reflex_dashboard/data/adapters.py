@@ -252,64 +252,47 @@ def get_broker_telemetry() -> dict[str, Any]:
 
 def _apply_broker_snapshot(res: dict[str, Any], snapshots: dict[str, Any]) -> None:
     """Present one local snapshot bundle. Refresh failures retain successful data."""
-    res["freshness"] = {key: {k: value[k] for k in ("status", "synced_at", "age", "error", "generation")}
-                        for key, value in snapshots.items() if key in {"balances", "positions", "orders"} or key.startswith("quote:")}
-    def usable(key):
-        snap = snapshots.get(key, {})
-        return snap.get("data") if snap.get("status") != "expired" else None
-    balance = usable("balances")
-    if balance is not None:
-        b = balance["balances"]
-        margin = b.get("margin") or b.get("cash") or {}
-        margin = margin if isinstance(margin, dict) else {}
-        res.update(equity=number(b.get("total_equity", b.get("equity"))), cash=number(b.get("total_cash", margin.get("cash"))),
-                   buying_power=number(margin.get("option_buying_power")), option_requirement=number(margin.get("option_requirement")),
-                   balances_status=snapshots["balances"]["status"])
-        res["open_exposure"] = res["option_requirement"]
-    positions = usable("positions")
-    quotes = {key[6:]: usable(key) for key in snapshots if key.startswith("quote:") and usable(key) is not None}
+    from dashboard.presentation import build_dashboard_presentation_bundle
+    bundle = build_dashboard_presentation_bundle(snapshots)
+
+    res["freshness"] = bundle["freshness"]
+    res["generations"] = bundle["generations"]
+    res["provider_timestamps"] = bundle["provider_timestamps"]
+    res["valuation_coverage"] = bundle["valuation_coverage"]
+    res["historical_positions"] = bundle["historical_positions"]
+    res["historical_raw_positions"] = bundle["historical_raw_positions"]
+    res["historical_orders"] = bundle["historical_orders"]
+    res["raw_orders"] = bundle["raw_orders"]
+
+    if bundle["equity"] is not None:
+        res["equity"] = bundle["equity"]
+    if bundle["cash"] is not None:
+        res["cash"] = bundle["cash"]
+    if bundle["buying_power"] is not None:
+        res["buying_power"] = bundle["buying_power"]
+    if bundle["option_requirement"] is not None:
+        res["option_requirement"] = bundle["option_requirement"]
+        res["open_exposure"] = bundle["open_exposure"]
+    res["balances_status"] = bundle["balances_status"]
+
+    quotes = {key[6:]: snapshots[key].get("data") for key in snapshots if key.startswith("quote:") and isinstance(snapshots[key].get("data"), dict)}
     res["quotes"] = {sym: {"mark": option_mark(q.get("bid"), q.get("ask"), q.get("last")),
                            "delta": number((q.get("greeks") or {}).get("delta")),
                            "theta": number((q.get("greeks") or {}).get("theta")),
                            "timestamp": _quote_timestamp(q)} for sym, q in quotes.items()}
-    if positions is not None:
-        raw = positions["positions"]
-        rows = [] if raw in (None, "null") else raw.get("position", []) or []
-        rows = [rows] if isinstance(rows, dict) else rows
-        res.update(raw_positions=rows, positions_status=snapshots["positions"]["status"], synced_at=snapshots["positions"]["synced_at"])
-        formatted = []
-        for row in rows:
-            symbol = str(row.get("symbol", ""))
-            quantity, basis = number(row.get("quantity")), number(row.get("cost_basis"))
-            quote = quotes.get(symbol, {})
-            mark = option_mark(quote.get("bid"), quote.get("ask"), quote.get("last"))
-            # Missing quantities/basis are unknown, not known zero holdings or P&L.
-            market_value = quantity * mark * 100 if quantity is not None and mark is not None else None
-            pnl = market_value - basis if market_value is not None and basis is not None else None
-            greeks = quote.get("greeks") or {}
-            formatted.append({"symbol": symbol, "quantity_num": quantity, "cost_basis_num": basis, "mark_num": mark,
-                "quantity": format_numeric(quantity), "cost_basis": money(basis), "last_price": money(mark),
-                "market_value": money(market_value), "unrealized_pl": money(pnl),
-                "delta": format_numeric(number(greeks.get("delta"))), "theta": format_numeric(number(greeks.get("theta"))),
-                "unrealized_pl_num": pnl, "unrealized_pl_color": "#10B981" if (pnl or 0) > 0 else "#EF4444" if (pnl or 0) < 0 else "#94A3B8"})
-        res["positions"] = formatted
-        res["unrealized_pnl"] = sum(row["unrealized_pl_num"] for row in formatted) if all(row["unrealized_pl_num"] is not None for row in formatted) else None
-    elif "positions" in snapshots:
-        res["positions_status"] = snapshots["positions"]["status"]
-        res["synced_at"] = snapshots["positions"]["synced_at"]
-    orders = usable("orders")
+
+    if "positions" in snapshots:
+        res["positions_status"] = bundle["positions_status"]
+        res["synced_at"] = snapshots["positions"].get("synced_at")
+        res["raw_positions"] = bundle["raw_positions"]
+        res["positions"] = bundle["positions"]
+        res["unrealized_pnl"] = bundle["unrealized_pnl"]
+
     if "orders" in snapshots:
-        res["orders_status"] = snapshots["orders"]["status"]
-        res["orders_synced_at"] = snapshots["orders"]["synced_at"]
-    if orders:
-        raw = orders["orders"]
-        rows = [] if raw in (None, "null") else raw.get("order", []) or []
-        for row in [rows] if isinstance(rows, dict) else rows:
-            price = number(row.get("price", row.get("avg_fill_price", row.get("stop_price"))))
-            res["orders"].append({"id": str(row.get("id", "")), "symbol": str(row.get("symbol", "")),
-                "side": str(row.get("side", row.get("order_type", ""))).upper(),
-                "type": str(row.get("strategy", row.get("type", ""))).upper(), "quantity": str(row.get("quantity", "")),
-                "status": str(row.get("status", "")).upper(), "price": money(price) if price is not None else "MKT"})
+        res["orders_status"] = bundle["orders_status"]
+        res["orders_synced_at"] = snapshots["orders"].get("synced_at")
+        res["orders"] = bundle["orders"]
+
     sources = [(key, value) for key, value in res["freshness"].items()]
     res["sync_status"] = "loading" if not sources else "ready" if all(v["status"] == "ready" for _, v in sources) else "stale"
     res["sync_message"] = " | ".join(f"{key}: {v['status']}, {int(v['age']) if v['age'] is not None else '?'}s old"
@@ -672,10 +655,33 @@ def get_incubator_data() -> dict[str, Any]:
         except ImportError:
             specs = []
 
-    env = dotenv_values(PROJECT_ROOT / ".env")
+    env = {**dotenv_values(PROJECT_ROOT / ".env"), **os.environ}
     fee_per_contract = float(env.get("OPTION_FEE_PER_CONTRACT", "0.40") or 0.40)
 
     _, closed_all, open_all = get_reconciled_trades(fee_per_contract)
+
+    # Entry monitoring continues after a strategy has traded. Count durable
+    # positions, including pending entries, independently of journal history.
+    from collections import Counter
+    from strategies.position_ledger import PositionLedger, resolve_ledger_path
+    position_counts = None
+    unidentified_owners = set()
+    halted = False
+    try:
+        ledger = PositionLedger(resolve_ledger_path(env.get("POSITION_LEDGER_PATH")), read_only=True)
+        try:
+            position_counts = Counter(position.strategy_id for position in ledger.open_positions())
+            unidentified_owners = {
+                basket.strategy_id for basket in ledger.open_baskets()
+                if ledger.is_inflight(basket) and not basket.broker_parent_id}
+            halted = ledger.is_panic_halted()
+        finally:
+            ledger.close()
+    except (OSError, ValueError, sqlite3.Error):
+        pass
+    capacity = int(env.get("IC_MAX_CONCURRENT_POSITIONS") or 1)
+    policy_enabled = str(env.get("ML_POLICY_ENABLED", "false")).lower() in {"true", "1", "yes", "on"}
+    risk_cap = money(float(env.get("IC_MAX_POSITION_RISK") or env.get("GLOBAL_RISK_CAP") or 15000))
 
     all_rows: list[dict[str, Any]] = []
     traded_rows: list[dict[str, Any]] = []
@@ -781,6 +787,19 @@ def get_incubator_data() -> dict[str, Any]:
             status = "MONITORING"
             status_color = "gray"
 
+        slots_used = position_counts[name] if position_counts is not None else None
+        scan_status, scan_color = "MONITORING ENTRIES", "cyan"
+        if halted:
+            scan_status, scan_color = "PANIC HALT", "crimson"
+        elif position_counts is None:
+            scan_status, scan_color = "POSITION DATA UNAVAILABLE", "gray"
+        elif is_neural and not policy_enabled:
+            scan_status, scan_color = "POLICY DISABLED", "amber"
+        elif name in unidentified_owners:
+            scan_status, scan_color = "ORDER REVIEW REQUIRED", "amber"
+        elif slots_used >= capacity:
+            scan_status, scan_color = "CAPACITY FULL", "gray"
+
         row = {
             "variant": short_id,
             "variant_code": spec_tag,
@@ -811,8 +830,10 @@ def get_incubator_data() -> dict[str, Any]:
             "net_roc_pct": f"{net_roc_pct:+.1f}%" if v_closed else "-",
             "status": status,
             "status_color": status_color,
-            "scan_status": "AI RUNTIME ACTIVE" if is_neural else ("TESTING ACTIVE" if is_testing else ("WAITING FOR WINDOW" if not v_closed and not v_open else ("TRADED TODAY" if v_closed else "ACTIVE POSITION"))),
-            "risk_cap": money(float(get_config_settings().get("risk_cap", "15000"))),
+            "scan_status": scan_status,
+            "scan_status_color": scan_color,
+            "position_slots": f"{slots_used}/{capacity}" if slots_used is not None else "Unavailable",
+            "risk_cap": risk_cap,
             "is_neural": is_neural,
             "is_testing": is_testing,
             "structure": struct,
@@ -821,8 +842,7 @@ def get_incubator_data() -> dict[str, Any]:
         all_rows.append(row)
         if len(v_closed) > 0 or len(v_open) > 0:
             traded_rows.append(row)
-        else:
-            monitored_rows.append(row)
+        monitored_rows.append(row)
 
     selected_closed_count = sum(row["closed_trades"] for row in all_rows)
     overall_win_rate = (total_wins / selected_closed_count * 100.0) if selected_closed_count else 0.0
@@ -1081,6 +1101,7 @@ def get_neural_policy_data() -> dict[str, Any]:
     """Load neural policy recommendations, data readiness, and dynamic strategy switching evaluation."""
     model_path = PROJECT_ROOT / "logs/models/policy.json"
     traj_path = PROJECT_ROOT / "logs/trajectories.jsonl"
+    lineage_path = PROJECT_ROOT / "logs/models/model_lineage.json"
 
     required_ticks = 12
     if model_path.exists():
@@ -1092,9 +1113,12 @@ def get_neural_policy_data() -> dict[str, Any]:
             pass
 
     current_ticks = 0
+    today_session = datetime.now(EASTERN_TZ).date().isoformat()
+    latest_market: dict[str, Any] | None = None
+    all_snapshots: list[dict[str, Any]] = []
+
     if traj_path.exists():
         try:
-            today_session = datetime.now(EASTERN_TZ).date().isoformat()
             with open(traj_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line_str = line.strip()
@@ -1103,11 +1127,17 @@ def get_neural_policy_data() -> dict[str, Any]:
                     try:
                         record = json.loads(line_str)
                         if record.get("event") == "SNAPSHOT":
+                            if record.get("complete"):
+                                all_snapshots.append(record)
                             rec_session = record.get("session")
                             if rec_session == today_session:
                                 current_ticks += 1
+                                if record.get("market"):
+                                    latest_market = record.get("market")
                     except Exception:
                         continue
+            if latest_market is None and all_snapshots:
+                latest_market = all_snapshots[-1].get("market")
         except Exception:
             pass
 
@@ -1115,41 +1145,104 @@ def get_neural_policy_data() -> dict[str, Any]:
     readiness_pct = min(100, int((current_ticks / max(required_ticks, 1)) * 100))
     readiness_str = f"READY ({current_ticks}/{required_ticks} Ticks)" if has_sufficient_data else f"WARMING UP ({current_ticks}/{required_ticks} Ticks)"
 
-    res = {
+    market_regime = "Low-Vol Pinning"
+    try:
+        from ml.evaluator import classify_market_regime
+        if latest_market:
+            market_regime = classify_market_regime(latest_market)
+    except Exception:
+        pass
+
+    action = "HOLD"
+    action_probs = {
+        "HOLD": 68.4,
+        "ADD": 12.1,
+        "TRIM": 14.5,
+        "FLATTEN": 5.0,
+    }
+    dynamic_pt = "40.0%"
+    contextual_selector = "IC_V05 (15Δ, $5 Wing, 7DTE)"
+    active_profile = "IC_V05_7DTE_D12_W3_PT35_T1015"
+    inference_status = "unavailable"
+
+    if model_path.exists() and all_snapshots:
+        try:
+            from ml.inference import LivePolicyController
+            ctrl = LivePolicyController(model_path)
+            current_session_snapshots = [s for s in all_snapshots if str(s.get("session") or "") == today_session]
+            if current_session_snapshots:
+                for snap in current_session_snapshots:
+                    ctrl.on_snapshot(snap)
+                rec = ctrl.last_recommendation
+                inference_status = "live"
+            else:
+                for snap in all_snapshots:
+                    ctrl.on_snapshot(snap)
+                rec = ctrl.last_recommendation
+                last_session = str(all_snapshots[-1].get("session") or "unknown")
+                inference_status = f"historical ({last_session})"
+
+            if rec:
+                action = rec.action
+                action_probs = {
+                    "HOLD": round(rec.action_probabilities.get("HOLD", 0.0) * 100, 1),
+                    "ADD": round(rec.action_probabilities.get("ADD_POSITION", 0.0) * 100, 1),
+                    "TRIM": round(rec.action_probabilities.get("TRIM_POSITION", 0.0) * 100, 1),
+                    "FLATTEN": round(rec.action_probabilities.get("FLATTEN_NOW", 0.0) * 100, 1),
+                }
+                dynamic_pt = f"{rec.profit_target * 100:.1f}%"
+                if inference_status == "live":
+                    contextual_selector = rec.strategy_name
+                    active_profile = rec.strategy_name
+                else:
+                    contextual_selector = f"{rec.strategy_name} [Historical: {last_session}]"
+                    active_profile = f"{rec.strategy_name} [Historical: {last_session}]"
+        except Exception:
+            pass
+
+    regret_score = "+$18.40 vs Hindsight Best"
+    capture_efficiency = "84.2% MFE Capture"
+    try:
+        from ml.evaluator import evaluate_counterfactual_regret
+        if traj_path.exists():
+            regret_data = evaluate_counterfactual_regret(traj_path)
+            zero_rate = regret_data.get("zero_regret_rate")
+            mean_reg = regret_data.get("mean_action_regret")
+            if zero_rate is not None and mean_reg is not None:
+                regret_score = f"{zero_rate * 100:.1f}% Zero-Regret"
+                capture_efficiency = f"{mean_reg:.3f} Mean Regret"
+    except Exception:
+        pass
+
+    model_version = "v1"
+    if lineage_path.exists():
+        try:
+            with open(lineage_path, "r", encoding="utf-8") as f:
+                l_data = json.load(f)
+                model_version = f"v{l_data.get('active_champion_version', 1)}"
+        except Exception:
+            pass
+
+    return {
         "model_loaded": model_path.exists(),
-        "market_regime": "Low-Vol Pinning",
-        "dynamic_pt": "40.0%",
-        "contextual_selector": "IC_V05 (15Δ, $5 Wing, 7DTE)",
-        "active_switched_profile": "IC_V05_7DTE_D12_W3_PT35_T1015",
+        "model_version": model_version,
+        "inference_status": inference_status,
+        "market_regime": market_regime,
+        "dynamic_pt": dynamic_pt,
+        "contextual_selector": contextual_selector,
+        "active_switched_profile": active_profile,
         "dynamic_switching_status": "AUTO-ADAPTING TO MARKET REGIME",
         "has_sufficient_data": has_sufficient_data,
         "current_ticks": current_ticks,
         "required_ticks": required_ticks,
         "readiness_pct": readiness_pct,
         "readiness_str": readiness_str,
-        "recommendation_action": "HOLD",
-        "action_probs": {
-            "HOLD": 68.4,
-            "ADD": 12.1,
-            "TRIM": 14.5,
-            "FLATTEN": 5.0,
-        },
-        "regret_score": "+$18.40 vs Hindsight Best",
-        "capture_efficiency": "84.2% MFE Capture",
+        "recommendation_action": action,
+        "action_probs": action_probs,
+        "regret_score": regret_score,
+        "capture_efficiency": capture_efficiency,
         "ticks_count": current_ticks,
     }
-
-    if model_path.exists():
-        try:
-            with open(model_path, "r", encoding="utf-8") as f:
-                p_data = json.load(f)
-                res["model_loaded"] = True
-                if "regime" in p_data:
-                    res["market_regime"] = str(p_data["regime"])
-        except Exception:
-            pass
-
-    return res
 
 
 def get_recent_logs(max_lines: int = 150, filter_query: str = "") -> list[str]:

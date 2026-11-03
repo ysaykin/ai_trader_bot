@@ -81,6 +81,12 @@ def neural_view() -> rx.Component:
                     ),
                     rx.hstack(
                         rx.badge(
+                            f"MODEL: {DashboardState.model_version}",
+                            color_scheme="purple",
+                            variant="surface",
+                            size="1",
+                        ),
+                        rx.badge(
                             DashboardState.data_readiness_str,
                             color_scheme=rx.cond(DashboardState.has_sufficient_data, "jade", "amber"),
                             variant="surface",

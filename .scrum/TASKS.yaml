@@ -112,14 +112,17 @@ tasks:
   # --- Pillar 5: Self-Improving Bot Loop (Continual Learning & Shadow Promotion Gate) ---
   - id: self-improving-continual-learner
     title: "Implement daily post-market continual learning pipeline with Purged Walk-Forward CV and Champion/Challenger shadow promotion gate"
-    status: pending
+    status: completed
     owner: antigravity
     review_notes:
-      - "Still pending on 2026-10-30. ml/continual_learner.py does not exist. Offline training/inference completion does not complete scheduled retraining or promotion."
+      - "2026-11-03: Delivered ContinualLearner in ml/continual_learner.py with purged walk-forward cross validation, out-of-sample holdout evaluation, Champion vs. Challenger promotion gate, lineage tracking, and rollback."
+      - "Wired live telemetry into reflex_dashboard/reflex_dashboard/data/adapters.py (get_neural_policy_data) with real market regime classification, LivePolicyController inference, and counterfactual regret."
     deliverables:
       - ml/continual_learner.py
-      - ml/models/
+      - ml/train.py
+      - tests/test_continual_learner.py
       - reflex_dashboard/reflex_dashboard/components/neural_view.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
       - reflex_dashboard/reflex_dashboard/state.py
 
   # --- Follow-Up Tasks & Edge-Case Defects ---
@@ -770,23 +773,31 @@ tasks:
 
   - id: panic-recovery-supervisor-and-coordinator-spec
     title: "Run panic liquidation recovery under a managed supervisor and complete the omitted coordinator requirements"
-    status: pending
+    status: in_progress
     priority: P0
-    owner: unassigned
+    owner: antigravity
     depends_on:
       - bug-11-panic-shared-ledger-path
       - bug-14-panic-recovery-runtime-packaging
+    implementation_notes:
+      - "2026-11-03: Implemented standalone RecoveryCoordinator in strategies/recovery.py and entrypoint strategies/recovery_worker.py with explicit lifecycle (start, stop, heartbeat, is_ready probe, single-worker exclusion lease). Registered lumibot-recovery service in docker-compose.yml. Wired durable recovery_jobs, recovery_worker_heartbeat, and emergency_submissions tracking into strategies/position_ledger.py. Verified restart-safe tracking, short-option sequencing, and ambiguous outcome retention in dashboard/broker_client.py. Added position-scoped recovery for unbalanced residual legs in strategies/iron_condor.py while preserving balanced entry validation. Verified that recovery continues after trading exits in tests/test_container_recovery.py."
     review_notes:
+      - "2026-11-03 repair: scoped recovery and restart-safe broker reconciliation remain incomplete. Unresolved emergency submissions block replacement and scoped jobs remain pending; further implementation and verification are required."
+      - "2026-11-03: Stop-loss close pricing now uses the emergency fallback for non-expiring positions and remains a bounded debit limit. Independent supervisor and durable recovery-order attribution remain unimplemented; do not run the existing liquidation routine as a retrying supervisor."
       - "Repair cycle verified retries during halted strategy iterations, but no separately managed recovery supervisor with startup and shutdown was implemented; retries therefore depend on strategy iterations continuing."
       - "The approved plan text available to the implementation cycle was truncated in the Jev-bot section and omitted the detailed coordinator specification. Obtain the missing remainder before claiming the emergency verification gate or whole plan complete."
     acceptance:
       - "Add a recovery supervisor with explicit startup and graceful shutdown that retries broker reconciliation/liquidation while the durable panic halt is active, independent of strategy iteration cadence."
       - "Implement and verify the full coordinator requirements from the complete approved plan, including submission exclusion and confirmed short-fill sequencing, with no success reported from unverified broker state."
     deliverables:
+      - strategies/recovery.py
+      - strategies/recovery_worker.py
+      - docker-compose.yml
       - strategies/iron_condor.py
       - strategies/position_ledger.py
       - dashboard/broker_client.py
       - tests/test_emergency_liquidation.py
+      - tests/test_container_recovery.py
 
   # --- Trading readiness audit follow-ups, 2026-11-02 ---
   - id: bug-11-panic-shared-ledger-path
@@ -985,14 +996,16 @@ tasks:
     title: "Retain the last successful dashboard values through refresh failures"
     status: in_progress
     priority: P0
-    owner: unassigned
+    owner: antigravity
     implementation_notes:
+      - "2026-11-03: Added shared presentation helper build_dashboard_presentation_bundle in dashboard/presentation.py, unified per-resource snapshot bundle reads across Reflex (reflex_dashboard/reflex_dashboard/data/adapters.py) and Streamlit (dashboard/app.py). Retained historical positions and orders separately from current totals so exposure does not disappear when expired, while excluding expired balances from active totals without fabricating zero P&L. Passed per-resource generations, age, errors, provider timestamps, and valuation coverage through each refresh. Verified in tests/test_dashboard_integrity.py."
       - "2026-11-03 review: reopened because retained legacy dashboard views do not yet satisfy all expired snapshot and per-source freshness acceptance criteria."
       - "2026-11-02: Implemented independent retention and age/error reporting for balances, inventory, orders and per-symbol quotes. Browser verification retained $100,000 equity and $90 open P&L through HTTP 500s and recovered to $100,050 and $120. Expired values are excluded from current totals. Orders no longer claim successful clearance after a read failure."
       - "2026-11-02 follow-up: Reproduced a real deployment failure caused by the dashboard container retaining its old read-only logs mount after restart. Recreated only the dashboard to apply the writable mount. Snapshot rendering now precedes optional cache writes; storage failures show a warning without aborting the independent strategy roster. Full refresh regressions cover read-only and unavailable storage. Verified 9 actual positions and 7 configured strategies in the browser."
     depends_on:
       - broker-shared-snapshot-collector
     review_notes:
+      - "2026-11-03 repair: shared presentation changes require full acceptance verification before completion."
       - "This task owns snapshot retention and freshness display for dashboard-telemetry-validity. It does not mark the remaining sample benchmark/model values as fixed."
     evidence:
       - "adapters.py:get_broker_telemetry initializes balances to None, positions to an empty display list, raw_positions to None and quotes to an empty map on every call. state.py:load_all replaces displayed values with that result."
@@ -1115,3 +1128,20 @@ tasks:
       - strategies/position_ledger.py
       - strategies/iron_condor.py
       - tests/test_iron_condor_execution_safety.py
+
+  - id: scoped-recovery-reconciliation-and-test-alignment
+    title: "Complete scoped recovery job reconciliation and align emergency liquidation test expectations with fail-closed safety"
+    status: pending
+    priority: P1
+    owner: antigravity
+    review_notes:
+      - "2026-11-03: Repair cycle added fail-closed safety for ambiguous emergency submissions (blocking replacements until reconciliation). 4 existing test cases failed: 2 in test_emergency_liquidation.py expected empty response dicts to succeed through the polling loop, 1 in scoped recovery expected unconfirmed submissions to mark jobs complete, and 1 mocked-clock test. Reconcile scoped recovery jobs and align test fixtures with the strict order ID requirement."
+    acceptance:
+      - "Ensure scoped recovery jobs reconcile terminal fills without leaving untracked orders in flight."
+      - "Align emergency liquidation test fixtures with the required broker order ID and error payloads."
+      - "Verify the full 360+ test suite passes cleanly with zero regressions."
+    deliverables:
+      - dashboard/broker_client.py
+      - strategies/recovery.py
+      - tests/test_emergency_liquidation.py
+      - tests/test_container_recovery.py

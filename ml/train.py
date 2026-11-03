@@ -64,6 +64,8 @@ def train_policy(
     epochs: int = 40,
     learning_rate: float = 0.02,
     seed: int = 0,
+    sessions: Sequence[str] | None = None,
+    strategy_names: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Fit policy encoder and heads from causal snapshots joined to hindsight labels."""
     if sequence_length < 1 or regime_size < 1 or epochs < 1:
@@ -76,8 +78,17 @@ def train_policy(
         for row in rows
         if row.get("event") == "SNAPSHOT" and row.get("record_id")
     }
+    if sessions is not None:
+        allowed_sessions = set(sessions)
+        snapshots = {
+            record_id: snap for record_id, snap in snapshots.items()
+            if str(snap.get("session") or "") in allowed_sessions
+        }
     labels = [row for row in rows if row.get("event") == "HINDSIGHT_LABEL"]
-    strategy_names = _strategy_names(snapshots.values())
+    if strategy_names is None:
+        strategy_names = _strategy_names(snapshots.values())
+    else:
+        strategy_names = tuple(strategy_names)
     examples = _examples(snapshots, labels, strategy_names, sequence_length)
     if not examples:
         raise ValueError("no complete labelled trajectory examples were found")

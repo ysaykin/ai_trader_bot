@@ -141,3 +141,142 @@ def test_submission_after_lock_wait_blocked_by_panic_halt(tmp_path: Path) -> Non
         strategy.submit_order.assert_not_called()
     finally:
         ledger.close()
+
+
+def test_standalone_recovery_coordinator_lifecycle_and_worker_exclusion(tmp_path: Path) -> None:
+    """Verify coordinator lifecycle, heartbeat, interruptible shutdown, and single-worker exclusion."""
+    from strategies.recovery import RecoveryCoordinator
+
+    ledger_path = str(tmp_path / "ledger.sqlite3")
+    ledger = PositionLedger(ledger_path)
+    try:
+        worker1 = RecoveryCoordinator(ledger=ledger, worker_id="worker_1", poll_interval=0.1)
+        worker2 = RecoveryCoordinator(ledger=ledger, worker_id="worker_2", poll_interval=0.1)
+
+        # 1. Readiness check
+        assert worker1.is_ready() is True
+
+        # 2. Worker 1 acquires exclusion lease
+        assert ledger.acquire_worker_exclusion("worker_1") is True
+        # Worker 2 must be excluded while worker 1 has an active heartbeat
+        assert ledger.acquire_worker_exclusion("worker_2") is False
+
+        # 3. Heartbeat update
+        worker1.heartbeat()
+
+        # 4. Worker 1 graceful release
+        ledger.release_worker("worker_1")
+        # Worker 2 can now acquire lease
+        assert ledger.acquire_worker_exclusion("worker_2") is True
+        ledger.release_worker("worker_2")
+
+        # 5. Interruptible background thread start and stop
+        worker1.start(daemon=True)
+        assert worker1._running is True
+        worker1.stop(timeout=2.0)
+        assert worker1._running is False
+    finally:
+        ledger.close()
+
+
+def test_recovery_continues_after_trading_exits(tmp_path: Path) -> None:
+    """Prove recovery continues via durable jobs after trading strategy exits or stops iterating."""
+    from dashboard.broker_client import TradierClient
+    from strategies.recovery import RecoveryCoordinator
+
+    ledger_path = str(tmp_path / "ledger.sqlite3")
+    ledger = PositionLedger(ledger_path)
+
+    # 1. Trading strategy runs while panic halt is set
+    strategy = SPXIronCondor()
+    strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": ledger, "strategy_name": "TestTrading"}
+    strategy.broker = Mock()
+    strategy.broker.name = "Tradier"
+    strategy.initialize()
+    strategy._position_ledger = ledger
+
+    try:
+        # User or risk system trips durable panic halt
+        ledger.set_panic_halt(True)
+
+        # Strategy executes iteration under halt -> queues durable recovery job and exits iteration
+        strategy._run_trading_iteration()
+
+        # Confirm trading iteration did NOT clear the job yet and durable job is queued
+        jobs = ledger.list_recovery_jobs(scope="account")
+        assert len(jobs) == 1
+        assert jobs[0]["status"] in ("pending", "in_progress")
+
+        # Trading strategy now completely terminates/exits (simulating crash or process exit)
+        del strategy
+
+        # 2. Standalone recovery supervisor/coordinator picks up the job and executes recovery
+        coordinator = RecoveryCoordinator(ledger=ledger, worker_id="standalone_supervisor", poll_interval=0.1)
+        mock_client = Mock()
+        mock_client.emergency_flatten_positions.return_value = True
+
+        with patch("dashboard.broker_client.get_broker_client", return_value=mock_client):
+            # Standalone coordinator processes the durable recovery job
+            processed = coordinator.run_step()
+            assert processed is True
+            mock_client.emergency_flatten_positions.assert_called_once()
+
+            # Verify durable job is now marked completed
+            jobs_after = ledger.list_recovery_jobs(scope="account")
+            assert len(jobs_after) == 1
+            assert jobs_after[0]["status"] == "completed"
+    finally:
+        ledger.close()
+
+
+def test_unbalanced_residual_position_scoped_recovery(tmp_path: Path) -> None:
+    """Verify unbalanced residual positions use scoped recovery jobs without stranding or breaking balanced entry validation."""
+    ledger_path = str(tmp_path / "ledger.sqlite3")
+    ledger = PositionLedger(ledger_path)
+
+    strategy = SPXIronCondor()
+    strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": ledger, "strategy_name": "ScopedStrat"}
+    strategy.broker = Mock()
+    strategy.broker.name = "Tradier"
+    strategy.initialize()
+    strategy._position_ledger = ledger
+    strategy.create_order = Mock(side_effect=lambda asset, quantity, side: Order(
+        strategy="ScopedStrat", asset=asset, quantity=quantity, side=side,
+    ))
+    strategy.submit_order = Mock(return_value=[])
+
+    try:
+        # 1. Balanced-entry validation is intact: unbalanced opening packages MUST be rejected
+        unbalanced_entry_legs = [
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 2),
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put"), -1),
+        ]
+        with pytest.raises(ValueError, match="balanced legs"):
+            strategy._submit_package(unbalanced_entry_legs, intent="open", order_type="credit", price=1.0)
+
+        single_leg_entry = [
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1),
+        ]
+        with pytest.raises(ValueError, match="balanced legs"):
+            strategy._submit_package(single_leg_entry, intent="open", order_type="credit", price=1.0)
+
+        # 2. Residual ownership close: single leg or unbalanced residual legs must NOT raise ValueError
+        position = strategy._runtime()
+        position.owned_legs = [
+            (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1), # single remaining residual leg
+        ]
+        position.position_open = True
+        strategy._close_all_options(exit_reason="STOP_LOSS")
+
+        # Verify reduce-only order was created and submitted
+        strategy.submit_order.assert_called_once()
+        submitted_order = strategy.submit_order.call_args[0][0]
+        assert getattr(submitted_order, "_reduce_only", False) is True
+        assert submitted_order.side == "sell_to_close"
+
+        # Verify position-scoped recovery job was enqueued in durable ledger
+        scoped_jobs = ledger.list_recovery_jobs(scope="position")
+        assert len(scoped_jobs) == 1
+        assert scoped_jobs[0]["target_id"] == position.position_id
+    finally:
+        ledger.close()
