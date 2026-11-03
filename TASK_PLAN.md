@@ -359,3 +359,217 @@ survive restart; one position's exit cannot alter another; pending quantities
 continue consuming capacity and risk. Concurrency is configurable, with a
 backward-compatible default of one and a 60-minute entry spacing default.
 No private credentials, live configuration, or broker orders are changed.
+
+
+### Concurrent-position verification
+
+Completed the independent-position implementation on local branch
+`codex/independent-positions` in `/private/tmp/lumibot-tranche-commit`.
+The original checkout retains the existing dashboard, roster, deployment,
+and concurrent broker-recovery edits. The isolated branch contains the execution
+implementation, its required broker-routing regressions, configuration examples,
+and documentation. No remote operation is requested or performed.
+
+Full offline gate: 237 passed, 2 expected skips, and 76 subtests passed under
+Python 3.12.13 with LumiBot 4.6.31. The skips are the optional Reflex suite and
+the explicitly disabled sandbox-write test. Compilation, Ruff undefined-name and
+unused-variable checks, and git diff --check passed.
+
+Verified distinct/shared contracts, independent credit and risk, targeted closes,
+restart recovery, per-position settings and exit intent, partial-fill reservations,
+concurrent capacity and account-risk gates, journal replay, legacy migration,
+expiry isolation, and suppression of stale single-basket trajectory labels.
+Two entries with $120 and $60 credits report $180 total credit and $820 summed
+risk. Closing the first leaves $60 credit and $440 risk in the second.
+A half-filled two-contract entry reserves $880 until cancellation is confirmed.
+Concurrency defaults to one; enabling two positions requires explicit configuration.
+
+## Shared broker reads and dashboard continuity, 2026-11-02
+
+Implement the six approved broker caching tasks. Preserve existing execution and
+dashboard changes. Keep all validation offline and perform no remote Git work.
+
+1. Add a separate SQLite snapshot store, collector lease, per-resource request
+   coalescing, shared quota accounting, bounded retries, and sanitized metrics.
+2. Route Tradier SDK GET sessions and dashboard reads through the same store.
+   Run one background collector, preferring the bot with dashboard fallback.
+3. Batch demanded option quotes and give account resources separate schedules.
+   Invalidate reads after writes and require fresh reads at execution boundaries.
+4. Make dashboard rendering read snapshots without network I/O. Retain last
+   successful values, distinguish empty/failure/expired data, and show source ages.
+5. Verify cross-process coalescing, outage/recovery, quotas, SDK integration,
+   freshness, account isolation, and multiple viewers with counting transports.
+6. Compile and inspect the Reflex application, run execution regressions, and
+   record measured request counts and remaining limitations in the backlog.
+
+Use the existing shared logs volume for broker_snapshots.sqlite3, separate from
+the ownership ledger. SDK transport adapters own network attempts and disable
+nested retry multiplication. Failed reads never replace successful snapshots.
+Fresh execution reads never consume retained stale display values. Evaluate the
+account event stream against the installed adapter; retain bounded polling as
+the initial integration if the adapter does not support safe event ingestion.
+
+### Broker snapshot verification
+
+Implemented the shared coordinator in `strategies/broker_reads.py`. SDK GETs,
+Reflex telemetry and retained Streamlit account reads use the same snapshots.
+The SDK adapter is installed before its polling stream starts. Resource leases
+and mutation fencing prevent duplicate reads and late stale publication.
+
+Verified outage retention, recovery, successful empty inventory, valid zeros,
+expired data, account/environment isolation, cross-process request coalescing,
+collector takeover, partial quotes, quota headers, retry cooldown and fresh
+execution failures. A real SDK contract verifies that failed reads cannot be
+converted into empty inventory or orders. Native option batches preserve exact
+asset identity. Fresh complete parent fill evidence avoids four child requests;
+incomplete evidence still fetches missing children.
+
+Final offline gate under Python 3.12.13, LumiBot 4.6.31 and Reflex 0.10.1:
+323 passed, 2 expected skips, 78 subtests passed. Six baseline fixture cases were
+deselected after reproducing all six against the pre-change source. They concern
+real-SDK construction without a broker or incomplete mock broker setup in
+container recovery, incubator recovery, two execution-safety cases and two
+incubator/hub regressions. They remain unresolved; this is not an all-green full
+suite claim. The complete unfiltered run before those exclusions had six failures.
+
+The configured single-batch display workload used 8 idle or 18 active-order
+standard reads and 12 quote requests per simulated minute. A 20-strategy load
+with two positions each and two viewers used 18 standard and 24 market requests
+for 160 option symbols in two batches. The counting transport includes physical
+retries. Additional viewers added no broker calls.
+
+Reflex dry compilation and the full production build passed. Browser tests with
+an injected broker outage retained $100,000 equity and $90 open P&L with stale
+warnings, then refreshed to $100,050 and $120 on recovery. Positions, comparison
+and order-source status were checked, including the absence of a false cleared
+orders message. Python compilation, focused Ruff checks and diff checks passed.
+
+No remote Git work or broker writes were performed. Live service activation is
+not part of this verification. Restart both services together when deploying.
+
+## Dashboard refresh regression, 2026-11-02
+
+Reproduce the reported empty positions and strategy grid in the running container
+without broker requests. Trace the cache failure to its effective volume mount,
+then add a regression covering the complete dashboard load with a read-only
+snapshot database. Render retained snapshots before optional collector writes;
+report cache maintenance failures without aborting independent strategy data.
+Verify both retained-cache and missing-cache failure cases. Apply the existing
+writable logs mount by recreating only the dashboard container, leaving the
+trading bot running. Confirm real positions and configured strategies in the
+browser and rerun affected offline tests. No remote Git operations.
+
+Verified the initial failure with the full DashboardState.load_all path inside
+the actual container: 0 positions, 0 configured strategies, and an assertion
+failure. The minimized adapter traceback identified BrokerReads.demand. Docker
+inspection confirmed /app/logs was still mounted read-only in the old dashboard
+container, while the bot and current Compose configuration used writable mounts.
+The shared cache already contained fresh account snapshots.
+
+Added full-refresh regression cases using actual SQLite read-only connections
+and unavailable storage. Both failed before the fix and passed afterward.
+Reading snapshots before registering quote demand preserves inventory; storage
+errors now produce an explicit warning while strategy data continues loading.
+The same container diagnostic then returned 9 positions and 7 strategies before
+the mount repair. Recreated only lumibot-dashboard with --no-deps --no-build and
+verified /app/logs is writable. The bot remained running. Browser verification
+confirmed 9 of 9 positions valued and all 7 configured comparison strategies.
+Affected offline gate: 89 passed, 9 subtests passed. Reflex dry compilation,
+Python compilation, focused Ruff checks and git diff --check passed.
+
+## Close retired strategy paper positions, 2026-11-02
+
+Inspect the effective entry roster and ledger, confirm Tradier sandbox, then
+close only confirmed inventory owned by excluded strategies. Preserve supported
+positions and existing execution reservations. Reuse the existing position close
+and reconciliation path, including atomic multi-leg orders, durable exit intent,
+terminal-order verification, and per-position submission gates. Do not infer that
+unknown old reservations are fills or silently clear them. Verify broker fills,
+remaining ledger inventory, and the dashboard. No remote Git operations.
+
+The first targeted close pass persisted RETIRED_STRATEGY on the four filled
+retired positions. Broker/ledger inventory matched before the attempt. An
+unrelated missing/expired demanded symbol poisoned the shared quote-batch
+cooldown, intermittently blocking pricing. The first worker submitted IC_V08
+and IC_V06 closes when quotes became available. The pre-existing IC_V07 parent
+remained pending while cancellation returned HTTP 400. Stopped the temporary
+worker rather than keep retrying. Add a regression and isolate per-symbol
+missing-data backoff from transport-wide backoff before retrying the targeted
+paper closes.
+
+The new missing-symbol regression failed before the fix. Shared quote transport
+backoff now applies only to network/whole-response failures. Missing symbols
+retain their own backoff. A new transport-status key avoids inheriting the old
+persisted partial-batch failure. Verified all 16 retired contracts in one fresh
+batch. Affected gate: 90 passed and 9 subtests passed; compilation, focused Ruff
+and diff checks passed. The temporary close worker loaded the corrected module;
+the long-running bot was not restarted to activate this additional cache change.
+
+Final broker verification in postmarket hours: IC_V20 order 40898630, IC_V08
+replacement 40898645, and IC_V06 replacement 40898650 are open, with zero fills.
+Their earlier V08/V06 orders were confirmed canceled before replacements. IC_V07
+order 40862870 remains pending and rejects cancellation; no duplicate was placed.
+All four position records persist RETIRED_STRATEGY exit intent. All 16 retired
+contract holdings remain until fills are confirmed. Preserved inventory for all
+7 supported ledger positions, including unfilled reservations. This is pending
+broker execution, not a claim of completed liquidation. Temporary workers exited.
+
+## Activate repeat entries and reconcile execution blockers, 2026-11-03
+
+Enable two independent positions per strategy with the existing 60-minute spacing
+and risk limits. Preserve the current working changes and use Tradier paper only.
+
+1. Capture fresh broker order and inventory evidence for unresolved reservations.
+2. Add a repeatable runtime check and regressions for any newly reproduced
+   reconciliation or quote failures. Never release a reservation without confirmed
+   terminal quantities or confirmed expiry and inventory accounting.
+3. Set the private runtime concurrency configuration, verify the execution suite,
+   then recreate the bot and dashboard to load the current code and environment.
+4. Reconcile pending orders through the normal execution path, verify fresh quotes,
+   active per-strategy capacity and repeat-entry behavior, and report any broker
+   state that remains unresolved. No remote Git operations.
+
+### Repeat-entry activation results
+
+Configured the private runtime for two positions and 60-minute entry spacing,
+preserving the $15,000 strategy and $100,000 portfolio risk caps. Freshly fetched
+prior-day pending orders with complete leg execution evidence now retain their
+slot and risk without locking another independent entry. Missing identity or
+execution evidence continues to lock entries. The real-SDK regression failed
+before this change, then passed with the missing-evidence control still locked.
+
+The deployed bot was on LumiBot 4.6.25, while the local contracts used 4.6.31.
+Pinned the project to 4.6.31 and built on the existing runtime with only that SDK
+upgrade. Dependency validation passed. Stopped the broad unpinned build before
+activation. The final image passed 123 execution/import tests and 40 subtests,
+with network disabled. The earlier wider gate passed 171 tests and 42 subtests
+locally. Its image run passed 168 tests and skipped two Reflex-only cases; the
+remaining dashboard-fixture test passed after mounting its required source.
+
+An isolated import regression also reproduced a second, implicit Tradier broker
+being constructed from credentials. The entrypoint now enables lazy credentials
+before importing LumiBot, retaining only the explicitly configured broker and
+shared read coordinator. Both this regression and the execution gate passed in
+the final image. Recreated the dashboard and bot, then recreated only the bot
+for this final startup fix. Final bot activation was at 13:10 ET on November 3.
+
+Verified an actual second TrendFlow position: paper order 40930096 filled both
+legs with $57 opening credit; its original position remains open separately.
+TrendFlow now has two position identities and $906 combined defined risk.
+ORB close 40930116 and retired V06 close 40930128 filled and reconciled. The
+next scheduled management tick confirmed ORB's exit and released its slot.
+Final fresh checks found 20 held contracts, 20 fresh quotes, zero broker/ledger
+quantity mismatches, and $9,994 portfolio defined risk. All seven entry-enabled
+strategies logged max_positions=2 and spacing_minutes=60 after restart.
+
+Added tools/check_trading_runtime.py for repeatable read-only capacity, order,
+fresh-quote and inventory checks. It fails on an unexpected configured capacity,
+missing fresh quotes or broker/ledger quantity mismatches.
+
+External state remains unresolved: Tradier still reports orders 40861800,
+40862870 and 40910663 as pending and rejects cancellation with HTTP 400. Their
+reservations were preserved, without replacement orders. V19's older unbound
+entry also has no broker identity or confirmed terminal evidence and remains
+locked. Neural Pure retains its existing opt-in policy requirement. These are
+not claims that every legacy reservation was cleared or every strategy must
+enter regardless of its filters. No remote Git operations were performed.

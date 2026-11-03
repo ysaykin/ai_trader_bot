@@ -46,6 +46,14 @@ def header() -> rx.Component:
                         wrap="wrap",
                     ),
                     rx.text("Options positions & strategy performance", size="1", color=TEXT_MUTED),
+                    rx.hstack(
+                        rx.badge(DashboardState.broker_sync_status,
+                                 color_scheme=rx.cond(DashboardState.broker_sync_status == "ready", "jade", "amber")),
+                        rx.text(DashboardState.broker_sync_message, size="1", color=TEXT_MUTED),
+                        wrap="wrap", align="center", spacing="2",
+                    ),
+                    rx.cond(DashboardState.broker_last_known != "",
+                            rx.text(DashboardState.broker_last_known, size="1", color=TEXT_MUTED)),
                     spacing="0",
                     align="start",
                 ),
@@ -109,7 +117,7 @@ def header() -> rx.Component:
                         cursor="pointer",
                         on_click=DashboardState.toggle_auto_refresh,
                     ),
-                    content="Toggle 3s live WebSocket telemetry stream",
+                    content="Toggle dashboard snapshot updates",
                 ),
                 # Manual Refresh Button
                 rx.tooltip(

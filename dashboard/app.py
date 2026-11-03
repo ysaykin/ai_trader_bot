@@ -102,19 +102,42 @@ def single_trade_percentage(cap: float, override: str = "") -> float:
 
 
 def fetch_json(settings: BrokerSettings, path: str, params: dict[str, str] | None = None) -> dict[str, Any]:
-    """Read a Tradier endpoint without logging tokens or response bodies."""
-    import requests
-
-    response = requests.get(
-        f"{settings.base_url}/{path}",
-        headers={"Authorization": f"Bearer {settings.token}", "Accept": "application/json"},
-        params=params, timeout=6,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict) or payload.get("errors"):
-        raise ValueError("Invalid broker response")
-    return payload
+    """Read retained account snapshots; cache slower benchmark metadata separately."""
+    from strategies.broker_reads import get_broker_reads, BrokerReadUnavailable
+    reads = get_broker_reads(settings.token, settings.account_number, settings.paper)
+    reads.start()
+    resource = path.rsplit("/", 1)[-1]
+    snapshots = reads.display()
+    if resource in {"balances", "positions", "orders"}:
+        snap = snapshots.get(resource, {})
+        if snap.get("data") is None or snap["status"] == "expired":
+            raise BrokerReadUnavailable("Broker snapshot unavailable")
+        data = dict(snap["data"]) if isinstance(snap["data"], dict) else {"data": snap["data"]}
+        data["_snapshot_meta"] = {
+            "status": snap.get("status"),
+            "synced_at": snap.get("synced_at"),
+            "success_at": snap.get("success_at"),
+            "error": snap.get("error"),
+        }
+        return data
+    if resource == "quotes":
+        symbols = (params or {}).get("symbols", "").split(",")
+        reads.demand(symbols)
+        quotes = [snapshots["quote:" + symbol]["data"] for symbol in symbols
+                  if snapshots.get("quote:" + symbol, {}).get("data") is not None
+                  and snapshots["quote:" + symbol]["status"] != "expired"]
+        if not quotes:
+            raise BrokerReadUnavailable("Quote snapshots unavailable")
+        used = [snapshots["quote:" + symbol] for symbol in symbols
+                if snapshots.get("quote:" + symbol, {}).get("data") is not None
+                and snapshots["quote:" + symbol]["status"] != "expired"]
+        oldest = min(used, key=lambda snap: snap.get("success_at") or 0)
+        return {"quotes": {"quote": quotes}, "_snapshot_meta": {
+            "status": "stale" if any(snap["status"] == "stale" for snap in used) else "ready",
+            "synced_at": oldest.get("synced_at"), "success_at": oldest.get("success_at"),
+            "error": "; ".join(str(snap["error"]) for snap in used if snap.get("error")),
+        }}
+    return reads.get(path, params, caller="legacy-dashboard")
 
 
 def records(payload: dict[str, Any], container: str, key: str) -> list[dict[str, Any]]:
@@ -159,6 +182,9 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
         "account": None, "clock": None, "positions": None, "orders": None,
         "quotes": {}, "history": [], "errors": [],
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "synced_at": None,
+        "is_stale": False,
+        "source_statuses": {},
     }
     if settings.name == "alpaca":
         import alpaca_client
@@ -182,9 +208,23 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
         ("orders", f"{account_path}/orders", None),
         ("history", "markets/history", {"symbol": "SPX", "interval": "daily", "start": start, "end": end}),
     )
+    latest_success_time = None
+    is_stale = False
+    source_statuses = {}
     for name, path, params in endpoints:
         try:
             payload = fetch_json(settings, path, params)
+            meta = payload.pop("_snapshot_meta", None) if isinstance(payload, dict) else None
+            if meta:
+                source_statuses[name] = meta
+                if meta.get("status") == "stale":
+                    is_stale = True
+                    if meta.get("error"):
+                        result["errors"].append(f"{name.title()} telemetry is stale: {meta['error']}")
+                    else:
+                        result["errors"].append(f"{name.title()} telemetry is stale (last synced: {meta.get('synced_at')}).")
+                if meta.get("synced_at") and meta.get("synced_at") != "No successful sync":
+                    latest_success_time = min(filter(None, (latest_success_time, meta.get("synced_at"))))
             if name == "account":
                 result[name] = account_balances(payload["balances"], settings)
             elif name == "clock":
@@ -202,9 +242,22 @@ def fetch_telemetry(settings: BrokerSettings, start: str, end: str) -> dict[str,
     symbols.update(str(p["symbol"]) for p in result["positions"] or [] if p.get("symbol"))
     try:
         payload = fetch_json(settings, "markets/quotes", {"symbols": ",".join(sorted(symbols)), "greeks": "true"})
+        meta = payload.pop("_snapshot_meta", None) if isinstance(payload, dict) else None
+        if meta:
+            source_statuses["quotes"] = meta
+            if meta.get("synced_at") and meta["synced_at"] != "No successful sync":
+                latest_success_time = min(filter(None, (latest_success_time, meta["synced_at"])))
+            if meta.get("status") == "stale":
+                is_stale = True
+                result["errors"].append(f"Quote telemetry is stale: {meta.get('error') or 'refresh overdue'}")
         result["quotes"] = {q["symbol"]: q for q in records(payload, "quotes", "quote") if q.get("symbol")}
     except Exception:
         result["errors"].append("Quote telemetry unavailable; refresh to retry.")
+    result["synced_at"] = latest_success_time
+    result["is_stale"] = is_stale
+    result["source_statuses"] = source_statuses
+    if latest_success_time:
+        result["fetched_at"] = latest_success_time
     return result
 
 
@@ -660,7 +713,9 @@ def main() -> None:
             if st.button("🔄 Refresh Telemetry", use_container_width=True):
                 cached_telemetry.clear()
                 st.rerun()
-            st.caption(f"Snapshot (UTC): {snapshot['fetched_at']}")
+            if snapshot.get("is_stale"):
+                st.warning(f"⚠️ Stale telemetry displayed (Source sync: {snapshot.get('synced_at') or 'No successful sync'}).")
+            st.caption(f"Snapshot (UTC): {snapshot.get('synced_at') or 'No successful sync'}")
             st.caption("Telemetry refreshes every 30 seconds when supported by Streamlit.")
 
             st.subheader("🛡️ Risk Parameters (.env)")

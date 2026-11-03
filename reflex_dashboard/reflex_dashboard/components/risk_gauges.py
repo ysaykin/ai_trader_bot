@@ -83,21 +83,21 @@ def risk_gauges_section() -> rx.Component:
                         rx.flex(
                             rx.text("PER-STRATEGY RISK CAP (RSK-01)", size="1", color=TEXT_MUTED, weight="bold"),
                             rx.spacer(),
-                            rx.text(f"{DashboardState.open_risk_str} / {DashboardState.open_risk_cap_str} Max", size="1", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                            rx.text(f"{DashboardState.strategy_risk_str} / {DashboardState.strategy_risk_cap_str} Max", size="1", color=TEXT_PRIMARY, class_name="tabular-nums"),
                             width="100%",
                             align="center",
                             wrap="wrap",
                         ),
                         rx.progress(
-                            value=DashboardState.open_risk_pct,
+                            value=DashboardState.strategy_risk_pct,
                             color_scheme="cyan",
                             size="3",
                             radius="small",
                             width="100%",
                         ),
                         rx.hstack(
-                            rx.badge(DashboardState.open_risk_pct_str, color_scheme="jade", variant="soft", size="1"),
-                            rx.text("Configured ceiling per individual strategy variant", size="1", color=TEXT_MUTED),
+                            rx.badge(DashboardState.strategy_risk_pct_str, color_scheme="jade", variant="soft", size="1"),
+                            rx.text("Ledger defined risk per individual strategy variant", size="1", color=TEXT_MUTED),
                             align="center",
                             spacing="2",
                             wrap="wrap",
@@ -111,27 +111,27 @@ def risk_gauges_section() -> rx.Component:
                     border_radius="6px",
                 ),
 
-                # Gauge 2: Single-Trade Risk Limit (RSK-02)
+                # Gauge 2: Portfolio Defined Risk Cap
                 rx.box(
                     rx.vstack(
                         rx.flex(
-                            rx.text("SINGLE-TRADE SIZING (RSK-02)", size="1", color=TEXT_MUTED, weight="bold"),
+                            rx.text("PORTFOLIO RISK CAP", size="1", color=TEXT_MUTED, weight="bold"),
                             rx.spacer(),
-                            rx.text("30.0% Max Loss / Trade", size="1", color=TEXT_PRIMARY, class_name="tabular-nums"),
+                            rx.text(f"{DashboardState.portfolio_risk_str} / {DashboardState.portfolio_risk_cap_str} Max", size="1", color=TEXT_PRIMARY, class_name="tabular-nums"),
                             width="100%",
                             align="center",
                             wrap="wrap",
                         ),
                         rx.progress(
-                            value=30,
+                            value=DashboardState.portfolio_risk_pct,
                             color_scheme="indigo",
                             size="3",
                             radius="small",
                             width="100%",
                         ),
                         rx.hstack(
-                            rx.badge("TIER 1 (<$10k)", color_scheme="indigo", variant="soft", size="1"),
-                            rx.text("Scales 30% down to 5% on >$50k", size="1", color=TEXT_MUTED),
+                            rx.badge(DashboardState.portfolio_risk_pct_str, color_scheme="indigo", variant="soft", size="1"),
+                            rx.text("Combined ledger risk across all active variants", size="1", color=TEXT_MUTED),
                             align="center",
                             spacing="2",
                             wrap="wrap",
@@ -145,11 +145,11 @@ def risk_gauges_section() -> rx.Component:
                     border_radius="6px",
                 ),
 
-                # Gauge 3: Option Buying Power Headroom (RSK-04)
+                # Gauge 3: Option Buying Power & Broker Margin (RSK-04)
                 rx.box(
                     rx.vstack(
                         rx.flex(
-                            rx.text("BUYING POWER HEADROOM (RSK-04)", size="1", color=TEXT_MUTED, weight="bold"),
+                            rx.text("BUYING POWER & BROKER MARGIN (RSK-04)", size="1", color=TEXT_MUTED, weight="bold"),
                             rx.spacer(),
                             rx.text(DashboardState.buying_power_headroom_str, size="1", color=GREEN, weight="bold", class_name="tabular-nums"),
                             width="100%",
@@ -164,8 +164,8 @@ def risk_gauges_section() -> rx.Component:
                             width="100%",
                         ),
                         rx.hstack(
-                            rx.badge("HEALTHY", color_scheme="jade", variant="soft", size="1"),
-                            rx.text(f"BP: {DashboardState.buying_power_str}", size="1", color=TEXT_MUTED, class_name="tabular-nums"),
+                            rx.badge("MARGIN", color_scheme="jade", variant="soft", size="1"),
+                            rx.text(f"Broker Margin: {DashboardState.broker_margin_str} | BP: {DashboardState.buying_power_str}", size="1", color=TEXT_MUTED, class_name="tabular-nums"),
                             align="center",
                             spacing="2",
                             wrap="wrap",

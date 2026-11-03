@@ -145,15 +145,16 @@ class StrategyBroExecutionTests(unittest.TestCase):
         return strategy
 
     def test_spec_defaults_and_env_overrides(self) -> None:
-        spec = incubator.get_strategybro_spec()
-        self.assertEqual(spec["dte"], 90)
-        self.assertEqual(spec["roll_dte"], 30)
-        self.assertEqual(spec["wing_width"], 15.0)
-        self.assertEqual(spec["profit_target"], 0.50)
-        self.assertEqual(spec["stop_loss_mult"], 2.0)
-        self.assertEqual(spec["otm_pct"], 0.07)
-        self.assertEqual(spec["structure"], "dynamic_sd")
-        self.assertTrue(spec["is_strategybro_variant"])
+        with patch.dict(os.environ, {}, clear=True):
+            spec = incubator.get_strategybro_spec()
+            self.assertEqual(spec["dte"], 90)
+            self.assertEqual(spec["roll_dte"], 30)
+            self.assertEqual(spec["wing_width"], 15.0)
+            self.assertEqual(spec["profit_target"], 0.50)
+            self.assertEqual(spec["stop_loss_mult"], 1.3)
+            self.assertEqual(spec["otm_pct"], 0.07)
+            self.assertEqual(spec["structure"], "dynamic_sd")
+            self.assertTrue(spec["is_strategybro_variant"])
 
         with patch.dict(os.environ, {
             "STRATEGYBRO_DTE": "120",

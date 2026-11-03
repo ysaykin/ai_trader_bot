@@ -116,6 +116,89 @@ submitting and canceling a paper order is acceptable.
 python3 -m unittest discover -s tests -v
 ```
 
+## Concurrent positions
+
+Set `IC_MAX_CONCURRENT_POSITIONS=2` to allow two independently managed positions
+per strategy. The default remains `1`. `IC_ENTRY_SPACING_MINUTES` defaults to
+`60` and applies when concurrency is enabled. Existing strategy, single-position,
+allocation, and portfolio risk limits still apply.
+
+Each position has a persistent `position_id`. Its entry, additions, trims, closes,
+and replacement orders have separate `package_id` values linked to that position.
+Entries retain their own credit, management settings, journal identity, and exit
+intent after restart. Broker tags continue routing through the registered host.
+The positions dashboard can use the distinct journal trade IDs to group fills.
+
+Pending entries reserve their unfilled risk and occupy a position slot. Pending
+closes reserve their remaining contracts. Unknown order outcomes retain those
+reservations until broker reconciliation confirms terminal execution quantities.
+Freshly confirmed pending orders keep their slot and reserved risk across a DAY
+rollover while allowing another independent entry within the configured limits.
+Legacy ledger migration links adjustments only when ownership is unambiguous;
+unattributed inventory blocks new exposure.
+
+After changing these environment settings, recreate the services with
+`docker compose up -d --no-build --force-recreate lumibot-bot lumibot-dashboard`.
+Mounted Python source is loaded when the process starts. Verify startup logs for
+each strategy's `Entry limits`, then inspect capacity, reserved orders and fresh
+held quotes without broker writes:
+
+```bash
+docker exec -i lumibot-bot python - --fresh --expect-capacity 2 < tools/check_trading_runtime.py
+```
+
+The execution adapter is pinned to LumiBot 4.6.31, the version exercised by the
+broker routing and independent-position regressions.
+
+Policy adjustments accept an explicit `position_id` when several positions are
+open. An untargeted add, trim, or profit-target adjustment returns `HOLD` in that
+case. `FLATTEN_NOW` closes each position separately. Entry quantity remains a
+configuration value, so a filled addition cannot enlarge the next entry.
+The existing single-basket training schema leaves aggregate P&L labels unavailable
+when several positions are open, and records their identities separately.
+
+Run the independent-position regressions without broker writes:
+
+```bash
+RUN_TRADIER_SANDBOX_WRITE_TEST=0 python3 -m pytest -q tests/test_concurrent_positions.py tests/test_tradier_order_routing.py
+```
+
 ## License
 
 MIT License
+## Shared broker snapshots
+
+The bot and dashboard share `logs/broker_snapshots.sqlite3`, separate from the
+position ownership ledger. The bot publishes account snapshots. A dashboard
+collector can take over after the bot's lease expires. Browser refreshes read the
+shared store and do not make account requests.
+
+Balances refresh every 30 seconds, positions every 15 seconds, idle orders every
+30 seconds, active orders every 5 seconds, and demanded quotes every 5 seconds.
+Option package pricing and management use native Tradier quote batches. The
+`BROKER_*_INTERVAL` settings in `.env.example` control these schedules.
+Routine intervals increase fourfold outside weekday session hours when no
+orders are pending. Fresh execution reads bypass that scheduling delay.
+
+Failed reads retain the last successful values and their original timestamps.
+The dashboard labels stale data and shows each source's age. After
+`BROKER_DISPLAY_MAX_AGE`, values are historical and excluded from current totals.
+A confirmed empty inventory clears previous holdings. Missing data never implies
+an empty account. Broker quote timestamps remain separate from cache age.
+
+The shared request budget counts network attempts across processes, reserves
+half the market-data allowance and at least half the standard allowance for
+execution, and observes provider quota headers and cooldowns. GET failures have
+bounded retries with jitter. Mutations are attempted once and invalidate cached
+reads. Execution boundaries require fresh broker evidence and never use retained
+stale display values. Existing ownership, cancellation and liquidation gates
+still apply.
+
+Both services share a writable logs volume in Compose. A relative
+`BROKER_SNAPSHOT_PATH` resolves from the project root in either service. Apply
+the cache deployment with `docker compose up -d --no-build`; Compose must recreate
+containers whose mounts changed. `docker compose restart` keeps the old mounts,
+including the dashboard's previous read-only logs mount. A cache storage failure
+shows a warning while readable positions and independent strategy data still load.
+The initial integration retains SDK polling; the installed SDK has
+no account-event consumer to reconcile reconnects or duplicate events safely.

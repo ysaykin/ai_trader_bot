@@ -260,11 +260,15 @@ def test_broker_failure_has_no_example_balance_or_successful_empty_position(tmp_
     from unittest.mock import Mock, patch
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reflex_dashboard"))
     from reflex_dashboard.data.adapters import get_broker_telemetry
+    from strategies.broker_reads import BrokerReads
     env = {"TRADING_BROKER": "tradier", "TRADIER_ACCOUNT_NUMBER": "test", "TRADIER_ACCESS_TOKEN": "test"}
     response = Mock(status_code=503)
+    response.headers = {}
+    reads = BrokerReads("test", "test", path=tmp_path / "snapshots.sqlite3", transport=lambda *a, **k: response, sleep=lambda _: None)
+    reads.collect_once()
     with patch("reflex_dashboard.data.adapters.PROJECT_ROOT", tmp_path), \
          patch("reflex_dashboard.data.adapters.dotenv_values", return_value=env), \
-         patch("requests.get", return_value=response):
+         patch("strategies.broker_reads.get_broker_reads", return_value=reads), patch.object(reads, "start"):
         value = get_broker_telemetry()
     assert value["equity"] is None
     assert value["buying_power_headroom_pct"] is None
@@ -277,13 +281,18 @@ def test_zero_balance_is_preserved_and_successful_null_positions_are_empty(tmp_p
     from unittest.mock import Mock, patch
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reflex_dashboard"))
     from reflex_dashboard.data.adapters import get_broker_telemetry
+    from strategies.broker_reads import BrokerReads
     env = {"TRADING_BROKER": "tradier", "TRADIER_ACCOUNT_NUMBER": "test", "TRADIER_ACCESS_TOKEN": "test"}
     responses = [Mock(status_code=200, json=lambda: {"balances": {"total_equity": 0, "total_cash": 0, "margin": {"option_buying_power": 0}}}),
                  Mock(status_code=200, json=lambda: {"positions": "null"}),
                  Mock(status_code=200, json=lambda: {"orders": {"order": []}})]
+    for response in responses:
+        response.headers = {}
+    reads = BrokerReads("test", "test", path=tmp_path / "snapshots.sqlite3", transport=Mock(side_effect=responses))
+    reads.collect_once()
     with patch("reflex_dashboard.data.adapters.PROJECT_ROOT", tmp_path), \
          patch("reflex_dashboard.data.adapters.dotenv_values", return_value=env), \
-         patch("requests.get", side_effect=responses):
+         patch("strategies.broker_reads.get_broker_reads", return_value=reads), patch.object(reads, "start"):
         value = get_broker_telemetry()
     assert value["equity"] == 0
     assert value["cash"] == 0

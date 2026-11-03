@@ -224,6 +224,79 @@ class TradierOrderRoutingTests(unittest.TestCase):
         self.assertEqual(self.ledger.get_basket(basket.package_id).opening_cash_flow, 400.0)
         self.assertEqual(self.ledger.owned_quantities(peer.name), {})
 
+    def test_fresh_parent_with_complete_execution_evidence_avoids_four_child_requests(self) -> None:
+        [parent] = self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+        [basket] = self.ledger.open_baskets(self.host.name)
+        row = self.polling_row(str(parent.identifier), self.host._broker_routing_tag())
+        row["status"] = "filled"
+        for leg, price in zip(row["leg"], (.25, 1.25, 1.25, .25)):
+            leg.update(status="filled", exec_quantity=1, avg_fill_price=price)
+        with patch.object(self.broker, "_pull_broker_order", return_value=row) as pull, \
+             patch("trade_logger.record_trade_entry", return_value="confirmed"):
+            self.assertFalse(self.host._reconcile_inflight_orders([parent]))
+        pull.assert_called_once_with(str(parent.identifier))
+        self.assertEqual(self.ledger.get_basket(basket.package_id).state, "open")
+        self.assertEqual(self.ledger.get_basket(basket.package_id).opening_cash_flow, 200.0)
+
+    def test_incomplete_parent_fetches_only_the_child_missing_execution_evidence(self) -> None:
+        [parent] = self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+        row = self.polling_row(str(parent.identifier), self.host._broker_routing_tag())
+        row["status"] = "filled"
+        for leg, price in zip(row["leg"], (.25, 1.25, 1.25, .25)):
+            leg.update(status="filled", exec_quantity=1, avg_fill_price=price)
+        child = dict(row["leg"][2])
+        del row["leg"][2]["exec_quantity"]
+        def pull(identifier):
+            self.assertIn(identifier, {str(parent.identifier), child["id"]})
+            return row if identifier == str(parent.identifier) else child
+        with patch.object(self.broker, "_pull_broker_order", side_effect=pull) as fetch, \
+             patch("trade_logger.record_trade_entry", return_value="confirmed"):
+            self.assertFalse(self.host._reconcile_inflight_orders([parent]))
+        self.assertEqual(fetch.call_count, 2)
+        [basket] = self.ledger.open_baskets(self.host.name)
+        self.assertEqual(basket.state, "open")
+        self.assertEqual(basket.opening_cash_flow, 200.0)
+
+    def test_fresh_prior_day_pending_entry_reserves_one_slot_without_locking_second(self) -> None:
+        self.host.parameters["max_concurrent_positions"] = 2
+        self.host.get_datetime.return_value = datetime(2026, 11, 2, 15, tzinfo=timezone.utc)
+        [parent] = self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+        row = self.polling_row(str(parent.identifier), self.host._broker_routing_tag())
+        row["status"] = "pending"
+        for leg in row["leg"]:
+            leg.update(status="pending", exec_quantity=0, avg_fill_price=0)
+        self.host.get_datetime.return_value = datetime(2026, 11, 3, 17, tzinfo=timezone.utc)
+        self.host.get_orders = Mock(return_value=[parent])
+        with patch.object(self.broker, "_pull_broker_order", return_value=row):
+            self.assertTrue(self.host._reconcile_broker_state())
+        self.assertFalse(self.host._recovery_lock)
+        self.assertEqual(len(self.ledger.open_positions(self.host.name)), 1)
+        self.assertEqual(self.ledger.portfolio_defined_risk(self.host.name), 500)
+        self.broker.tradier.orders.multileg_order.return_value = {"id": "second-parent"}
+        self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+        self.assertEqual(len(self.ledger.open_positions(self.host.name)), 2)
+        self.assertEqual(self.ledger.portfolio_defined_risk(self.host.name), 1000)
+        with self.assertRaisesRegex(RuntimeError, "concurrency"):
+            self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+
+    def test_prior_day_pending_entry_with_missing_execution_evidence_keeps_lock(self) -> None:
+        self.host.get_datetime.return_value = datetime(2026, 11, 2, 15, tzinfo=timezone.utc)
+        [parent] = self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+        row = self.polling_row(str(parent.identifier), self.host._broker_routing_tag())
+        row["status"] = "pending"
+        for leg in row["leg"]:
+            leg.update(status="pending", exec_quantity=0, avg_fill_price=0)
+        del row["leg"][2]["exec_quantity"]
+        self.host.get_datetime.return_value = datetime(2026, 11, 3, 17, tzinfo=timezone.utc)
+        self.host.get_orders = Mock(return_value=[parent])
+        def pull(identifier):
+            return row if str(identifier) == str(parent.identifier) else None
+        with patch.object(self.broker, "_pull_broker_order", side_effect=pull):
+            self.assertTrue(self.host._reconcile_broker_state())
+        self.assertTrue(self.host._recovery_lock)
+        self.assertEqual(len(self.ledger.open_positions(self.host.name)), 1)
+        self.assertEqual(self.ledger.portfolio_defined_risk(self.host.name), 500)
+
 
 if __name__ == "__main__":
     unittest.main()

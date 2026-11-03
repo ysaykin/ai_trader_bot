@@ -376,3 +376,19 @@ This document is the **single source of truth** for all user-facing features sup
 #### `BRK-06`: In-Lock Panic Halt Verification & Fill Reconciliation Safety
 * **User Story**: As an automated trader, I want the bot to recheck the durable panic halt immediately inside the cross-process execution lock before submitting orders, and retain terminal opening packages with missing or unbalanced fills as partial until cumulative broker evidence is verified.
 * **Implementation**: Relocated panic halt checks in `SPXIronCondor` directly inside `execution_gate()`, enforced verified leg execution evidence before resolving terminal packages in `PositionLedger`, and added a reconciliation check prior to closing restarted entries.
+
+#### `BRK-07`: Shared Broker Read Caching, Rate Quota Budgeting & Coordinated Backoff
+* **User Story**: As a platform operator running concurrent bot executions and multiple dashboard viewers, I want broker HTTP reads consolidated into a shared SQLite snapshot cache with process request coalescing and bounded quota backoff, so rate limits are never exhausted and transient 500 errors do not trigger cascading retries.
+* **Implementation**: Implemented `BrokerReads` in `strategies/broker_reads.py` using a shared SQLite snapshot store (`logs/broker_snapshots.sqlite3`), background collector preference for the bot service with dashboard fallback, per-resource leases, batched option quote fetching, sanitized `X-Ratelimit-*` quota accounting, and bounded exponential backoff for HTTP 429/500 responses.
+
+#### `EXE-04`: Independent Multi-Tranche Concurrent Positions & Spacing Allocation
+* **User Story**: As an automated options trader, I want individual strategies to hold multiple independent positions (e.g. up to 2 concurrent tranches) spaced across the day (e.g. 60 minutes apart) without cross-tranche state contamination or unified exit interference.
+* **Implementation**: Extended `PositionLedger` and `PositionState` with explicit `position_id` tracking, independent credit, basis, defined risk, and exit intent per position. Added slot-based entry spacing and capacity reservation under the shared cross-process execution gate.
+
+#### `EXE-05`: Zero/Debit Position Valuation, Debit Stop-Loss & Unsubmitted Reservation Recovery
+* **User Story**: As an automated options trader, I want positions entered at zero or debit credit to be valued and managed against spread max loss rather than dropped as unvalued, zero-priced close orders to submit at minimum tick debit ($0.01) to ensure broker execution, and unsubmitted pending reservations to be safely released upon stop/EOD closing without blocking exits.
+* **Implementation**: Preserved opening debit upon ledger hydration, computed stop thresholds against defined loss for zero/debit positions, permitted closing orders to submit at $0.01 debit fallback, and added `submission_started` tracking in `PositionLedger` so unsubmitted reservations (`submission_started == 0`) can be marked failed while uncertain reservations remain guarded.
+
+#### `DASH-07`: Decoupled Strategy & Portfolio Risk Utilization Telemetry
+* **User Story**: As a risk manager, I want the dashboard to display actual runtime limits ($15,000 per-strategy ceiling, $100,000 portfolio cap) and live capacity utilization separately with true denominators, rather than hardcoded labels and sample balances.
+* **Implementation**: Decoupled per-strategy risk gauges from portfolio risk gauges in `risk_gauges.py`, bound values to dynamic state properties in `adapters.py`, surfaced broker margin and buying power headroom, and eliminated static health and tier labels.

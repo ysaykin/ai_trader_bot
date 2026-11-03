@@ -26,7 +26,6 @@ class PositionState:
     pending_gross_pnl: float | None = None
     pending_fees: float | None = None
     pending_net_pnl: float | None = None
-    journaled_adjustments: set[Any] = field(default_factory=set)
 
 
 def position_attribute(name: str) -> property:

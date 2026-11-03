@@ -28,7 +28,11 @@ def orders_view() -> rx.Component:
                     align="center",
                     spacing="2",
                 ),
-                rx.badge("Tradier Direct Fills", color_scheme="cyan", variant="surface", size="1"),
+                rx.vstack(
+                    rx.badge(DashboardState.orders_status, color_scheme="gray", variant="surface", size="1"),
+                    rx.text(DashboardState.orders_synced_at, size="1", color=TEXT_MUTED),
+                    align="end", spacing="1",
+                ),
                 direction={"initial": "column", "sm": "row"},
                 justify="between",
                 align={"initial": "start", "sm": "center"},
@@ -71,8 +75,11 @@ def orders_view() -> rx.Component:
                 ),
                 rx.center(
                     rx.vstack(
-                        rx.icon("circle-check", size=32, color=GREEN),
-                        rx.text("All recent orders successfully processed and cleared.", size="2", color=TEXT_MUTED),
+                        rx.icon("clipboard-list", size=32, color=TEXT_MUTED),
+                        rx.text(rx.cond(DashboardState.orders_status == "ready",
+                                        "The broker reported no recent orders in this snapshot.",
+                                        "Current order data is unavailable. This does not confirm that pending orders are cleared."),
+                                size="2", color=TEXT_MUTED),
                         spacing="2",
                         align="center",
                     ),

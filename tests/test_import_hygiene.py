@@ -2,7 +2,11 @@
 
 import importlib.util
 from importlib.metadata import distribution
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 try:
@@ -14,6 +18,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class TestImportHygiene(unittest.TestCase):
+    def test_entrypoint_import_does_not_construct_an_implicit_broker(self) -> None:
+        environment = dict(os.environ)
+        environment.pop("LUMIBOT_LAZY_CREDENTIALS", None)
+        environment.update(PYTHONPATH=str(ROOT), TRADING_BROKER="tradier",
+                           TRADIER_ACCESS_TOKEN="test-token", TRADIER_ACCOUNT_NUMBER="test-account",
+                           TRADIER_PAPER="true", DATA_SOURCE="")
+        code = """
+from unittest.mock import patch
+with patch('lumibot.brokers.Tradier') as constructor:
+    import main
+    import strategies.iron_condor
+    constructor.assert_not_called()
+"""
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run([sys.executable, "-c", code], cwd=temporary,
+                                    env=environment, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_no_local_lumibot_directory_shadows_upstream(self) -> None:
         self.assertFalse((ROOT / "lumibot").exists(), "./lumibot shadows the upstream package")
 

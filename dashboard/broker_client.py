@@ -46,27 +46,38 @@ class TradierClient:
         }
         self.flatten_failures: Dict[str, str] = {}
 
-    def _request_with_backoff(self, method: str, url: str, max_retries: int = 3, **kwargs) -> Any:
-        """Execute HTTP request with bounded backoff on 429, 502, 503, 504."""
-        backoff = 0.5
+    def _reads(self):
+        from strategies.broker_reads import get_broker_reads
+        return get_broker_reads(self.api_key, self.account, self.sandbox)
+
+    def _get(self, url: str, *, headers=None, params=None, timeout=6, fresh=False):
+        from strategies.broker_reads import fresh_broker_reads
+        endpoint = url.removeprefix(self.base_url)
+        if fresh:
+            with fresh_broker_reads():
+                payload = self._reads().get(endpoint, params, fresh=True, caller="recovery", timeout=timeout)
+        else:
+            payload = self._reads().get(endpoint, params, caller="legacy-dashboard", timeout=timeout)
+        response = requests.Response()
+        response.status_code = 200
+        import json
+        response._content = json.dumps(payload).encode()
+        return response
+
+    def _submit_once(self, method: str, url: str, **kwargs) -> Any:
+        """Submit a mutation once; ambiguous outcomes require reconciliation."""
         func = getattr(requests, method.lower(), None)
-        for attempt in range(max_retries):
+        def send():
             if callable(func):
-                res = func(url, **kwargs)
-            else:
-                res = requests.request(method, url, **kwargs)
-            if res.status_code in (429, 502, 503, 504) and attempt < max_retries - 1:
-                time.sleep(backoff)
-                backoff *= 2
-                continue
-            return res
-        return res
+                return func(url, **kwargs)
+            return requests.request(method, url, **kwargs)
+        return self._reads().write(send, caller="recovery")
 
     def fetch_account_info(self) -> Optional[Dict[str, Any]]:
         """Fetch balances, equity, cash, and option buying power."""
         try:
             url = f"{self.base_url}/accounts/{self.account}/balances"
-            res = requests.get(url, headers=self.headers, timeout=6)
+            res = self._get(url, headers=self.headers, timeout=6)
             if res.status_code != 200:
                 logger.error(f"Tradier balances error {res.status_code}: {res.text}")
                 return None
@@ -94,7 +105,7 @@ class TradierClient:
         """Fetch live market clock and state from Tradier."""
         try:
             url = f"{self.base_url}/markets/clock"
-            res = requests.get(url, headers=self.headers, timeout=6)
+            res = self._get(url, headers=self.headers, timeout=6)
             if res.status_code == 200:
                 clk = res.json().get("clock", {})
                 state = clk.get("state", "closed").lower()
@@ -125,7 +136,7 @@ class TradierClient:
         """Fetch latest quotes for given symbols."""
         try:
             url = f"{self.base_url}/markets/quotes"
-            res = requests.get(url, headers=self.headers, params={"symbols": ",".join(symbols)}, timeout=6)
+            res = self._get(url, headers=self.headers, params={"symbols": ",".join(symbols)}, timeout=6)
             if res.status_code == 200:
                 data = res.json().get("quotes", {}).get("quote", [])
                 if isinstance(data, dict):
@@ -139,7 +150,7 @@ class TradierClient:
         """Fetch real options Greeks from Tradier API for active strikes."""
         try:
             url = f"{self.base_url}/markets/options/chains"
-            res = requests.get(url, headers=self.headers, params={"symbol": symbol, "expiration": expiration, "greeks": "true"}, timeout=6)
+            res = self._get(url, headers=self.headers, params={"symbol": symbol, "expiration": expiration, "greeks": "true"}, timeout=6)
             if res.status_code == 200:
                 opts = res.json().get("options", {}).get("option", [])
                 if isinstance(opts, dict):
@@ -166,7 +177,7 @@ class TradierClient:
         """Fetch open positions with real-time mark-to-market pricing and Greeks."""
         try:
             url = f"{self.base_url}/accounts/{self.account}/positions"
-            res = requests.get(url, headers=self.headers, timeout=6)
+            res = self._get(url, headers=self.headers, timeout=6)
             if res.status_code == 200:
                 pos_data = res.json().get("positions", {})
                 if pos_data == "null" or not pos_data:
@@ -183,7 +194,7 @@ class TradierClient:
                 if symbols:
                     try:
                         q_url = f"{self.base_url}/markets/quotes"
-                        q_res = requests.get(
+                        q_res = self._get(
                             q_url,
                             headers=self.headers,
                             params={"symbols": ",".join(symbols), "greeks": "true"},
@@ -241,7 +252,7 @@ class TradierClient:
         """Fetch recent order history."""
         try:
             url = f"{self.base_url}/accounts/{self.account}/orders"
-            res = requests.get(url, headers=self.headers, timeout=6)
+            res = self._get(url, headers=self.headers, timeout=6)
             if res.status_code == 200:
                 orders_data = res.json().get("orders", {})
                 if orders_data == "null" or not orders_data:
@@ -261,7 +272,7 @@ class TradierClient:
         seen_ids = set()
         while True:
             url = f"{self.base_url}/accounts/{self.account}/orders"
-            res = requests.get(url, headers=self.headers, params={"page": page}, timeout=6)
+            res = self._get(url, headers=self.headers, params={"page": page}, timeout=6, fresh=True)
             if res.status_code != 200:
                 raise RuntimeError(f"Failed to fetch orders from Tradier (status {res.status_code}): {res.text}")
             data = res.json()
@@ -296,7 +307,7 @@ class TradierClient:
     def _fetch_all_positions(self) -> List[Dict[str, Any]]:
         """Strict position reader that raises on non-200 HTTP status."""
         url = f"{self.base_url}/accounts/{self.account}/positions"
-        res = requests.get(url, headers=self.headers, timeout=6)
+        res = self._get(url, headers=self.headers, timeout=6, fresh=True)
         if res.status_code != 200:
             raise RuntimeError(f"Failed to fetch positions from Tradier (status {res.status_code}): {res.text}")
         data = res.json()
@@ -337,7 +348,7 @@ class TradierClient:
             order_id = o.get("id")
             try:
                 url = f"{self.base_url}/accounts/{self.account}/orders/{order_id}"
-                r = self._request_with_backoff("delete", url, headers=self.headers, timeout=5)
+                r = self._submit_once("delete", url, headers=self.headers, timeout=5)
                 if r.status_code not in [200, 204]:
                     logger.warning(f"Failed to cancel order {order_id} (status {r.status_code}): {r.text}")
             except Exception as e:
@@ -457,10 +468,9 @@ class TradierClient:
                     }
                 if instrument_type == "option" and underlying_or_sym in {"SPX", "SPXW", "XSP"}:
                     try:
-                        quote_response = self._request_with_backoff(
-                            "get",
+                        quote_response = self._get(
                             f"{self.base_url}/markets/quotes", headers=self.headers,
-                            params={"symbols": sym}, timeout=6,
+                            params={"symbols": sym}, timeout=6, fresh=True,
                         )
                         quote_response.raise_for_status()
                         raw_quotes = quote_response.json().get("quotes", {})
@@ -487,7 +497,7 @@ class TradierClient:
                             continue
                 try:
                     url = f"{self.base_url}/accounts/{self.account}/orders"
-                    res = self._request_with_backoff("post", url, headers=self.headers, data=data, timeout=6)
+                    res = self._submit_once("post", url, headers=self.headers, data=data, timeout=6)
                     if res.status_code not in (200, 201):
                         self.flatten_failures[sym] = f"Order rejected (status {res.status_code})"
                         logger.error(f"Tradier reject for {sym}: {res.status_code} {res.text}")

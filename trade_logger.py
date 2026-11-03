@@ -247,6 +247,13 @@ class TrajectoryLogger:
         legs = getattr(strategy, "_owned_legs", [])
         credit = finite_number(getattr(strategy, "_entry_credit", None))
         entries = getattr(strategy, "_entry_orders", [])
+        positions = getattr(strategy, "_position_states", {})
+        multiple_positions = isinstance(positions, dict) and len(positions) > 1
+        if multiple_positions:
+            # The current policy schema represents one fixed basket. Do not
+            # relabel its previous basket as the new multi-position portfolio.
+            self._books.pop(name, None)
+            credit = None
         book = self._books.get(name)
         if len(legs) in (2, 3, 4) and credit is not None and credit > 0:
             entry_token = (
@@ -281,6 +288,11 @@ class TrajectoryLogger:
                 book["legs"] = list(legs)
         quantity = book["quantity"] if book else (max((abs(int(qty)) for _, qty in legs if int(qty) != 0), default=int(parameters.get("quantity", 1) or 1)) if legs else int(parameters.get("quantity", 1) or 1))
         risk = float(parameters["wing_width"]) * 100 * quantity
+        if multiple_positions:
+            risk = sum(float(position.settings["wing_width"]) * 100 * max(
+                max((abs(q) for _, q in position.owned_legs), default=0),
+                int(position.settings.get("quantity", 1)),
+            ) for position in positions.values())
         capped_position_risk = float(parameters["max_position_risk"])
         state = {
             "observed_at": now.astimezone(timezone.utc).isoformat(),
@@ -301,6 +313,12 @@ class TrajectoryLogger:
             "exit_requested": bool(strategy._exit_requested),
             **{greek: None if strategy._position_open else 0.0 for greek in GREEKS},
         }
+        if multiple_positions:
+            state["position_count"] = len(positions)
+            state["positions"] = [{"position_id": position.position_id,
+                                   "trade_id": position.current_trade_id,
+                                   "entry_credit_cash": position.entry_credit_cash}
+                                  for position in positions.values()]
         if book is None:
             return state
         prices = [finite_number(self._cached("price", strategy, asset)) for asset, _ in book["legs"]]
@@ -425,6 +443,7 @@ class TrajectoryLogger:
             risk = state["max_risk"]
             state["can_add"] = bool(
                 complete and state["position_open"] and not state["exit_requested"]
+                and state.get("position_count", 1) <= 1
                 and risk * 2 <= state["max_position_risk"] * state["single_trade_pct"]
                 and total_risk + risk <= max_portfolio_risk
             )

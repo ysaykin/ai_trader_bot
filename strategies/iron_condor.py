@@ -36,6 +36,7 @@ from decimal import Decimal
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Iterable
+from strategies.broker_reads import fresh_broker_reads
 
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
@@ -46,6 +47,7 @@ from strategies.iron_condor_math import (
     credit_strategy_pnl,
     evaluate_mfe_ratchet,
     evaluate_strategybro_entry_quality,
+    max_defined_loss,
     option_execution_fees,
     option_fee_per_contract,
     resolve_orb_structure,
@@ -189,7 +191,7 @@ class SPXIronCondor(Strategy):
         "wing_width": 15,
         "quantity": 1,
         "profit_target": 0.30,
-        "stop_loss_mult": 2.0,
+        "stop_loss_mult": 1.3,
         "entry_time": DEFAULT_RUN_TIMES_STR,
         "max_allocation": 0.03,
         "max_position_risk": 5000.0,
@@ -213,7 +215,6 @@ class SPXIronCondor(Strategy):
     _pending_gross_pnl = position_attribute("pending_gross_pnl")
     _pending_fees = position_attribute("pending_fees")
     _pending_net_pnl = position_attribute("pending_net_pnl")
-    _journaled_adjustments = position_attribute("journaled_adjustments")
 
     _iteration_count: int = 0
 
@@ -362,6 +363,11 @@ class SPXIronCondor(Strategy):
             p["symbol"], p["dte"], p["short_delta"], p["wing_width"],
             p["quantity"], p["profit_target"] * 100, p["stop_loss_mult"],
             p["max_position_risk"],
+        )
+        logger.info(
+            "[%s] Entry limits: max_positions=%d | spacing_minutes=%.0f | management_only=%s",
+            self._strategy_id(), p["max_concurrent_positions"], p["entry_spacing_minutes"],
+            bool(p.get("management_only", False)),
         )
 
         for follower in getattr(self, "_attached_strategies", ()):
@@ -513,7 +519,6 @@ class SPXIronCondor(Strategy):
         # --- COOLDOWN CHECK: Prevent duplicate entry on transient network blips ---
         # If we just checked positions and got an empty result, wait before re-entering
         if hasattr(self, '_position_open_cooldown') and self._position_open_cooldown:
-            import time
             now_ts = self.get_datetime().timestamp()
             cooldown_until = getattr(self, '_position_open_cooldown_until', 0)
             if now_ts < cooldown_until:
@@ -835,10 +840,9 @@ class SPXIronCondor(Strategy):
         if (
             position.entry_credit_cash is None
             or not math.isfinite(position.entry_credit_cash)
-            or position.entry_credit_cash <= 0
         ):
             logger.warning(
-                "Filled opening credit is unavailable; retaining contracts without P&L exits."
+                "Filled opening cash is unavailable; retaining contracts without P&L exits."
             )
             self._publish_position_snapshot(position, pnl=0.0, status="VALUATION_UNAVAILABLE")
             # CRITICAL: Do NOT set position.position_open = False or clear _owned_legs.
@@ -847,10 +851,17 @@ class SPXIronCondor(Strategy):
 
         marked_legs = []
         leg_quotes = []
-        incomplete = False
-        for asset, signed_quantity in position.owned_legs:
+        batched_quotes = None
+        if getattr(self.broker, "_shared_broker_reads", None) is not None:
             try:
-                quote = self._fetch_quote(asset)
+                batched_quotes = self._fetch_quotes([asset for asset, _ in position.owned_legs])
+            except Exception as error:
+                logger.warning("Could not batch owned option quotes: %s", error)
+                batched_quotes = [None] * len(position.owned_legs)
+        incomplete = False
+        for index, (asset, signed_quantity) in enumerate(position.owned_legs):
+            try:
+                quote = batched_quotes[index] if batched_quotes is not None else self._fetch_quote(asset)
                 midpoint = self._quote_midpoint(quote)
                 bounds = self._quote_bounds(quote)
             except Exception as error:
@@ -866,6 +877,19 @@ class SPXIronCondor(Strategy):
                 incomplete = True
             else:
                 marked_legs.append((signed_quantity, midpoint))
+        wing_width = float(position.settings.get("wing_width", 0.0))
+        quantity = max((abs(q) for _, q in position.owned_legs), default=1)
+        if wing_width <= 0:
+            strikes = [float(getattr(a, "strike", 0.0)) for a, _ in position.owned_legs if getattr(a, "strike", None)]
+            if len(strikes) >= 2:
+                wing_width = max(strikes) - min(strikes)
+        defined_loss = (
+            max_defined_loss(wing_width, quantity, max(position.entry_credit_cash, 0.0))
+            + max(-position.entry_credit_cash, 0.0)
+            if wing_width > 0
+            else (abs(position.entry_credit_cash) if position.entry_credit_cash < 0 else 0.0)
+        )
+
         if incomplete:
             # Pair legs by (right, expiration) to calculate conservative closing debit
             # A wing can contribute positive lower-bound closing debit max(short_ask - long_bid, 0.0)
@@ -917,8 +941,11 @@ class SPXIronCondor(Strategy):
                             if intrinsic > 0:
                                 conservative_debit += min(w_width, intrinsic) * w_qty * 100.0
 
-            threshold = position.entry_credit_cash * (1 + position.settings["stop_loss_mult"])
-            if conservative_debit > 0 and conservative_debit >= threshold:
+            if position.entry_credit_cash > 0:
+                threshold = position.entry_credit_cash * (1 + position.settings["stop_loss_mult"])
+            else:
+                threshold = max(defined_loss + position.entry_credit_cash, 0.0)
+            if conservative_debit > 0 and threshold > 0 and conservative_debit >= threshold:
                 self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS")
             else:
                 logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
@@ -943,8 +970,12 @@ class SPXIronCondor(Strategy):
         self._persist_position(position)
         self._publish_position_snapshot(position, pnl=net_pnl, status="OPEN")
 
-        pt_threshold = position.entry_credit_cash * position.settings["profit_target"]
-        sl_threshold = -position.entry_credit_cash * position.settings["stop_loss_mult"]
+        if position.entry_credit_cash > 0:
+            pt_threshold = position.entry_credit_cash * position.settings["profit_target"]
+            sl_threshold = -position.entry_credit_cash * position.settings["stop_loss_mult"]
+        else:
+            pt_threshold = float("inf")
+            sl_threshold = -defined_loss if defined_loss > 0 else 0.0
 
         logger.info(
             "IC P&L: Gross $%.2f | Fees -$%.2f | Net $%.2f | PT threshold: $%.2f | SL threshold: $%.2f",
@@ -954,7 +985,7 @@ class SPXIronCondor(Strategy):
         if net_pnl >= pt_threshold and net_pnl > 0:
             logger.info("🎯 NET PROFIT TARGET HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
             self._close_all_options(position_id=position.position_id, exit_reason="PROFIT_TARGET", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
-        elif net_pnl <= sl_threshold:
+        elif sl_threshold < 0 and net_pnl <= sl_threshold:
             logger.warning("🛑 STOP LOSS HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
             self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
         elif bool(position.settings.get("enable_mfe_ratchet", False)) or os.getenv("IC_MFE_RATCHET_ENABLED", "").strip().lower() in ("true", "1", "yes", "on"):
@@ -1256,6 +1287,7 @@ class SPXIronCondor(Strategy):
                 self.parameters["wing_width"],
             )
 
+    @fresh_broker_reads()
     def _close_all_options(
         self,
         exit_reason: str | None = None,
@@ -1312,13 +1344,46 @@ class SPXIronCondor(Strategy):
                             parent = fetch_order(str(basket.broker_parent_id))
                         except Exception:
                             parent = None
-                    if parent is None:
+                    if parent is None and basket.broker_tag:
                         parent = self._find_order_by_tag(broker_orders, basket.broker_tag)
-                    if parent is not None and parent.is_active():
-                        self.cancel_order(parent)
-                        has_active = True
-                    elif parent is None or not (str(getattr(parent, "status", "")).lower() in TERMINAL_STATES):
-                        has_active = True
+                    if parent is None:
+                        for leg in basket.legs:
+                            c_id = str(leg.get("broker_order_id") or "")
+                            if c_id in order_lookup:
+                                c_order = order_lookup[c_id]
+                                p_id = getattr(c_order, "parent_identifier", None) or getattr(c_order, "parent_id", None)
+                                if p_id and str(p_id) in order_lookup:
+                                    parent = order_lookup[str(p_id)]
+                                    break
+                    if parent is not None:
+                        if not basket.broker_parent_id:
+                            try:
+                                self._position_ledger.bind_broker_submission(basket.package_id, parent)
+                                if getattr(parent, "child_orders", None):
+                                    self._position_ledger.bind_broker_children(basket.package_id, parent.child_orders)
+                            except Exception:
+                                pass
+                        if parent.is_active():
+                            self.cancel_order(parent)
+                            has_active = True
+                        elif str(getattr(parent, "status", "")).lower() in TERMINAL_STATES:
+                            self._reconcile_inflight_orders(broker_orders)
+                            if self._position_ledger.is_inflight(self._position_ledger.get_basket(basket.package_id)):
+                                term_status = str(getattr(parent, "status", "canceled")).lower()
+                                term = term_status if term_status in TERMINAL_STATES else "canceled"
+                                self._position_ledger.record_terminal_status(basket.package_id, term)
+                        else:
+                            has_active = True
+                    else:
+                        # Only a durable pre-submission marker proves no broker call occurred.
+                        # The gate excludes a still-running submitter while checking it.
+                        with self._position_ledger.execution_gate():
+                            refreshed = self._position_ledger.get_basket(basket.package_id)
+                            if refreshed.submission_started == 0:
+                                self._position_ledger.record_terminal_status(basket.package_id, "failed")
+                            else:
+                                has_active = True
+                self._hydrate_from_ledger()
                 if has_active:
                     return
                 if self._reconcile_inflight_orders(broker_orders):
@@ -1399,7 +1464,9 @@ class SPXIronCondor(Strategy):
             except Exception as error:
                 logger.warning("Could not price closing package: %s", error)
                 price = None
-            if price is None or price <= 0:
+            if price == 0:
+                price = 0.01
+            if price is None or price < 0:
                 urgent = (
                     self._is_expiring_today(position_id=position.position_id)
                     or position.pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"}
@@ -1607,11 +1674,15 @@ class SPXIronCondor(Strategy):
             position.owned_legs = sorted(owned, key=lambda item: (
                 str(getattr(item[0], "right", "")), float(getattr(item[0], "strike", 0.0))))
             try:
-                position.entry_credit_cash = max(0.0, self._position_ledger.position_opening_cash(record.position_id))
+                position.entry_credit_cash = self._position_ledger.position_opening_cash(record.position_id)
             except ValueError:
-                position.entry_credit_cash = 0.0
+                position.entry_credit_cash = None
             quantity = max((abs(q) for _, q in owned), default=0)
-            position.entry_credit = position.entry_credit_cash / (100 * quantity) if quantity else 0.0
+            position.entry_credit = (
+                position.entry_credit_cash / (100 * quantity)
+                if position.entry_credit_cash is not None and quantity
+                else 0.0
+            )
             position.current_trade_id = record.trade_id
             position.mfe_pnl = record.mfe_pnl
             position.mae_pnl = record.mae_pnl
@@ -1853,6 +1924,26 @@ class SPXIronCondor(Strategy):
         self._startup_reconciled = True
         return True
 
+    @staticmethod
+    def _execution_evidence(order, leg):
+        raw = getattr(order, "_raw", None) or getattr(order, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        filled = getattr(order, "exec_quantity", None)
+        filled = raw.get("exec_quantity") if filled is None else filled
+        price = getattr(order, "avg_fill_price", None)
+        price = raw.get("avg_fill_price") if price is None else price
+        try:
+            count = float(filled)
+            quantity = int(count)
+            price = float(price) if price is not None else None
+            if (not math.isfinite(count) or count != quantity
+                    or not abs(int(leg["filled_signed_quantity"])) <= quantity <= abs(int(leg["requested_signed_quantity"]))
+                    or quantity and (price is None or not math.isfinite(price) or price < 0)):
+                return None
+            return quantity, price
+        except (TypeError, ValueError, OverflowError):
+            return None
+
     def _reconcile_inflight_orders(self, orders: list, positions: list | None = None) -> bool:
         """Reconcile active packages by broker IDs/tags and flag ambiguous rollover."""
         broker_orders: list[object] = []
@@ -1880,7 +1971,8 @@ class SPXIronCondor(Strategy):
         broker = getattr(self, "broker", None)
         if type(broker).__module__.startswith("lumibot.brokers.tradier"):
             def fetch_order(identifier):
-                row = broker._pull_broker_order(identifier)
+                with fresh_broker_reads():
+                    row = broker._pull_broker_order(identifier)
                 return broker._parse_broker_order_dict(row, self.name) if row else None
         terminal_map = {
             "canceled": "canceled",
@@ -1899,10 +1991,12 @@ class SPXIronCondor(Strategy):
         for basket in self._position_ledger.open_baskets(self._strategy_id()):
             if not self._position_ledger.is_inflight(basket):
                 continue
+            parent_refreshed = False
             parent = order_lookup.get(str(basket.broker_parent_id or ""))
             if parent is not None and basket.broker_parent_id and type(broker).__module__.startswith("lumibot.brokers.tradier"):
                 try:
                     parent = fetch_order(str(basket.broker_parent_id))
+                    parent_refreshed = parent is not None
                 except Exception:
                     parent = None
                 if parent is None:
@@ -1915,6 +2009,7 @@ class SPXIronCondor(Strategy):
             ):
                 try:
                     parent = fetch_order(str(basket.broker_parent_id))
+                    parent_refreshed = parent is not None
                 except Exception:
                     parent = None
             if parent is None:
@@ -1969,10 +2064,14 @@ class SPXIronCondor(Strategy):
                 basket = self._position_ledger.get_basket(basket.package_id)
             leg_statuses: list[str] = []
             complete_evidence = True
+            current_children = {str(getattr(child, "identifier", "")): child for child in
+                                getattr(parent, "child_orders", None) or ()} if parent_refreshed and type(broker).__module__.startswith("lumibot.brokers.tradier") else {}
             for leg in basket.legs:
                 broker_id = leg.get("broker_order_id")
-                broker_order = None
-                if broker_id and callable(fetch_order):
+                broker_order = current_children.get(str(broker_id))
+                if self._execution_evidence(broker_order, leg) is None:
+                    broker_order = None
+                if broker_order is None and broker_id and callable(fetch_order):
                     try:
                         broker_order = fetch_order(str(broker_id))
                     except Exception:
@@ -1985,33 +2084,14 @@ class SPXIronCondor(Strategy):
                 status = str(getattr(broker_order, "status", "") or "").strip().lower()
                 if status:
                     leg_statuses.append(status)
-                raw_dict = getattr(broker_order, "_raw", None) or getattr(broker_order, "raw", None)
-                if not isinstance(raw_dict, dict):
-                    raw_dict = {}
-                raw_filled = (
-                    getattr(broker_order, "exec_quantity", None)
-                    if getattr(broker_order, "exec_quantity", None) is not None
-                    else raw_dict.get("exec_quantity")
-                )
-                raw_price = getattr(broker_order, "avg_fill_price", None)
-                if raw_price is None:
-                    raw_price = raw_dict.get("avg_fill_price")
-                try:
-                    count = float(raw_filled)
-                    broker_filled = int(count)
-                    fill_price = float(raw_price) if raw_price is not None else None
-                    valid = (math.isfinite(count) and count == broker_filled and
-                             abs(int(leg["filled_signed_quantity"])) <= broker_filled <= abs(int(leg["requested_signed_quantity"])) and
-                             (broker_filled == 0 or (fill_price is not None and math.isfinite(fill_price) and fill_price >= 0)))
-                except (TypeError, ValueError, OverflowError):
-                    valid = False
-                if not valid:
+                evidence = self._execution_evidence(broker_order, leg)
+                if evidence is None:
                     complete_evidence = False
                 else:
+                    broker_filled, fill_price = evidence
                     already_filled = abs(int(leg["filled_signed_quantity"]))
                     if broker_filled > already_filled:
                         sign = 1 if int(leg["requested_signed_quantity"]) > 0 else -1
-                        position = self._runtime(basket.position_id)
                         filled_basket = self._position_ledger.record_fill(
                             str(leg["order_id"]),
                             sign * broker_filled,
@@ -2062,8 +2142,20 @@ class SPXIronCondor(Strategy):
                     elif resolved.state == "open" and resolved.intent == "add":
                         self._record_filled_addition(resolved)
                 continue
-            if parent is None or refreshed.package_id in stale_ids or (parent_status in terminal_map and (not complete_evidence or len(leg_statuses) < len(refreshed.legs))):
-                # A missing order, incomplete leg evidence, or a DAY rollover is not a terminal broker result.
+            known_reserved_order = (
+                parent_refreshed and complete_evidence
+                and len(leg_statuses) == len(refreshed.legs)
+                and parent.is_active()
+            )
+            stale_unknown = (
+                refreshed.package_id in stale_ids
+                and self._position_ledger.is_inflight(refreshed)
+                and not known_reserved_order
+            )
+            if parent is None or stale_unknown or (parent_status in terminal_map and (not complete_evidence or len(leg_statuses) < len(refreshed.legs))):
+                # A freshly identified pending order retains its slot and full
+                # risk reservation across DAY rollover. Only missing identity or
+                # execution evidence requires locking other independent entries.
                 ambiguous = True
         return ambiguous
 
@@ -2072,6 +2164,7 @@ class SPXIronCondor(Strategy):
         name = str(getattr(broker, "name", type(broker).__name__)).lower()
         return "tradier" in name
 
+    @fresh_broker_reads()
     def _submit_package(
         self,
         legs: list[tuple[Asset, int]],
@@ -2173,6 +2266,7 @@ class SPXIronCondor(Strategy):
             }
             if order_type != "market":
                 submit_kwargs["price"] = round(float(price), 2)
+            self._position_ledger.mark_submission_started(package_id)
             submitted = self.submit_order(orders, **submit_kwargs)
         parents = list(submitted) if isinstance(submitted, (list, tuple)) else []
         if not parents:
@@ -2264,8 +2358,6 @@ class SPXIronCondor(Strategy):
         if resolved is None:
             logger.warning("Ignoring fill without broker child details; no ledger leg matched.")
             return
-        package_id = str(resolved["package_id"])
-        position = self._runtime(self._position_ledger.get_basket(package_id).position_id)
         sign = 1 if "buy" in side else -1
 
         raw_dict = getattr(order, "_raw", None)
@@ -2331,10 +2423,6 @@ class SPXIronCondor(Strategy):
             from trade_logger import record_trade_adjustment, record_trade_exit
             closing_cash = float(basket.closing_cash_flow or 0.0)
             fee_rate = option_fee_per_contract()
-            closed_qty = max(
-                (abs(int(leg["filled_signed_quantity"])) for leg in basket.legs),
-                default=0,
-            )
             close_fees = option_execution_fees(
                 (leg["filled_signed_quantity"] for leg in basket.legs), fee_rate
             )
@@ -2470,7 +2558,11 @@ class SPXIronCondor(Strategy):
         quantities = {abs(quantity) for _, quantity in legs}
         if len(quantities) != 1:
             return None
-        quotes = [self._fetch_quote(asset) for asset, _ in legs]
+        try:
+            quotes = self._fetch_quotes([asset for asset, _ in legs])
+        except Exception as error:
+            logger.warning("Package quotes unavailable: %s", error)
+            return None
         marks = [
             (signed_quantity, self._quote_midpoint(quote))
             for (_, signed_quantity), quote in zip(legs, quotes)
@@ -2643,6 +2735,22 @@ class SPXIronCondor(Strategy):
         """Fetch a bid/ask quote; valuation never falls back to last trade."""
         return self.get_quote(asset)
 
+    def _fetch_quotes(self, assets):
+        """Use Tradier's native batch API for selected package legs."""
+        reads = getattr(getattr(self, "broker", None), "_shared_broker_reads", None)
+        if reads is None:
+            return [self._fetch_quote(asset) for asset in assets]
+        from lumibot.entities import Quote
+        from lumibot.tools.helpers import create_options_symbol
+        symbols = [create_options_symbol(asset.symbol, asset.expiration, asset.right, asset.strike)
+                   if getattr(asset, "asset_type", None) == Asset.AssetType.OPTION
+                   else asset.symbol for asset in assets]
+        payload = reads.quotes(symbols)
+        quotes = {row["symbol"]: row for row in payload["quotes"]["quote"]}
+        return [Quote(asset=asset, bid=quotes[symbol].get("bid"), ask=quotes[symbol].get("ask"),
+                      price=quotes[symbol].get("last"), timestamp=datetime.now(timezone.utc), raw_data=quotes[symbol])
+                for asset, symbol in zip(assets, symbols)]
+
     def _fetch_chains(self, underlying):
         """Fetch option chains via shared `MarketDataHub` when attached, else directly."""
         hub = getattr(self, "_market_data_hub", None)
@@ -2723,7 +2831,7 @@ class SPXIronCondor(Strategy):
                 "short_delta": float(self.parameters.get("short_delta", 0.15)),
                 "wing_width": float(self.parameters.get("wing_width", 15)),
                 "profit_target": float(self.parameters.get("profit_target", 0.30)),
-                "stop_loss_mult": float(self.parameters.get("stop_loss_mult", 2.0)),
+                "stop_loss_mult": float(self.parameters.get("stop_loss_mult", 1.3)),
                 "entry_time": str(self.parameters.get("entry_time", "10:00")),
                 "quantity": int(self.parameters.get("quantity", 1)),
                 "mfe_pnl": float(getattr(self, "_mfe_pnl", 0.0)),

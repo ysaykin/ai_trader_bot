@@ -260,6 +260,7 @@ def strategy_entry(strategy, *, prices=PRICES_A, legs=None):
 def test_strategy_manages_shared_contract_entries_independently(strategy, ledger):
     a = strategy_entry(strategy)
     b = strategy_entry(strategy, prices=PRICES_B)
+    assert strategy._reconcile_broker_state()
     strategy._manage_position(a)
     strategy._manage_position(b)
     closes = [basket for basket in ledger.open_baskets() if basket.intent == "close"]
@@ -406,6 +407,27 @@ def test_read_only_legacy_risk_is_unknown_until_migrated(tmp_path):
         reader.close()
 
 
+def test_corrupt_snapshot_reports_unknown_risk(tmp_path):
+    path = tmp_path / "incomplete.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.executescript("CREATE TABLE packages(strategy_id TEXT); INSERT INTO packages VALUES('strategy');")
+    reader = PositionLedger(path, read_only=True)
+    try:
+        assert reader.risk_snapshot()["portfolio_risk"] is None
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("mixed_expiry", [False, True])
+def test_invalid_spread_shape_cannot_understate_reserved_risk(ledger, mixed_expiry):
+    legs = option_legs((100, 110, 105, 115))
+    if mixed_expiry:
+        legs = option_legs()
+        legs[-1][0].expiration = "2026-12-20"
+    ledger.record_submission("invalid", "strategy", "open", ledger_legs("invalid", legs))
+    assert ledger.portfolio_defined_risk() is None
+
+
 def test_file_backed_gate_enforces_global_cap_across_connections(tmp_path):
     path = tmp_path / "shared.sqlite"
     ledgers = [PositionLedger(path), PositionLedger(path)]
@@ -475,3 +497,37 @@ def test_strategy_restart_restores_independent_exit_and_settings(strategy, ledge
     assert restored._runtime(b).entry_credit_cash == 60
     restored._close_all_options(position_id=a)
     restored.submit_order.assert_not_called()
+
+
+def test_settlement_of_one_expiry_keeps_other_position_managed(strategy, ledger):
+    a = strategy_entry(strategy)
+    strategy.parameters["dte"] = 30
+    later = option_legs((80, 85, 120, 125))
+    for asset, _ in later:
+        asset.expiration = "2026-12-20"
+    b = strategy_entry(strategy, prices=PRICES_B, legs=later)
+    strategy.get_datetime.return_value = NOW + timedelta(days=20)
+    strategy.get_positions = Mock(side_effect=lambda: [
+        SimpleNamespace(asset=strategy._asset_registry[key], quantity=q)
+        for key, q in ledger.position_quantities(b).items()])
+    assert strategy._reconcile_broker_state()
+    assert ledger.get_basket(ledger.position_baskets(a)[0].package_id).state == "expired"
+    assert ledger.position_opening_cash(b) == 60
+    assert ledger.portfolio_defined_risk() == 440
+    assert strategy._runtime(b).position_open
+
+
+def test_single_basket_trajectory_cannot_reuse_previous_position_for_multiple_entries(strategy, tmp_path):
+    from trade_logger import TrajectoryLogger
+    a = strategy_entry(strategy)
+    collector = TrajectoryLogger([strategy.name], tmp_path / "trajectory.jsonl")
+    collector._cached = lambda kind, *_: .1 if kind == "price" else {}
+    first = collector._strategy_state(strategy, NOW, "HOLD")
+    assert first["trade_id"] == a
+    b = strategy_entry(strategy, prices=PRICES_B)
+    combined = collector._strategy_state(strategy, NOW, "HOLD")
+    assert combined["trade_id"] is None
+    assert combined["pnl"] is None
+    assert combined["entry_credit"] is None
+    assert combined["max_risk"] == 1000
+    assert {position["position_id"] for position in combined["positions"]} == {a, b}

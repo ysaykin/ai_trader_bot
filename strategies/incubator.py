@@ -33,34 +33,34 @@ DEFAULT_EXPANDED_RUN_TIMES = (
 # (0, 7, 14, 21, 30 DTE) with 4 setup variations per tier.
 INCUBATOR_GRID_20: list[dict[str, Any]] = [
     # --- Tier 1: 0 DTE (Same-Day Expiration) ---
-    {"strategy_name": "IC_V01_0DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
-    {"strategy_name": "IC_V02_0DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
-    {"strategy_name": "IC_V03_0DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
-    {"strategy_name": "IC_V04_0DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
+    {"strategy_name": "IC_V01_0DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
+    {"strategy_name": "IC_V02_0DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
+    {"strategy_name": "IC_V03_0DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
+    {"strategy_name": "IC_V04_0DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 0},
 
     # --- Tier 2: 7 DTE (Weekly Swing) ---
-    {"strategy_name": "IC_V05_7DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
-    {"strategy_name": "IC_V06_7DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
-    {"strategy_name": "IC_V07_7DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
-    {"strategy_name": "IC_V08_7DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
+    {"strategy_name": "IC_V05_7DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
+    {"strategy_name": "IC_V06_7DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
+    {"strategy_name": "IC_V07_7DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
+    {"strategy_name": "IC_V08_7DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 7},
 
     # --- Tier 3: 14 DTE (Bi-Weekly Swing) ---
-    {"strategy_name": "IC_V09_14DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
-    {"strategy_name": "IC_V10_14DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
-    {"strategy_name": "IC_V11_14DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
-    {"strategy_name": "IC_V12_14DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
+    {"strategy_name": "IC_V09_14DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
+    {"strategy_name": "IC_V10_14DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
+    {"strategy_name": "IC_V11_14DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
+    {"strategy_name": "IC_V12_14DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 14},
 
     # --- Tier 4: 21 DTE (Three-Week Swing) ---
-    {"strategy_name": "IC_V13_21DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
-    {"strategy_name": "IC_V14_21DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
-    {"strategy_name": "IC_V15_21DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
-    {"strategy_name": "IC_V16_21DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
+    {"strategy_name": "IC_V13_21DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
+    {"strategy_name": "IC_V14_21DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
+    {"strategy_name": "IC_V15_21DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
+    {"strategy_name": "IC_V16_21DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 21},
 
     # --- Tier 5: 30 DTE (Monthly Core) ---
-    {"strategy_name": "IC_V17_30DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
-    {"strategy_name": "IC_V18_30DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
-    {"strategy_name": "IC_V19_30DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.0, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
-    {"strategy_name": "IC_V20_30DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 2.5, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
+    {"strategy_name": "IC_V17_30DTE_D10_W2_PT30_T0945", "short_delta": 0.10, "wing_width": 2.0, "profit_target": 0.30, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
+    {"strategy_name": "IC_V18_30DTE_D12_W3_PT35_T1000", "short_delta": 0.12, "wing_width": 3.0, "profit_target": 0.35, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
+    {"strategy_name": "IC_V19_30DTE_D15_W5_PT50_T1015", "short_delta": 0.15, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
+    {"strategy_name": "IC_V20_30DTE_D20_W5_PT50_T1030", "short_delta": 0.20, "wing_width": 5.0, "profit_target": 0.50, "stop_loss_mult": 1.3, "entry_time": DEFAULT_EXPANDED_RUN_TIMES, "dte": 30},
 ]
 
 
@@ -83,9 +83,9 @@ def get_testing_variant_spec() -> dict[str, Any]:
     except ValueError:
         pt = 0.50
     try:
-        sl = float(os.getenv("TESTING_SL", "2.0").strip())
+        sl = float(os.getenv("TESTING_SL", "1.3").strip())
     except ValueError:
-        sl = 2.0
+        sl = 1.3
     entry_time = os.getenv("TESTING_ENTRY_TIME", os.getenv("IC_ENTRY_TIME", DEFAULT_EXPANDED_RUN_TIMES)).strip() or DEFAULT_EXPANDED_RUN_TIMES
     structure = os.getenv("TESTING_STRUCTURE", "iron_condor").strip().lower()
     clean_time = entry_time.split(",")[0].strip().replace(":", "")
@@ -115,7 +115,7 @@ def get_vertical_specs() -> list[dict[str, Any]]:
             "short_delta": 0.15,
             "wing_width": 5.0,
             "profit_target": 0.50,
-            "stop_loss_mult": 2.0,
+            "stop_loss_mult": 1.3,
             "entry_time": vertical_entry,
             "dte": 7,
             "structure": "bull_put",
@@ -125,7 +125,7 @@ def get_vertical_specs() -> list[dict[str, Any]]:
             "short_delta": 0.15,
             "wing_width": 5.0,
             "profit_target": 0.50,
-            "stop_loss_mult": 2.0,
+            "stop_loss_mult": 1.3,
             "entry_time": vertical_entry,
             "dte": 7,
             "structure": "bear_call",
@@ -154,7 +154,7 @@ def get_neural_pure_spec() -> dict[str, Any]:
         "short_delta": delta,
         "wing_width": wing,
         "profit_target": 0.50,  # dynamic baseline, actively governed by policy net
-        "stop_loss_mult": 2.0,
+        "stop_loss_mult": 1.3,
         "entry_time": entry_time,
         "dte": dte,
         "pure_neural_mode": True,
@@ -180,9 +180,9 @@ def get_strategybro_spec() -> dict[str, Any]:
     except ValueError:
         pt = 0.50
     try:
-        sl = float(os.getenv("STRATEGYBRO_SL", "2.0").strip())
+        sl = float(os.getenv("STRATEGYBRO_SL", "1.3").strip())
     except ValueError:
-        sl = 2.0
+        sl = 1.3
     try:
         otm_pct = float(os.getenv("STRATEGYBRO_OTM_PCT", "0.07").strip())
     except ValueError:
@@ -232,9 +232,9 @@ def get_trendflow_spec() -> dict[str, Any]:
     except ValueError:
         pt = 0.50
     try:
-        sl = float(os.getenv("TRENDFLOW_SL", "2.0").strip())
+        sl = float(os.getenv("TRENDFLOW_SL", "1.3").strip())
     except ValueError:
-        sl = 2.0
+        sl = 1.3
     try:
         min_sd = float(os.getenv("TRENDFLOW_MIN_SD", "0.35").strip())
     except ValueError:
@@ -291,9 +291,9 @@ def get_skew_dynamic_spec() -> dict[str, Any]:
     except ValueError:
         pt = 0.40
     try:
-        sl = float(os.getenv("SKEW_DYNAMIC_SL", "2.0").strip())
+        sl = float(os.getenv("SKEW_DYNAMIC_SL", "1.3").strip())
     except ValueError:
-        sl = 2.0
+        sl = 1.3
 
     entry_time = (
         os.getenv("SKEW_DYNAMIC_ENTRY_TIME", os.getenv("IC_ENTRY_TIME", DEFAULT_EXPANDED_RUN_TIMES)).strip()
@@ -343,9 +343,9 @@ def get_vol_crush_spec() -> dict[str, Any]:
     except ValueError:
         pt = 0.45
     try:
-        sl = float(os.getenv("VOL_CRUSH_SL", "2.0").strip())
+        sl = float(os.getenv("VOL_CRUSH_SL", "1.3").strip())
     except ValueError:
-        sl = 2.0
+        sl = 1.3
     try:
         min_rv_ratio = float(os.getenv("VOL_CRUSH_MIN_RV_RATIO", "1.15").strip())
     except ValueError:
@@ -394,9 +394,9 @@ def get_orb_dynamic_spec() -> dict[str, Any]:
     except ValueError:
         pt = 0.40
     try:
-        sl = float(os.getenv("ORB_DYNAMIC_SL", "1.8").strip())
+        sl = float(os.getenv("ORB_DYNAMIC_SL", "1.3").strip())
     except ValueError:
-        sl = 1.8
+        sl = 1.3
     try:
         thresh = float(os.getenv("ORB_DYNAMIC_THRESHOLD_PCT", "0.0030").strip())
     except ValueError:
@@ -645,7 +645,7 @@ def build_ab_strategies(
         "short_delta": float(os.getenv("AB_STRAT_A_DELTA", "0.10")),
         "wing_width": float(os.getenv("AB_STRAT_A_WIDTH", "2.0")),
         "profit_target": float(os.getenv("AB_STRAT_A_PT", "0.25")),
-        "stop_loss_mult": float(os.getenv("AB_STRAT_A_SL", "1.5")),
+        "stop_loss_mult": float(os.getenv("AB_STRAT_A_SL", "1.3")),
         "entry_time": default_entry,
     }
     spec_b = {
@@ -653,7 +653,7 @@ def build_ab_strategies(
         "short_delta": float(os.getenv("AB_STRAT_B_DELTA", "0.20")),
         "wing_width": float(os.getenv("AB_STRAT_B_WIDTH", "5.0")),
         "profit_target": float(os.getenv("AB_STRAT_B_PT", "0.50")),
-        "stop_loss_mult": float(os.getenv("AB_STRAT_B_SL", "2.5")),
+        "stop_loss_mult": float(os.getenv("AB_STRAT_B_SL", "1.3")),
         "entry_time": default_entry,
     }
     strat_a = build_strategy_variant(

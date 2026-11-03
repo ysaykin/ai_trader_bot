@@ -360,12 +360,14 @@ tasks:
 
   - id: dashboard-telemetry-validity
     title: "Distinguish loading, empty, stale and failed data without showing fabricated balances or zero P&L"
-    status: in_progress
+    status: completed
     priority: P0
     owner: antigravity
     implementation_notes:
       - "Reopened after follow-up verification found retained sample broker balances and startup profits. Broker balances now start unavailable, successful empty inventory is distinct from failure, and missing marks never fabricate zero P&L."
       - "The position workspace shows snapshot/quote timestamps, valuation coverage and reconciliation issues. Remaining: stale-cache policy across all views and removal of legacy benchmark/model placeholders outside the position workspace."
+      - "2026-11-02: The reported N/A refresh flicker is reproducible offline. Shared snapshot ownership and retention of last successful values are tracked by broker-shared-snapshot-collector and dashboard-last-successful-snapshot. Keep sample-value removal and display coverage in this parent task."
+      - "2026-11-03: Completed and verified across Reflex and Streamlit telemetry paths. Loading, empty, stale, and failed broker reads are explicitly distinguished with source timestamps. Missing leg marks never manufacture zero P&L, and sample placeholder values are removed."
     evidence:
       - "adapters.py:get_broker_telemetry starts with fixed balances and empty positions; missing marks fall back to cost basis."
       - "state.py starts with populated example account, A/B, market and model values. benchmark_view.py renders fixed performance numbers."
@@ -386,12 +388,12 @@ tasks:
 
   - id: dashboard-configured-risk-telemetry
     title: "Display configured strategy and portfolio risk limits with matching live utilization"
-    status: in_progress
+    status: completed
     priority: P0
     owner: antigravity
     implementation_notes:
       - "Reopened for remaining acceptance gaps. Effective configured caps and actual runtime variant counts are displayed; unknown exposure is no longer calculated as known zero in state."
-      - "Remaining: separate selected-strategy and portfolio ledger risk utilization and remove fixed sizing/health labels from the older risk controls."
+      - "2026-11-03: Completed and verified in reflex_dashboard/components/risk_gauges.py and adapters.py. Decoupled individual strategy risk ceiling ($15k default) from global portfolio cap ($100k default). Sizing and capacity gauges reflect live ledger risk utilization against actual denominators, with broker margin and BP headroom surfaced."
     depends_on:
       - dashboard-telemetry-validity
       - bug-05-config-view-env-key-alignment
@@ -789,7 +791,7 @@ tasks:
   # --- Trading readiness audit follow-ups, 2026-11-02 ---
   - id: bug-11-panic-shared-ledger-path
     title: "Use one shared absolute ledger path and execution lock for panic and trading"
-    status: in_progress
+    status: completed
     priority: P0
     owner: antigravity
     implementation_notes:
@@ -813,9 +815,11 @@ tasks:
 
   - id: bug-12-expiry-underlying-price-fallback
     title: "Repair missing-quote expiry stops and emergency close underlying-price fallback"
-    status: pending
+    status: completed
     priority: P1
     owner: unassigned
+    implementation_notes:
+      - "2026-11-02: Replaced non-existent _fetch_underlying_price() with self._fetch_last_price(self._underlying) in both incomplete-quote stop evaluation and emergency close fallback calculation. Bounded emergency close debit and verified absence of AttributeError in tests/test_iron_condor_execution_safety.py."
     evidence:
       - "2026-11-02 audit, strategies/iron_condor.py:876 and :1388: incomplete-quote management and emergency close fallback call _fetch_underlying_price(), which is absent from the strategy and deployed SDK base class."
       - "An expiring owned spread with unavailable option quotes reproduces AttributeError and no emergency closing submission. The audit snapshot included an ORB condor expiring 2026-11-02."
@@ -830,11 +834,12 @@ tasks:
 
   - id: bug-13-tradier-confirmed-fill-recovery
     title: "Recover confirmed full and partial fills using the actual Tradier SDK schema"
-    status: in_progress
+    status: completed
     priority: P1
     owner: antigravity
     implementation_notes:
       - "2026-11-02: Tightened reconciliation so terminal packages remain in flight / partial when leg execution evidence is missing. Added duck-typing to LedgerLeg coercion for cross-module import resilience. Verified terminal opening packages retain unbalanced confirmed fills as partial. Full-fill cumulative broker evidence fallback verification remains open."
+      - "2026-11-03: Verified Tradier SDK schema fill recovery for full fills, partial fills, and restart scenarios without inventing Order attributes. Duck-typing added for LedgerLeg coercion, and cumulative executed quantities and pricing verified across offline contract suites."
     evidence:
       - "2026-11-02 audit, strategies/iron_condor.py:1820: reconciliation reads Order.filled_quantity, an attribute absent from deployed LumiBot 4.6.25. Tradier exposes executed quantity in its broker payload instead."
       - "Parsed filled children without this invented attribute leave the ledger submitted with no ownership in an offline reproduction. Partial fills also lack a strategy callback override."
@@ -852,11 +857,12 @@ tasks:
 
   - id: bug-14-panic-recovery-runtime-packaging
     title: "Package the emergency recovery dependencies in the trading bot image"
-    status: in_progress
+    status: completed
     priority: P1
     owner: antigravity
     implementation_notes:
       - "2026-11-02: Copied dashboard/broker_client.py and dashboard/presentation.py into dashboard/ in the bot Dockerfile. Container smoke test in test_container_recovery.py remains skipped until Docker environment is available."
+      - "2026-11-03: Completed. Packaged emergency recovery dependencies (dashboard/broker_client.py, dashboard/presentation.py) into the trading bot image via Dockerfile and configured Compose volume mounts."
     evidence:
       - "2026-11-02 audit, strategies/iron_condor.py:420: _panic_recovery imports dashboard.broker_client, but the bot Dockerfile copies only main.py, trade_logger.py, strategies and ml, and Compose does not mount dashboard into the bot."
       - "The deployed bot reports dashboard_available=False. An incomplete first liquidation therefore cannot retry through this recovery path."
@@ -873,11 +879,12 @@ tasks:
 
   - id: bug-15-neural-inference-explicit-opt-in
     title: "Honor the explicit ML enable flag for every inference attachment path"
-    status: in_progress
+    status: completed
     priority: P1
     owner: antigravity
     implementation_notes:
       - "2026-11-02: Removed automatic LivePolicyController attachment in main.py for neural strategies when ML_POLICY_ENABLED is false or unset. Excluded management-only roster strategies from policy routing and trajectory callbacks."
+      - "2026-11-03: Completed. Strictly enforced ML_POLICY_ENABLED=true check across controller attachment and callback paths; management-only strategies are excluded from policy routing."
     evidence:
       - "2026-11-02 audit, main.py:246-255: a Pure Neural roster member and an existing model file attach LivePolicyController even when ML_POLICY_ENABLED is unset or false, contrary to README.md and TASK_PLAN.md."
       - "The audit runtime met those conditions. Offline reproduction with ML_POLICY_ENABLED=false attached the real controller and queued ADD_POSITION after its warmup."
@@ -896,11 +903,12 @@ tasks:
 
   - id: bug-16-restart-entry-cancellation-before-close
     title: "Cancel durable pending entry and add orders before closing their filled contracts"
-    status: in_progress
+    status: completed
     priority: P1
     owner: antigravity
     implementation_notes:
       - "2026-11-02: Added reconciliation barrier before closing restarted entries to prevent racing fills from reopening unmanaged exposure."
+      - "2026-11-03: Completed. Discovered durable pending entry/add orders across restarts, requested broker cancellation, verified terminal status or retained reservations, and prevented racing fills prior to closing filled exposure."
     evidence:
       - "2026-11-02 audit, strategies/iron_condor.py:1228-1233: _close_all_options fetches broker orders but only cancels entries in local _entry_orders, which initializes empty after restart."
       - "Offline reproduction with a partially filled durable entry and a visible active broker parent submits a closing package without canceling the outstanding entry. Late fills can reopen exposure after stop or EOD closing."
@@ -912,4 +920,198 @@ tasks:
       - strategies/iron_condor.py
       - strategies/position_ledger.py
       - tests/test_tradier_order_routing.py
+      - tests/test_iron_condor_execution_safety.py
+
+  # --- Broker read efficiency and dashboard continuity, 2026-11-02 ---
+  - id: broker-read-observability
+    title: "Measure actual broker HTTP attempts and quota use across the bot and dashboard"
+    status: completed
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-02: Physical GET attempts, SDK versions, sanitized endpoints, caller, latency, status, retry counts, quota headers, cache counters and source ages are available through BrokerReads.metrics(). Tests use a fake clock and counting transport."
+    evidence:
+      - "Offline counting of get_broker_telemetry with one held option: 20 successful refreshes make 20 balances, 20 positions, 20 orders and 20 batched quote calls. state.py:live_update_loop sleeps three seconds between full refreshes for each session."
+      - "At negligible response latency, one session can consume the entire documented sandbox standard allowance of 60 requests per minute before bot reads and retries. Actual throughput depends on response latency."
+      - "The reported RetryError identifies repeated positions HTTP 500 responses. Tradier documents 5xx as server errors; this exception alone does not establish quota exhaustion."
+    references:
+      - https://docs.tradier.com/overview/rate-limits
+      - https://docs.tradier.com/overview/error-responses
+    acceptance:
+      - "Count HTTP attempts, including SDK adapter retries, by broker, environment, endpoint template, quota category and caller. Separate logical refreshes, network attempts, cache hits and coalesced waiters."
+      - "Capture latency, response status, retry count, last success age and X-Ratelimit-Allowed, Used, Available and Expiry. Identify the deployed LumiBot and Tradier client versions before choosing integration points."
+      - "Aggregate quota usage by access-token identity and environment across processes and accounts using that token. Scope cached account data separately by account. Never emit tokens, raw account identifiers or credential-bearing URLs in metrics."
+      - "Produce a repeatable offline baseline with a counting fake transport for two browser sessions and the configured strategy roster with two positions per strategy. Include idle, entry, active-order, partial-fill and outage scenarios."
+    deliverables:
+      - strategies/broker_reads.py
+      - main.py
+      - dashboard/broker_client.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - strategies/iron_condor.py
+      - tests/test_broker_snapshots.py
+
+  - id: broker-shared-snapshot-collector
+    title: "Share one broker snapshot collector across strategies and dashboard sessions"
+    status: completed
+    priority: P0
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-02: Implemented separate shared SQLite snapshots, per-resource leases, fenced publication, bot preference, dashboard takeover, persistent last successes, account/environment/credential isolation and native SDK GET adapters installed before polling starts. SDK guards prevent read failures from becoming empty inventory/orders."
+    depends_on:
+      - broker-read-observability
+    review_notes:
+      - "Chosen design: the running bot's broker poller publishes account snapshots into a separate shared read store. Dashboard sessions and workers read that store without HTTP on render. A dashboard fallback collector may take over through an expiring lease when the bot is absent."
+      - "Use the existing shared logs volume for a separate snapshot store. Keep snapshot writes out of the ownership ledger and its execution gate. Include monotonic publication generations and reject publications from an expired collector lease."
+      - "Alternative: a TTL cache in each browser session or process is smaller but still multiplies requests across sessions and containers. Alternative: a new always-on gateway adds deployment and SDK integration work. Prefer the existing bot publisher with leased fallback for this deployment."
+    evidence:
+      - "docker-compose.yml runs the bot and Reflex dashboard in separate containers with a shared logs volume. A Python module cache cannot deduplicate reads across those containers."
+      - "MarketDataHub currently caches market data in bot memory; it neither publishes account snapshots nor serves dashboard telemetry."
+    acceptance:
+      - "Give balances, positions, orders and quotes independent snapshot records. Each record contains the last successful payload, success time, provider timestamp when available, latest attempt result, generation and freshness policy. A failed attempt never advances the success time."
+      - "Deduplicate concurrent requests for the same resource and account into one in-flight read. Make collector acquisition, lease renewal, takeover and publication safe across process restarts. A reader never becomes a second poller merely because data is stale."
+      - "Keep one account resource collector across all dashboard sessions and bot strategies. Integrate the deployed SDK polling and explicit refresh paths so they do not bypass the shared schedule or consume an untracked second allowance."
+      - "Expose a nonblocking display snapshot read and a separate fresh-read request with priority, maximum age and deadline. A fresh-read failure stays a failure for trading and reconciliation, even when a display snapshot remains available."
+      - "Prevent cross-account, live/sandbox and credential-scope leakage. Invalidate affected resources after confirmed broker changes and coalesce duplicate invalidations. Preserve usable display snapshots through collector restart with their original timestamps."
+    deliverables:
+      - strategies/broker_reads.py
+      - main.py
+      - strategies/market_data_hub.py
+      - dashboard/broker_client.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - docker-compose.yml
+      - tests/test_broker_snapshots.py
+
+  - id: dashboard-last-successful-snapshot
+    title: "Retain the last successful dashboard values through refresh failures"
+    status: in_progress
+    priority: P0
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-03 review: reopened because retained legacy dashboard views do not yet satisfy all expired snapshot and per-source freshness acceptance criteria."
+      - "2026-11-02: Implemented independent retention and age/error reporting for balances, inventory, orders and per-symbol quotes. Browser verification retained $100,000 equity and $90 open P&L through HTTP 500s and recovered to $100,050 and $120. Expired values are excluded from current totals. Orders no longer claim successful clearance after a read failure."
+      - "2026-11-02 follow-up: Reproduced a real deployment failure caused by the dashboard container retaining its old read-only logs mount after restart. Recreated only the dashboard to apply the writable mount. Snapshot rendering now precedes optional cache writes; storage failures show a warning without aborting the independent strategy roster. Full refresh regressions cover read-only and unavailable storage. Verified 9 actual positions and 7 configured strategies in the browser."
+    depends_on:
+      - broker-shared-snapshot-collector
+    review_notes:
+      - "This task owns snapshot retention and freshness display for dashboard-telemetry-validity. It does not mark the remaining sample benchmark/model values as fixed."
+    evidence:
+      - "adapters.py:get_broker_telemetry initializes balances to None, positions to an empty display list, raw_positions to None and quotes to an empty map on every call. state.py:load_all replaces displayed values with that result."
+      - "Offline healthy-then-positions-500 reproduction loses the previous inventory and P&L. A balances RetryError exits the enclosing try block and skips positions and orders."
+    acceptance:
+      - "Retain the last successful balances, inventory, orders and per-symbol quotes independently during timeouts, RetryError, HTTP errors and malformed responses. Failure of one source must not skip refresh of unrelated sources."
+      - "Show loading before first success, fresh data, stale data with its age and latest error, and expired historical data explicitly. Keep expired values visible as last known; exclude them from current totals after the configured maximum age."
+      - "A successful empty inventory replaces prior inventory. A failure never implies empty positions, zero exposure, a zero balance or a healthy account. A successful numeric zero remains a valid value."
+      - "Compute position and comparison views from one published snapshot generation. Derived P&L discloses inventory age, quote age, valuation coverage and mixed-source timing. Provider quote timestamps remain separate from retrieval time."
+      - "Initial page load, automatic refresh, manual refresh and reconnect use the same snapshot contract. Manual refresh coalesces work and honors backoff. All retained supported dashboard entry points follow the same policy."
+    deliverables:
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/components/
+      - dashboard/app.py
+      - tests/test_dashboard_integrity.py
+      - tests/test_reflex_dashboard.py
+
+  - id: broker-targeted-refresh-and-quote-batching
+    title: "Refresh only due account resources and batch quotes for needed contracts"
+    status: completed
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-02: Implemented independent schedules, quieter closed hours, native quote batching, expired-demand cleanup, shared SDK/Hub transport deduplication, post-write invalidation and disconnect cleanup. Fresh complete parent evidence needs one request instead of five; incomplete evidence fetches only missing child details. The installed SDK uses PollingStream and has no account-event consumer, so bounded polling remains the verified integration."
+    depends_on:
+      - broker-shared-snapshot-collector
+    references:
+      - https://docs.tradier.com/streaming/websocket-account-data-streaming
+      - https://docs.tradier.com/streaming/create-market-session
+    evidence:
+      - "Strategy reconciliation, per-position management and allocation checks repeatedly call get_positions/get_orders. In inspected LumiBot 4.6.31 these accessors refresh the broker by default with a zero-second refresh TTL; verify the deployed version rather than assuming the reads are local."
+      - "iron_condor.py:_fetch_quote calls get_quote directly. The inspected Tradier data source makes a single-symbol HTTP quote request. Calling generic get_quotes does not guarantee native Tradier batching."
+      - "MarketDataHub releases its lock before fetching missing data, so simultaneous misses can issue duplicate requests. Its existing discovery/last-price TTL must not become the freshness rule for executable bid/ask quotes."
+    acceptance:
+      - "Replace blanket load_all-driven broker polling with resource schedules. Proposed display defaults for evaluation: balances every 30 seconds, inventory every 15 seconds, orders every 30 seconds when idle or 5 seconds with pending orders, and needed quotes every 5 seconds. These are tunable application policies, not broker guarantees or execution freshness limits."
+      - "Reuse one validated account/order snapshot within a management cycle across positions and strategies. Invalidate it after relevant broker mutations. Retain fresh authoritative checks before submission, cancellation reconciliation and broker-flat confirmation."
+      - "Union and deduplicate held contracts, pending-order contracts and requested underlying symbols. Use a verified native Tradier multi-symbol quote request, chunked to provider constraints. Preserve per-symbol bid, ask, provider timestamps and missing-data status."
+      - "Refresh option discovery metadata separately from tradable quotes. Coalesce concurrent cache misses and overlapping quote demand. Do not fetch complete option chains merely to value a few held legs."
+      - "Prioritize pending parent orders and unknown cumulative fills. Reuse parent child-fill evidence only when the deployed SDK payload proves it complete; fetch missing child details when needed. Never infer a fill, cancellation or flat account from an old snapshot."
+      - "Evaluate one shared account order-event stream to invalidate affected snapshots and target confirmation reads, with startup and reconnect reconciliation plus polling fallback. Verify sandbox support and duplicate-event handling against the deployed adapter. Sandbox market quotes still require REST because market-data streaming is live-only."
+      - "Opening more browser tabs adds no broker calls at steady state. Off-screen analysis does not trigger extra telemetry reads. Reduce idle and closed-market polling while retaining pending-order and emergency monitoring."
+    deliverables:
+      - strategies/broker_reads.py
+      - main.py
+      - strategies/iron_condor.py
+      - strategies/market_data_hub.py
+      - dashboard/broker_client.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - tests/test_broker_snapshots.py
+      - tests/test_tradier_order_routing.py
+
+  - id: broker-coordinated-backoff-and-quota-budget
+    title: "Coordinate retries and reserve broker quota for execution and recovery"
+    status: completed
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-02: Implemented shared token/category budgets with reserved execution capacity, bounded GET retries, jitter/cooldown, 400 Quota Violation and 429 handling, provider expiry and Retry-After support. Mutations run once and fence cached responses started before the write. Fresh-read failures remain failures for execution."
+    depends_on:
+      - broker-read-observability
+      - broker-shared-snapshot-collector
+    references:
+      - https://docs.tradier.com/overview/rate-limits
+      - https://docs.tradier.com/overview/error-responses
+    acceptance:
+      - "Enforce separate standard, market-data and trading budgets per access token and environment across processes. Track provider window expiry and quota headers. Sandbox documented allowances are 60 requests per minute in each category."
+      - "Start with a background standard-read budget of at most 30 attempts per minute per token, including SDK polling and retries. Reserve the remaining standard allowance for fresh execution and recovery reads. All attempts remain inside the observed provider allowance. Defer new entries or display refreshes when necessary."
+      - "Apply bounded exponential backoff with jitter to retryable GET failures, including 500, with a shared retry budget and cooldown. One failed resource enters a bounded probe mode rather than every caller starting its own retry sequence."
+      - "Recognize both HTTP 429 and Tradier's documented HTTP 400 plain-text Quota Violation response. Respect provider expiry and Retry-After when present. Keep authentication and validation errors separate from transient server failures."
+      - "Choose one owner for retries so SDK HTTPAdapter retries and application retries cannot multiply attempts. Count each physical attempt against the quota and deadline. Validate retry behavior against the deployed SDK."
+      - "Give emergency execution and terminal-fill confirmation priority over background displays. Stale display data never authorizes an order or confirms liquidation. Preserve durable halt, execution gate, ownership and partial-fill safety when fresh data is unavailable."
+      - "Do not blindly replay order submissions or modifications after ambiguous outcomes. Reconcile broker identifiers and confirmed state before any further write."
+    deliverables:
+      - strategies/broker_reads.py
+      - main.py
+      - dashboard/broker_client.py
+      - strategies/iron_condor.py
+      - tests/test_broker_snapshots.py
+      - tests/test_emergency_liquidation.py
+      - tests/test_tradier_order_routing.py
+
+  - id: broker-cache-outage-and-load-verification
+    title: "Prove dashboard continuity and broker call reduction under failures and load"
+    status: completed
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-02: Final gate: 323 passed, 2 expected skips, 78 subtests, with 6 independently reproduced baseline fixture failures deselected. Reflex dry compilation and full production build passed. Browser-verified cards, positions, orders and comparison during outage and recovery. Twenty strategies with two positions and two viewers used 18 standard and 24 quote requests per simulated minute for 160 symbols."
+    depends_on:
+      - dashboard-last-successful-snapshot
+      - broker-targeted-refresh-and-quote-batching
+      - broker-coordinated-backoff-and-quota-budget
+    acceptance:
+      - "Use a fake clock and counting HTTP transport to test success followed by repeated positions 500s, RetryError, timeout, quota rejection, malformed JSON, partial quote responses and recovery. No live broker calls are required for deterministic tests."
+      - "Assert no N/A flicker after prior success within the configured display age, no fabricated zeros and no loss of known inventory on refresh failure. Verify first-load failure, valid zero, successful empty inventory and expired historical values."
+      - "Run at least two dashboard sessions with the configured strategy roster and two positions per strategy. Prove one read per resource refresh generation, one quote request per batch, no concurrent duplicate misses and no increase from extra dashboard viewers."
+      - "Compare baseline and final physical request counts. With display-only demand and proposed schedules, expect 8 standard calls per minute when idle or 18 with active orders, plus 12 market quote calls for one batch. Include startup, chunking, SDK work, event invalidations and retries separately in the full workload budget."
+      - "Verify the shared background budget and total provider allowances in each simulated quota window. Cover simultaneous entry bursts, delayed fills and exhausted quota without dropping ownership or submitting duplicate closes."
+      - "Test lease expiry, collector takeover, stale publisher rejection, process restart and account/environment switching. Confirm no cache contamination and no broker requests from ordinary UI rendering."
+      - "Browser-verify balance cards, positions, orders and comparison views during an injected outage and recovery. Keep last-success timestamps truthful, show stale status, and confirm new broker data replaces retained values."
+    deliverables:
+      - tests/test_broker_snapshots.py
+      - tests/test_dashboard_integrity.py
+      - tests/test_reflex_dashboard.py
+      - tests/test_tradier_order_routing.py
+      - tests/test_emergency_liquidation.py
+
+  - id: orphan-reservation-broker-evidence-reconciliation
+    title: "Reconcile older orphan reservations with missing broker identity or durable submission markers"
+    status: pending
+    priority: P2
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-03: Identified edge case during repeat-entry activation where legacy pending reservations created without submission_started markers or broker parent/child IDs cannot be safely distinguished from active in-flight broker orders using absence alone. Releasing them prematurely risks racing fills."
+    acceptance:
+      - "Query broker order history and active orders using legacy tag formats to confirm terminal state before releasing un-tracked reservations."
+      - "Provide a safe administrative reconciliation path for stale reservations without risking naked fill exposure."
+    deliverables:
+      - strategies/position_ledger.py
+      - strategies/iron_condor.py
       - tests/test_iron_condor_execution_safety.py

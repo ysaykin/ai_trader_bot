@@ -8,13 +8,17 @@ from typing import TYPE_CHECKING
 from pathlib import Path
 
 from dotenv import load_dotenv
+
+load_dotenv()
+# This runner creates and instruments its broker explicitly. Avoid an extra
+# uninstrumented broker and polling stream during LumiBot credential imports.
+os.environ.setdefault("LUMIBOT_LAZY_CREDENTIALS", "true")
+
 from lumibot.traders import Trader
 
 if TYPE_CHECKING:
     from lumibot.brokers import Broker
     from lumibot.strategies.strategy import Strategy
-
-load_dotenv()
 
 os.makedirs("logs", exist_ok=True)
 log_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -104,7 +108,13 @@ def get_broker() -> Broker:
             "Connecting to Tradier (paper=%s, polling_interval=%.1fs)...",
             tradier_config["PAPER"], polling_interval,
         )
-        return Tradier(tradier_config, polling_interval=polling_interval)
+        broker = Tradier(tradier_config, polling_interval=polling_interval, connect_stream=False)
+        if type(broker).__module__.startswith("lumibot.brokers.tradier"):
+            from strategies.broker_reads import install_sdk_reads
+            install_sdk_reads(broker, token_str, account_str, is_paper)
+            broker.stream = broker._get_stream_object()
+            broker._launch_stream()
+        return broker
 
     # Alpaca fallback
     api_key = os.getenv("ALPACA_API_KEY")
@@ -277,7 +287,14 @@ def _run_once() -> None:
         len(strategies),
         "strategy" if len(strategies) == 1 else "strategies",
     )
-    trader.run_all()
+    reads = getattr(broker, "_shared_broker_reads", None)
+    if reads is not None:
+        reads.start("bot")
+    try:
+        trader.run_all()
+    finally:
+        if reads is not None:
+            reads.close()
 
 
 def run() -> None:

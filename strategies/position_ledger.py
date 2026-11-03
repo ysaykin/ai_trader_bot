@@ -60,6 +60,7 @@ class BasketRecord:
     reprice_count: int = 0
     position_id: str | None = None
     terminal_status: str | None = None
+    submission_started: int | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +164,7 @@ class PositionLedger:
                 finally:
                     self._connection.rollback()
             except sqlite3.OperationalError:
-                return {"strategy_risk": {}, "portfolio_risk": 0.0, "owned_quantities": {}}
+                return {"strategy_risk": {}, "portfolio_risk": None, "owned_quantities": {}}
 
     def _initialize(self) -> None:
         """Create or migrate the ledger without replacing existing rows."""
@@ -225,6 +226,7 @@ class PositionLedger:
                     "reprice_count": "INTEGER NOT NULL DEFAULT 0",
                     "position_id": "TEXT",
                     "terminal_status": "TEXT",
+                    "submission_started": "INTEGER",
                 },
             )
             self._add_columns(
@@ -389,16 +391,21 @@ class PositionLedger:
 
     def open_positions(self, strategy_id: str | None = None) -> tuple[PositionRecord, ...]:
         with self._lock:
-            query = "SELECT position_id FROM positions"
+            query = """SELECT position_id FROM positions WHERE position_id IN (
+                SELECT p.position_id FROM packages p JOIN legs l USING(package_id)
+                WHERE p.state != 'expired' AND p.position_id IS NOT NULL
+                GROUP BY p.position_id,l.asset_key HAVING SUM(l.filled_signed_quantity) != 0
+                UNION
+                SELECT position_id FROM packages
+                WHERE state IN ('submitted','partial','closing') AND terminal_status IS NULL
+            )"""
             args = ()
             if strategy_id is not None:
-                query += " WHERE strategy_id = ?"
+                query += " AND strategy_id = ?"
                 args = (strategy_id,)
             query += " ORDER BY created_at,position_id"
             ids = [str(row[0]) for row in self._connection.execute(query, args)]
-            return tuple(self.get_position(pid) for pid in ids
-                         if self.position_quantities(pid)
-                         or any(self.is_inflight(b) for b in self.position_baskets(pid)))
+            return tuple(self.get_position(pid) for pid in ids)
 
     @staticmethod
     def is_inflight(basket: BasketRecord) -> bool:
@@ -624,10 +631,15 @@ class PositionLedger:
             try:
                 self.assert_can_submit(strategy_id, intent, legs, position_id=position_id, **limits)
                 self.record_submission(package_id, strategy_id, intent, legs,
-                                       position_id=position_id, **submission)
+                                       position_id=position_id, submission_started=0, **submission)
             except BaseException:
                 self._connection.rollback()
                 raise
+
+    def mark_submission_started(self, package_id: str) -> None:
+        """Persist uncertainty before invoking the broker submission."""
+        with self._lock, self._connection:
+            self._connection.execute("UPDATE packages SET submission_started=1 WHERE package_id=?", (package_id,))
 
     def record_submission(
         self,
@@ -644,6 +656,7 @@ class PositionLedger:
         created_at: datetime | str | None = None,
         position_id: str | None = None,
         settings: Mapping[str, Any] | None = None,
+        submission_started: int | None = None,
     ) -> None:
         """Atomically record a broker package before considering any leg owned."""
         if not getattr(self, "_position_schema_ready", False):
@@ -699,6 +712,7 @@ class PositionLedger:
                 "reprice_count": int(reprice_count),
                 "position_id": position_id,
                 "terminal_status": None,
+                "submission_started": submission_started,
             }
             package_cols = {
                 str(col["name"])
@@ -1210,6 +1224,8 @@ class PositionLedger:
         cls,
         legs: list[tuple[dict[str, Any], int]],
     ) -> tuple[float, int] | None:
+        if len({(asset.get("symbol"), asset.get("expiration")) for asset, _ in legs}) != 1:
+            return None
         if len(legs) == 4:
             return cls._condor_width_and_quantity(legs)
         if len(legs) == 2:
@@ -1250,6 +1266,8 @@ class PositionLedger:
         )
         quantities_abs = {abs(quantity) for _, quantity in legs}
         if len(puts) != 2 or len(calls) != 2 or len(quantities_abs) != 1:
+            return None
+        if float(puts[1][0]["strike"]) > float(calls[0][0]["strike"]):
             return None
         quantity = quantities_abs.pop()
         if quantity <= 0 or not (
@@ -1354,6 +1372,7 @@ class PositionLedger:
             reprice_count=int(row.get("reprice_count") or 0),
             position_id=row.get("position_id"),
             terminal_status=row.get("terminal_status"),
+            submission_started=row.get("submission_started"),
         )
 
     @staticmethod
@@ -1393,4 +1412,4 @@ class PositionLedger:
         return result
 
 
-__all__ = ["BasketRecord", "LedgerLeg", "PositionLedger", "asset_key", "resolve_ledger_path"]
+__all__ = ["BasketRecord", "LedgerLeg", "PositionLedger", "PositionRecord", "asset_key", "resolve_ledger_path"]

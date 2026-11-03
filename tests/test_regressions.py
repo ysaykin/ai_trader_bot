@@ -80,7 +80,7 @@ class BrokerSelectionTests(unittest.TestCase):
                 self.get_broker({"TRADING_BROKER": "tradier", **credentials})
                 entrypoint._test_brokers.Tradier.assert_called_once_with({
                     "ACCESS_TOKEN": "test-token", "ACCOUNT_NUMBER": "VA21359019", "PAPER": True,
-                }, polling_interval=15.0)
+                }, polling_interval=15.0, connect_stream=False)
 
     def test_explicit_alpaca_selection_wins_over_tradier_credentials(self) -> None:
         self.get_broker({
@@ -113,7 +113,7 @@ class BrokerSelectionTests(unittest.TestCase):
         })
         entrypoint._test_brokers.Tradier.assert_called_once_with({
             "ACCESS_TOKEN": "canonical-token", "ACCOUNT_NUMBER": "canonical-account", "PAPER": True,
-        }, polling_interval=15.0)
+        }, polling_interval=15.0, connect_stream=False)
         entrypoint._test_brokers.Alpaca.assert_not_called()
 
     def test_invalid_paper_settings_fail_before_broker_construction(self) -> None:
@@ -157,7 +157,7 @@ class BrokerSelectionTests(unittest.TestCase):
                 entrypoint.get_broker()
         brokers.Tradier.assert_called_once_with({
             "ACCESS_TOKEN": "dotenv-token", "ACCOUNT_NUMBER": "dotenv-account", "PAPER": True,
-        }, polling_interval=15.0)
+        }, polling_interval=15.0, connect_stream=False)
 
     def test_paper_setting_has_explicit_precedence(self) -> None:
         for settings in ({"TRADIER_IS_PAPER": "false"}, {"TRADIER_SANDBOX": "0"}):
@@ -373,6 +373,12 @@ class IronCondorTests(unittest.TestCase):
         self.assertTrue(self.strategy._position_open)
         self.assertEqual(self.strategy._iteration_count, 1)
 
+    def test_hydration_preserves_opening_debit(self) -> None:
+        self.open_filled_position(prices=(1.5, 1.0, 1.0, 1.5))
+        self.assertEqual(self.strategy._entry_credit_cash, -100.0)
+        self.strategy._hydrate_from_ledger()
+        self.assertEqual(self.strategy._entry_credit_cash, -100.0)
+
     def test_iteration_counter_supports_framework_initialization_and_ticks(self) -> None:
         strategy = iron_condor.SPXIronCondor.__new__(iron_condor.SPXIronCondor)
         self.assertEqual(strategy.on_trading_iteration_count, 0)
@@ -583,12 +589,12 @@ class IronCondorTests(unittest.TestCase):
     def test_missing_credit_is_not_replaced_with_an_estimate(self) -> None:
         self.open_filled_position(limit_price=2.0)
         self.strategy._entry_credit = 0.0
-        self.strategy._entry_credit_cash = 0.0
+        self.strategy._entry_credit_cash = None
         self.strategy._estimate_credit = Mock(return_value=0.5)
         self.strategy._publish_snapshot = Mock()
         self.strategy._manage_position()
         self.assertEqual(self.strategy._entry_credit, 0.0)
-        self.assertEqual(self.strategy._entry_credit_cash, 0.0)
+        self.assertIsNone(self.strategy._entry_credit_cash)
         self.strategy._estimate_credit.assert_not_called()
         self.strategy._publish_snapshot.assert_called_once_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
         self.strategy.submit_order.assert_not_called()
@@ -610,7 +616,7 @@ class IronCondorTests(unittest.TestCase):
             self.assertEqual(self.strategy._owned_legs, legs)
             self.assertTrue(self.strategy._position_open)
             self.assertEqual(self.strategy._entry_credit_cash, 0.0)
-            self.strategy._publish_snapshot.assert_called_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
+            self.assertEqual(self.strategy._publish_snapshot.call_args.kwargs["status"], "OPEN")
         self.strategy.submit_order.assert_not_called()
 
     def test_invalid_confirmed_credit_skips_valuation_and_mfe(self) -> None:
@@ -620,7 +626,7 @@ class IronCondorTests(unittest.TestCase):
         self.strategy._mae_pnl = -15.0
         self.strategy._last_pnl = 5.0
         self.strategy._fetch_quote = Mock()
-        for credit in (None, 0.0, -1.0, float("nan"), float("inf"), -float("inf")):
+        for credit in (None, float("nan"), float("inf"), -float("inf")):
             with self.subTest(credit=credit):
                 self.strategy._entry_credit_cash = credit
                 self.strategy._entry_credit = 0.0
@@ -635,7 +641,8 @@ class IronCondorTests(unittest.TestCase):
 
     def test_ledger_hydration_restores_confirmed_credit_and_normal_valuation(self) -> None:
         self.open_filled_position(limit_price=3.0)
-        self.strategy._entry_credit = self.strategy._entry_credit_cash = 0.0
+        self.strategy._entry_credit = 0.0
+        self.strategy._entry_credit_cash = None
         self.strategy._publish_snapshot = Mock()
         self.strategy._manage_position()
         self.strategy._publish_snapshot.assert_called_with(pnl=0.0, status="VALUATION_UNAVAILABLE")
@@ -1632,21 +1639,21 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         }
         strat.initialize()
 
-        # Neural net selects IC_V07 (7DTE, delta 0.15, wing 5.0, stop loss 2.0)
+        # Neural net selects IC_V07 (7DTE, delta 0.15, wing 5.0, stop loss 1.3)
         with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid"}):
             strat._apply_neural_strategy_switch("IC_V07_7DTE_D15_W5_PT50_T1030")
         self.assertEqual(strat.parameters["dte"], 7)
         self.assertEqual(strat.parameters["short_delta"], 0.15)
         self.assertEqual(strat.parameters["wing_width"], 5.0)
-        self.assertEqual(strat.parameters["stop_loss_mult"], 2.0)
+        self.assertEqual(strat.parameters["stop_loss_mult"], 1.3)
 
-        # Later, market shifts and neural net switches to IC_V16 (21DTE, delta 0.20, wing 5.0, stop loss 2.5)
+        # Later, market shifts and neural net switches to IC_V16 (21DTE, delta 0.20, wing 5.0, stop loss 1.3)
         with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid"}):
             strat._apply_neural_strategy_switch("IC_V16_21DTE_D20_W5_PT50_T1100")
         self.assertEqual(strat.parameters["dte"], 21)
         self.assertEqual(strat.parameters["short_delta"], 0.20)
         self.assertEqual(strat.parameters["wing_width"], 5.0)
-        self.assertEqual(strat.parameters["stop_loss_mult"], 2.5)
+        self.assertEqual(strat.parameters["stop_loss_mult"], 1.3)
 
     def test_position_ledger_supports_2_leg_vertical_spread_packages(self) -> None:
         """PositionLedger accepts 2-leg vertical spread submissions and calculates defined risk."""

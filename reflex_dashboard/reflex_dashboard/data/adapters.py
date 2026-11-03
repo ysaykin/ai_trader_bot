@@ -168,37 +168,16 @@ def get_bot_status_from_log(log_path: str = "logs/trading.log") -> dict[str, str
 
 def get_broker_telemetry() -> dict[str, Any]:
     """Fetch live broker account telemetry, balances, positions, orders."""
-    import os
-    env = dotenv_values(PROJECT_ROOT / ".env")
-    account_id = (
-        env.get("TRADIER_ACCOUNT_NUMBER")
-        or env.get("TRADIER_ACCOUNT_ID")
-        or env.get("ALPACA_ACCOUNT_ID")
-        or os.getenv("TRADIER_ACCOUNT_NUMBER")
-        or os.getenv("TRADIER_ACCOUNT_ID")
-        or ""
-    )
-    token = (
-        env.get("TRADIER_ACCESS_TOKEN")
-        or env.get("TRADIER_API_KEY")
-        or env.get("ALPACA_API_KEY")
-        or os.getenv("TRADIER_ACCESS_TOKEN")
-        or os.getenv("TRADIER_API_KEY")
-        or ""
-    )
-    is_paper = (
-        env.get("TRADIER_PAPER", os.getenv("TRADIER_PAPER", "true")).lower()
-        in ("true", "1", "yes")
-    )
-
-    raw_broker = (
-        env.get("TRADING_BROKER")
-        or env.get("BROKER")
-        or os.getenv("TRADING_BROKER")
-        or os.getenv("BROKER")
-        or ""
-    ).lower()
-    broker_type = "tradier" if (raw_broker == "tradier" or any("TRADIER" in k for k in env) or "TRADIER_ACCESS_TOKEN" in os.environ) else "alpaca"
+    from dashboard.app import broker_settings
+    env = {**dotenv_values(PROJECT_ROOT / ".env"), **os.environ}
+    config_error = ""
+    try:
+        settings = broker_settings(env)
+        broker_type, account_id, token, is_paper = settings.name, settings.account_number, settings.token, settings.paper
+    except ValueError as error:
+        broker_type = str(env.get("TRADING_BROKER") or "tradier").lower()
+        account_id, token, is_paper = "", "", True
+        config_error = str(error)
 
     res = {
         "broker": broker_type.upper(),
@@ -217,6 +196,11 @@ def get_broker_telemetry() -> dict[str, Any]:
         "balances_status": "unavailable",
         "synced_at": "No successful sync",
         "orders": [],
+        "orders_status": "unavailable",
+        "orders_synced_at": "No successful sync",
+        "sync_status": "unavailable",
+        "sync_message": config_error or "Configure broker credentials to load snapshots",
+        "last_known": "",
         "risk_cap": float(env.get("IC_MAX_POSITION_RISK") or os.getenv("IC_MAX_POSITION_RISK", 15000.0)),
         "portfolio_risk_cap": float(env.get("IC_MAX_PORTFOLIO_RISK") or os.getenv("IC_MAX_PORTFOLIO_RISK", 100000.0)),
         "single_trade_pct": 30.0,
@@ -226,154 +210,113 @@ def get_broker_telemetry() -> dict[str, Any]:
 
     ledger_path = resolve_ledger_path(os.environ.get("POSITION_LEDGER_PATH", env.get("POSITION_LEDGER_PATH", "")))
     try:
+        from strategies.position_ledger import PositionLedger
         res["ledger_packages"] = read_packages(ledger_path)
         res["ledger_error"] = ""
+        try:
+            ledger = PositionLedger(ledger_path, read_only=True)
+            risk_snap = ledger.risk_snapshot()
+            res["strategy_risk"] = risk_snap.get("strategy_risk", {})
+            res["portfolio_risk"] = risk_snap.get("portfolio_risk")
+        except Exception:
+            res["strategy_risk"] = {}
+            res["portfolio_risk"] = None
     except (OSError, ValueError, sqlite3.Error):
         res["ledger_packages"] = []
         res["ledger_error"] = "Ownership ledger unavailable; broker inventory remains unattributed."
+        res["strategy_risk"] = None
+        res["portfolio_risk"] = None
 
-    if broker_type == "tradier" and token:
+    if broker_type == "tradier" and token and account_id:
+        from strategies.broker_reads import get_broker_reads
         try:
-            import requests
-            base_url = "https://sandbox.tradier.com/v1" if is_paper else "https://api.tradier.com/v1"
-            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-
-            # Balances
-            b: dict[str, Any] = {}
-            r_bal = requests.get(f"{base_url}/accounts/{account_id}/balances", headers=headers, timeout=4)
-            if r_bal.status_code == 200:
-                b = r_bal.json().get("balances", {})
-                margin = b.get("margin") or b.get("cash") or {}
-                margin = margin if isinstance(margin, dict) else {}
-                res["equity"] = number(b.get("total_equity", b.get("equity")))
-                res["cash"] = number(b.get("total_cash", margin.get("cash")))
-                res["buying_power"] = number(margin.get("option_buying_power"))
-                res["option_requirement"] = number(margin.get("option_requirement"))
-                res["balances_status"] = "ready"
-
-            # Positions
-            r_pos = requests.get(f"{base_url}/accounts/{account_id}/positions", headers=headers, timeout=4)
-            if r_pos.status_code == 200:
-                p_data = r_pos.json().get("positions")
-                pos_list = [] if p_data in (None, "null") else p_data.get("position", [])
-                if isinstance(pos_list, dict):
-                    pos_list = [pos_list]
-                raw_positions = pos_list or []
-                res["raw_positions"] = raw_positions
-                res["positions_status"] = "ready"
-                res["synced_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-                symbols = sorted({str(p["symbol"]) for p in raw_positions if p.get("symbol")} | quote_symbols(res["ledger_packages"]))
-                quotes_map = {}
-                if symbols:
-                    try:
-                        q_res = requests.get(
-                            f"{base_url}/markets/quotes",
-                            headers=headers,
-                            params={"symbols": ",".join(symbols), "greeks": "true"},
-                            timeout=4,
-                        )
-                        if q_res.status_code == 200:
-                            q_data = q_res.json().get("quotes", {}).get("quote", [])
-                            if isinstance(q_data, dict):
-                                q_data = [q_data]
-                            for q in q_data:
-                                if "symbol" in q:
-                                    quotes_map[q["symbol"]] = q
-                    except Exception:
-                        pass
-                res["quotes"] = {
-                    sym: {"mark": option_mark(q.get("bid"), q.get("ask"), q.get("last")),
-                          "delta": number((q.get("greeks") or {}).get("delta")),
-                          "theta": number((q.get("greeks") or {}).get("theta")),
-                          "timestamp": _quote_timestamp(q)}
-                    for sym, q in quotes_map.items()
-                }
-
-                formatted_positions = []
-                total_unrealized = 0.0
-                for p in raw_positions:
-                    sym = str(p.get("symbol", ""))
-                    try:
-                        qty = float(p.get("quantity", 0))
-                    except (ValueError, TypeError):
-                        qty = 0.0
-                    try:
-                        cost_basis = float(p.get("cost_basis", 0))
-                    except (ValueError, TypeError):
-                        cost_basis = 0.0
-
-                    q = quotes_map.get(sym, {})
-                    bid = q.get("bid")
-                    ask = q.get("ask")
-                    last = q.get("last")
-
-                    mark = option_mark(bid, ask, last)
-                    market_value = qty * mark * 100.0 if mark is not None else None
-                    unrealized_pl = market_value - cost_basis if market_value is not None else None
-                    if unrealized_pl is not None:
-                        total_unrealized += unrealized_pl
-
-                    greeks = q.get("greeks") or {}
-                    delta_val = greeks.get("delta")
-                    theta_val = greeks.get("theta")
-
-                    formatted_positions.append({
-                        "symbol": sym,
-                        "quantity_num": qty,
-                        "cost_basis_num": cost_basis,
-                        "mark_num": mark,
-                        "quantity": f"{int(qty)}" if qty.is_integer() else f"{qty:.1f}",
-                        "cost_basis": money(cost_basis),
-                        "last_price": money(mark),
-                        "market_value": money(market_value),
-                        "unrealized_pl": money(unrealized_pl),
-                        "delta": f"{float(delta_val):.2f}" if delta_val is not None else "-",
-                        "theta": f"{float(theta_val):.2f}" if theta_val is not None else "-",
-                        "unrealized_pl_num": unrealized_pl,
-                        "unrealized_pl_color": "#10B981" if (unrealized_pl or 0) > 0 else "#EF4444" if (unrealized_pl or 0) < 0 else "#94A3B8",
-                    })
-
-                res["positions"] = formatted_positions
-                broker_pnl = number(b.get("open_pl"))
-                all_marked = all(row["unrealized_pl_num"] is not None for row in formatted_positions)
-                res["unrealized_pnl"] = broker_pnl if broker_pnl is not None else total_unrealized if all_marked else None
-                res["open_exposure"] = res["option_requirement"]
-
-            # Orders
-            r_ord = requests.get(f"{base_url}/accounts/{account_id}/orders", headers=headers, timeout=4)
-            if r_ord.status_code == 200:
-                o_data = r_ord.json().get("orders", {})
-                ord_list = o_data.get("order", [])
-                if isinstance(ord_list, dict):
-                    ord_list = [ord_list]
-                formatted_orders = []
-                for o in (ord_list or []):
-                    order_id = str(o.get("id", ""))
-                    sym = str(o.get("symbol", "XSP"))
-                    side = str(o.get("side", o.get("order_type", ""))).upper()
-                    order_type = str(o.get("strategy", o.get("type", "LIMIT"))).upper()
-                    qty = str(o.get("quantity", "1"))
-                    status = str(o.get("status", "")).upper()
-                    price_val = o.get("price") or o.get("avg_fill_price") or o.get("stop_price")
-                    price_str = f"${float(price_val):.2f}" if price_val is not None else "MKT"
-                    formatted_orders.append({
-                        "id": order_id,
-                        "symbol": sym,
-                        "side": side,
-                        "type": order_type,
-                        "quantity": qty,
-                        "status": status,
-                        "price": price_str,
-                    })
-                res["orders"] = formatted_orders
-        except Exception:
-            pass
+            reads = get_broker_reads(token, account_id, is_paper)
+            # Cache maintenance must not hide readable inventory or abort the
+            # independent strategy roster when a deployment has a read-only mount.
+            _apply_broker_snapshot(res, reads.display())
+            reads.demand(quote_symbols(res["ledger_packages"]))
+            reads.start()
+        except (OSError, sqlite3.Error) as error:
+            readonly = getattr(error, "sqlite_errorcode", 0) & 0xff == sqlite3.SQLITE_READONLY
+            message = ("Broker snapshot storage is read-only; collection paused. "
+                       "Recreate the dashboard with a writable logs mount." if readonly else
+                       "Broker snapshot storage unavailable; check the shared cache path and permissions.")
+            res["sync_status"] = "stale" if res.get("freshness") else "unavailable"
+            res["sync_message"] = f"{res['sync_message']} | {message}" if res.get("freshness") else message
 
     # Calculations
     if res["buying_power"] is not None and res["equity"] is not None and res["equity"] > 0:
         res["buying_power_headroom_pct"] = max(0.0, min(100.0, res["buying_power"] / res["equity"] * 100))
     return res
+
+
+def _apply_broker_snapshot(res: dict[str, Any], snapshots: dict[str, Any]) -> None:
+    """Present one local snapshot bundle. Refresh failures retain successful data."""
+    res["freshness"] = {key: {k: value[k] for k in ("status", "synced_at", "age", "error", "generation")}
+                        for key, value in snapshots.items() if key in {"balances", "positions", "orders"} or key.startswith("quote:")}
+    def usable(key):
+        snap = snapshots.get(key, {})
+        return snap.get("data") if snap.get("status") != "expired" else None
+    balance = usable("balances")
+    if balance is not None:
+        b = balance["balances"]
+        margin = b.get("margin") or b.get("cash") or {}
+        margin = margin if isinstance(margin, dict) else {}
+        res.update(equity=number(b.get("total_equity", b.get("equity"))), cash=number(b.get("total_cash", margin.get("cash"))),
+                   buying_power=number(margin.get("option_buying_power")), option_requirement=number(margin.get("option_requirement")),
+                   balances_status=snapshots["balances"]["status"])
+        res["open_exposure"] = res["option_requirement"]
+    positions = usable("positions")
+    quotes = {key[6:]: usable(key) for key in snapshots if key.startswith("quote:") and usable(key) is not None}
+    res["quotes"] = {sym: {"mark": option_mark(q.get("bid"), q.get("ask"), q.get("last")),
+                           "delta": number((q.get("greeks") or {}).get("delta")),
+                           "theta": number((q.get("greeks") or {}).get("theta")),
+                           "timestamp": _quote_timestamp(q)} for sym, q in quotes.items()}
+    if positions is not None:
+        raw = positions["positions"]
+        rows = [] if raw in (None, "null") else raw.get("position", []) or []
+        rows = [rows] if isinstance(rows, dict) else rows
+        res.update(raw_positions=rows, positions_status=snapshots["positions"]["status"], synced_at=snapshots["positions"]["synced_at"])
+        formatted = []
+        for row in rows:
+            symbol = str(row.get("symbol", ""))
+            quantity, basis = number(row.get("quantity")), number(row.get("cost_basis"))
+            quote = quotes.get(symbol, {})
+            mark = option_mark(quote.get("bid"), quote.get("ask"), quote.get("last"))
+            # Missing quantities/basis are unknown, not known zero holdings or P&L.
+            market_value = quantity * mark * 100 if quantity is not None and mark is not None else None
+            pnl = market_value - basis if market_value is not None and basis is not None else None
+            greeks = quote.get("greeks") or {}
+            formatted.append({"symbol": symbol, "quantity_num": quantity, "cost_basis_num": basis, "mark_num": mark,
+                "quantity": format_numeric(quantity), "cost_basis": money(basis), "last_price": money(mark),
+                "market_value": money(market_value), "unrealized_pl": money(pnl),
+                "delta": format_numeric(number(greeks.get("delta"))), "theta": format_numeric(number(greeks.get("theta"))),
+                "unrealized_pl_num": pnl, "unrealized_pl_color": "#10B981" if (pnl or 0) > 0 else "#EF4444" if (pnl or 0) < 0 else "#94A3B8"})
+        res["positions"] = formatted
+        res["unrealized_pnl"] = sum(row["unrealized_pl_num"] for row in formatted) if all(row["unrealized_pl_num"] is not None for row in formatted) else None
+    elif "positions" in snapshots:
+        res["positions_status"] = snapshots["positions"]["status"]
+        res["synced_at"] = snapshots["positions"]["synced_at"]
+    orders = usable("orders")
+    if "orders" in snapshots:
+        res["orders_status"] = snapshots["orders"]["status"]
+        res["orders_synced_at"] = snapshots["orders"]["synced_at"]
+    if orders:
+        raw = orders["orders"]
+        rows = [] if raw in (None, "null") else raw.get("order", []) or []
+        for row in [rows] if isinstance(rows, dict) else rows:
+            price = number(row.get("price", row.get("avg_fill_price", row.get("stop_price"))))
+            res["orders"].append({"id": str(row.get("id", "")), "symbol": str(row.get("symbol", "")),
+                "side": str(row.get("side", row.get("order_type", ""))).upper(),
+                "type": str(row.get("strategy", row.get("type", ""))).upper(), "quantity": str(row.get("quantity", "")),
+                "status": str(row.get("status", "")).upper(), "price": money(price) if price is not None else "MKT"})
+    sources = [(key, value) for key, value in res["freshness"].items()]
+    res["sync_status"] = "loading" if not sources else "ready" if all(v["status"] == "ready" for _, v in sources) else "stale"
+    res["sync_message"] = " | ".join(f"{key}: {v['status']}, {int(v['age']) if v['age'] is not None else '?'}s old"
+        + (f", {v['error']}" if v["error"] else "") for key, v in sources if not key.startswith("quote:")) or "Waiting for the first broker snapshot"
+    old_balance = snapshots.get("balances", {})
+    res["last_known"] = (f"Last known equity {money(old_balance['data']['balances'].get('total_equity'))}, as of {old_balance['synced_at']}"
+                         if old_balance.get("status") == "expired" and old_balance.get("data") else "")
 
 
 def _quote_timestamp(quote: dict[str, Any]) -> str:
@@ -442,6 +385,8 @@ def get_position_workspace(telemetry: dict[str, Any]) -> dict[str, Any]:
                                    as_of=datetime.now(EASTERN_TZ).date())
     if telemetry.get("ledger_error"):
         issues.append(telemetry["ledger_error"])
+    if telemetry.get("sync_status") in {"stale", "loading"}:
+        issues.append(telemetry.get("sync_message", "Broker snapshot unavailable"))
     return {"rows": rows, "issues": issues}
 
 

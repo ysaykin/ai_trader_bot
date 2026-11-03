@@ -297,6 +297,122 @@ class TestDurablePanicHalt(unittest.TestCase):
         self.assertIsNotNone(price)
         self.assertTrue(price > 0)
 
+    def test_orphan_pending_entry_without_broker_identity_does_not_block_close(self) -> None:
+        strategy = SPXIronCondor()
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "OrphanStrat"}
+        strategy.broker = Mock()
+        strategy.broker.name = "Tradier"
+        strategy.initialize()
+        strategy.cancel_order = Mock()
+        strategy.submit_order = Mock(return_value=[SimpleNamespace(identifier="close-parent", status="open")])
+        strategy._package_price = Mock(return_value=1.50)
+        strategy._submit_package = Mock(return_value=[])
+
+        # 1. Filled owned legs in the position
+        asset1 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put")
+        asset2 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put")
+        position = strategy._runtime()
+        position.owned_legs = [(asset1, 1), (asset2, -1)]
+        position.position_open = True
+        position.entry_credit_cash = 100.0
+
+        # 2. Durable pending entry that was never submitted to broker (no broker parent, no tag match)
+        legs = [LedgerLeg("orphan-leg-1", "leg1", 1), LedgerLeg("orphan-leg-2", "leg2", -1)]
+        self.ledger.record_submission("pkg-orphan", "OrphanStrat", "open", legs, broker_tag="unsubmitted-tag", submission_started=0)
+
+        # Durable marker proves submission never started.
+        strategy.get_orders = Mock(return_value=[])
+
+        # Trigger close
+        strategy._close_all_options(exit_reason="STOP_LOSS")
+
+        # The orphan pending basket must be terminated (reservation released)
+        basket = self.ledger.get_basket("pkg-orphan")
+        self.assertFalse(self.ledger.is_inflight(basket))
+        self.assertEqual(basket.state, "failed")
+
+        # Existing filled exposure must have close order submitted (not blocked!)
+        strategy._submit_package.assert_called_once()
+
+    def test_uncertain_orphan_remains_reserved(self) -> None:
+        strategy = SPXIronCondor()
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "OrphanStrat"}
+        strategy.broker = Mock()
+        strategy.broker.name = "Tradier"
+        strategy.initialize()
+        strategy.cancel_order = Mock()
+        strategy.submit_order = Mock(return_value=[SimpleNamespace(identifier="close-parent", status="open")])
+        strategy._package_price = Mock(return_value=1.50)
+        strategy._submit_package = Mock(return_value=[])
+
+        # 1. Filled owned legs in the position
+        asset1 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put")
+        asset2 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put")
+        position = strategy._runtime()
+        position.owned_legs = [(asset1, 1), (asset2, -1)]
+        position.position_open = True
+        position.entry_credit_cash = 100.0
+
+        # 2. Durable pending entry that was never submitted to broker (no broker parent, no tag match)
+        legs = [LedgerLeg("orphan-leg-1", "leg1", 1), LedgerLeg("orphan-leg-2", "leg2", -1)]
+        self.ledger.record_submission("pkg-orphan", "OrphanStrat", "open", legs, broker_tag="unsubmitted-tag", submission_started=1)
+
+        # Broker absence cannot prove an attempted submission failed.
+        strategy.get_orders = Mock(return_value=[])
+
+        # Trigger close
+        strategy._close_all_options(exit_reason="STOP_LOSS")
+
+        # An uncertain submission must remain reserved.
+        basket = self.ledger.get_basket("pkg-orphan")
+        self.assertTrue(self.ledger.is_inflight(basket))
+        self.assertEqual(basket.state, "submitted")
+
+        # Closing waits for confirmed terminal broker state.
+        strategy.submit_order.assert_not_called()
+
+    def test_zero_and_debit_positions_stop_loss(self) -> None:
+        for entry_cash in (0.0, -50.0):
+            with self.subTest(entry_cash=entry_cash):
+                strategy = SPXIronCondor()
+                strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "ZeroDebitStrat", "wing_width": 5.0}
+                strategy.broker = Mock()
+                strategy.broker.name = "Tradier"
+                strategy.broker._shared_broker_reads = None
+                strategy.initialize()
+                strategy._close_all_options = Mock()
+                strategy.get_orders = Mock(return_value=[])
+                strategy.get_positions = Mock(return_value=[object()])
+                strategy._filter_owned_option_positions = Mock(return_value=[object()])
+                strategy._days_to_expiration = Mock(return_value=10)
+                strategy._persist_position = Mock()
+                strategy._publish_position_snapshot = Mock()
+
+                asset1 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put")
+                asset2 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put")
+                position = strategy._runtime()
+                position.owned_legs = [(asset1, 1), (asset2, -1)]
+                position.position_open = True
+                position.entry_credit_cash = entry_cash
+
+                # Market quotes where position is losing:
+                # asset1 (long put 5800): mid = 0.50 (+50)
+                # asset2 (short put 5795): mid = 6.00 (-600)
+                # current_value = +50 - 600 = -550
+                # signed pnl = entry_cash + (-550) <= -500 (defined loss = 500)
+                def mock_quote(asset):
+                    if asset.strike == 5800:
+                        return {"bid": 0.40, "ask": 0.60, "last": 0.50}
+                    return {"bid": 5.90, "ask": 6.10, "last": 6.00}
+
+                strategy._fetch_quote = mock_quote
+                strategy._manage_position()
+
+                # Must not exit early with VALUATION_UNAVAILABLE; must trigger STOP_LOSS!
+                strategy._close_all_options.assert_called_once()
+                self.assertEqual(strategy._close_all_options.call_args.kwargs.get("exit_reason"), "STOP_LOSS")
+
+
 
 if __name__ == "__main__":
     unittest.main()

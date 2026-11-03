@@ -50,7 +50,12 @@ class DashboardState(rx.State):
 
     # Broker Telemetry
     broker_name: str = "TRADIER"
-    account_id: str = "VA21359019"
+    account_id: str = ""
+    broker_sync_status: str = "loading"
+    broker_sync_message: str = "Waiting for the first broker snapshot"
+    broker_last_known: str = ""
+    orders_status: str = "loading"
+    orders_synced_at: str = "No successful sync"
     is_paper: bool = True
     equity: float | None = None
     equity_str: str = "N/A"
@@ -60,14 +65,28 @@ class DashboardState(rx.State):
     buying_power_str: str = "N/A"
     option_requirement: float | None = None
     option_requirement_str: str = "N/A"
+    broker_margin: float | None = None
+    broker_margin_str: str = "N/A"
+    strategy_risk: float | None = None
+    strategy_risk_str: str = "N/A"
+    strategy_risk_cap: float = 15000.0
+    strategy_risk_cap_str: str = "$15,000.00"
+    strategy_risk_pct: int = 0
+    strategy_risk_pct_str: str = "EXPOSURE UNAVAILABLE"
+    portfolio_risk: float | None = None
+    portfolio_risk_str: str = "N/A"
+    portfolio_risk_cap: float = 100000.0
+    portfolio_risk_cap_str: str = "$100,000.00"
+    portfolio_risk_pct: int = 0
+    portfolio_risk_pct_str: str = "EXPOSURE UNAVAILABLE"
     open_risk: float | None = None
     open_risk_str: str = "N/A"
     open_risk_cap: float = 15000.0
     open_risk_cap_str: str = "$15,000.00"
     open_risk_pct: int = 0
-    open_risk_pct_str: str = "0.0% OF CAP USED"
-    buying_power_headroom_pct: int = 100
-    buying_power_headroom_str: str = "100.0% Available"
+    open_risk_pct_str: str = "EXPOSURE UNAVAILABLE"
+    buying_power_headroom_pct: int = 0
+    buying_power_headroom_str: str = "Headroom unavailable"
 
     # Incubator Grid
     incubator_rows: list[dict[str, Any]] = []
@@ -367,7 +386,9 @@ class DashboardState(rx.State):
         while True:
             await asyncio.sleep(3)
             async with self:
-                if not self.auto_refresh:
+                from .reflex_dashboard import app
+                connected = self.router.session.client_token in app.event_namespace.token_to_sid
+                if not self.auto_refresh or not connected:
                     self.is_polling = False
                     break
                 self.load_all()
@@ -404,25 +425,65 @@ class DashboardState(rx.State):
             self.broker_name = tel["broker"]
             self.account_id = tel["account_id"]
             self.is_paper = tel["is_paper"]
+            self.broker_sync_status = tel.get("sync_status", "loading")
+            self.broker_sync_message = tel.get("sync_message", "Waiting for the first broker snapshot")
+            self.broker_last_known = tel.get("last_known", "")
             self.equity = tel["equity"]
             self.equity_str = money(tel["equity"])
             self.cash = tel["cash"]
             self.cash_str = money(tel["cash"])
             self.buying_power = tel["buying_power"]
             self.buying_power_str = money(tel["buying_power"])
-            self.option_requirement = tel["option_requirement"]
-            self.option_requirement_str = money(tel["option_requirement"])
-            self.open_risk = tel["open_exposure"]
-            self.open_risk_str = money(tel["open_exposure"])
-            self.open_risk_cap = tel["risk_cap"]
-            self.open_risk_cap_str = money(tel["risk_cap"])
-            self.open_risk_pct = int(min(100.0, self.open_risk / max(self.open_risk_cap, 1.0) * 100)) if self.open_risk is not None else 0
-            self.open_risk_pct_str = f"{self.open_risk_pct:.1f}% OF CAP USED" if self.open_risk is not None else "EXPOSURE UNAVAILABLE"
+            self.broker_margin = tel.get("option_requirement")
+            self.broker_margin_str = money(self.broker_margin)
+            self.option_requirement = self.broker_margin
+            self.option_requirement_str = self.broker_margin_str
+
+            # Effective runtime caps
+            self.strategy_risk_cap = tel["risk_cap"]
+            self.strategy_risk_cap_str = money(self.strategy_risk_cap)
+            self.portfolio_risk_cap = tel["portfolio_risk_cap"]
+            self.portfolio_risk_cap_str = money(self.portfolio_risk_cap)
+
+            # Strategy risk utilization from ledger
+            strat_risk_map = tel.get("strategy_risk")
+            if strat_risk_map is None:
+                strat_risk = None
+            elif len(self.position_strategy_filters) == 1:
+                strat_risk = strat_risk_map.get(self.position_strategy_filters[0], 0.0)
+            elif strat_risk_map:
+                strat_risk = max(strat_risk_map.values())
+            else:
+                strat_risk = 0.0 if not tel.get("ledger_error") else None
+
+            self.strategy_risk = strat_risk
+            self.strategy_risk_str = money(strat_risk)
+            self.strategy_risk_pct = int(min(100.0, strat_risk / max(self.strategy_risk_cap, 1.0) * 100)) if strat_risk is not None else 0
+            self.strategy_risk_pct_str = f"{self.strategy_risk_pct:.1f}% OF CAP USED" if strat_risk is not None else "EXPOSURE UNAVAILABLE"
+
+            # Portfolio risk utilization from ledger
+            port_risk = tel.get("portfolio_risk")
+            if port_risk is None and not tel.get("ledger_error") and (strat_risk_map is not None and not strat_risk_map):
+                port_risk = 0.0
+            self.portfolio_risk = port_risk
+            self.portfolio_risk_str = money(port_risk)
+            self.portfolio_risk_pct = int(min(100.0, port_risk / max(self.portfolio_risk_cap, 1.0) * 100)) if port_risk is not None else 0
+            self.portfolio_risk_pct_str = f"{self.portfolio_risk_pct:.1f}% OF CAP USED" if port_risk is not None else "EXPOSURE UNAVAILABLE"
+
+            # Per-strategy open_risk properties
+            self.open_risk = self.strategy_risk
+            self.open_risk_str = self.strategy_risk_str
+            self.open_risk_cap = self.strategy_risk_cap
+            self.open_risk_cap_str = self.strategy_risk_cap_str
+            self.open_risk_pct = self.strategy_risk_pct
+            self.open_risk_pct_str = self.strategy_risk_pct_str
             headroom = tel["buying_power_headroom_pct"]
             self.buying_power_headroom_pct = int(headroom) if headroom is not None else 0
             self.buying_power_headroom_str = f"{headroom:.1f}% Available" if headroom is not None else "Headroom unavailable"
             self.positions = tel["positions"]
             self.orders = tel["orders"]
+            self.orders_status = tel.get("orders_status", "unavailable")
+            self.orders_synced_at = tel.get("orders_synced_at", "No successful sync")
             workspace = get_position_workspace(tel)
             self.position_records = workspace["rows"]
             self.position_issues = workspace["issues"]
