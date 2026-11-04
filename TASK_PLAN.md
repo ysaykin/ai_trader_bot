@@ -623,3 +623,34 @@ reported pending and zero executed quantities for every leg. No replacement
 close was submitted because the existing orders have no confirmed terminal
 outcome. These two closes require broker-side repair; they were not reported as
 filled or removed from inventory. No remote Git work was performed.
+
+## Live Trading Log Bug Analysis & Prioritized Backlog, 2026-11-04
+
+Analyzed live execution logs from `2026-11-04 10:51:50` to `11:06:50`. Identified
+root causes for recurring quote failures, fill routing errors, cancellation loops,
+and unmanaged position locks, prioritized them, and registered them into the task backlog:
+
+1. **[P1] Tradier Quote Batch Poisoning / All-or-Nothing Chunk Rejection**:
+   - Symptoms: Repeated `Error getting quote from data source: Missing quote` and `Error getting last price for XSP/VIX/VIX9D: Missing quote`.
+   - Root Cause: In `strategies/broker_reads.py`, `quotes()` batches up to 100 symbols per request. If any single symbol in a chunk lacks a quote (e.g. index tickers VIX/VIX9D in Sandbox or expired contracts like `XSP261029...`), `any(symbol not in received for symbol in chunk)` raises `BrokerReadUnavailable("Incomplete broker quote batch")`. This discards valid returned quotes for active underlyings like XSP, causing cascading pricing errors.
+   - Task: `tradier-quote-batch-partial-failure-resilience`
+
+2. **[P1] Tradier Polling Child Leg Fill Routing (`Subscriber None not found`)**:
+   - Symptoms: `Trade event received for None strategy: fill XSP ID=...` and `Subscriber None not found`.
+   - Root Cause: In `lumibot/brokers/tradier.py`, child order legs returned by Tradier lack tags. During polling, `parse_strategy` resolves to `None`. In `_on_filled_order`, `self._get_subscriber(None)` fails and drops event routing.
+   - Task: `tradier-child-order-polling-subscriber-routing`
+
+3. **[P1] Tight-Loop Cancel Spam on Non-Cancelable Broker Orders (HTTP 400)**:
+   - Symptoms: `Could not close all option positions; retaining management: Unable to cancel order at broker. Error: 400 - order not available to be canceled` (repeating every iteration).
+   - Root Cause: In `strategies/iron_condor.py`, orders in `PendingNew` or non-cancelable state return HTTP 400 upon cancellation. The strategy retries cancellation on every tick with no backoff or error cooldown, ballooning iteration times (up to 18s).
+   - Task: `tradier-non-cancelable-order-cooldown-and-backoff`
+
+4. **[P2] Multileg Parent Order Fill Dispatched to Leg Fill Handler**:
+   - Symptoms: `Ignoring fill without broker child details; no ledger leg matched.`.
+   - Root Cause: Tradier emits a fill event for both the child legs and the parent multileg container. `on_filled_order` treats the parent order as an unmatched leg and warns.
+   - Task: `tradier-multileg-parent-fill-event-handling`
+
+5. **[P2] Duplicate Broker Instance and Redundant Telemetry in Single Process**:
+   - Symptoms: Dual `LUMIBOT_TELEMETRY` outputs (one with `strategy_name: null` and polls > 5,000, and one with host strategy and polls ~ 1,900).
+   - Root Cause: An auxiliary unmanaged broker instance runs background polling threads, consuming API quota and cluttering logs.
+   - Task: `duplicate-broker-instance-cleanup`

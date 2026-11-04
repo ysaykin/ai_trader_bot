@@ -1145,3 +1145,77 @@ tasks:
       - strategies/recovery.py
       - tests/test_emergency_liquidation.py
       - tests/test_container_recovery.py
+
+  - id: tradier-quote-batch-partial-failure-resilience
+    title: "Prevent missing symbols (VIX, VIX9D, expired legs) from aborting entire quote batch"
+    status: pending
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-04: Identified from live log. In strategies/broker_reads.py, quotes() raises BrokerReadUnavailable when any symbol in a chunk is missing or invalid, dropping valid quotes for active underlyings (XSP) and legs. Missing symbols must be cached individually with cooldown without poisoning the batch."
+    acceptance:
+      - "Allow broker_reads.quotes() to return partial valid quotes when non-critical or expired tickers fail."
+      - "Prevent Missing quote cascades for XSP when index symbols like VIX/VIX9D are unavailable in Tradier Sandbox."
+      - "Ensure expired contracts are excluded from periodic quote polling."
+    deliverables:
+      - strategies/broker_reads.py
+      - tests/test_broker_snapshots.py
+
+  - id: tradier-child-order-polling-subscriber-routing
+    title: "Fix Subscriber None not found during Tradier order polling for multileg child fills"
+    status: pending
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-04: Polled fill events for child legs emit with order.strategy=None because Tradier does not return tags on child legs, and auxiliary or multi-subscriber broker instances fail to attribute them to the host strategy, causing 'Subscriber None not found'."
+    acceptance:
+      - "Inherit parent order strategy/tag for untagged child legs during broker order polling."
+      - "Fallback to registered host strategy when an order belongs to the local instance."
+      - "Verify child leg fills dispatch to the strategy executor without 'Subscriber None not found' errors."
+    deliverables:
+      - strategies/broker_reads.py
+      - tests/test_tradier_order_routing.py
+
+  - id: tradier-non-cancelable-order-cooldown-and-backoff
+    title: "Add backoff and error cooldown for non-cancelable broker orders (HTTP 400)"
+    status: pending
+    priority: P1
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-04: Orders in PendingNew or rejected cancellation (HTTP 400 - order not available to be canceled) are repeatedly retried on every iteration tick, inflating cycle times to 10-18s and spamming broker API."
+    acceptance:
+      - "Track HTTP 400 cancel rejection and apply exponential backoff / cooldown before retrying cancel on the same order ID."
+      - "Prevent tight-loop cancel retries from blocking or delaying trading iteration execution."
+      - "Gracefully report non-cancelable status in ledger / telemetry without repetitive error spam."
+    deliverables:
+      - strategies/iron_condor.py
+      - tests/test_iron_condor_execution_safety.py
+
+  - id: tradier-multileg-parent-fill-event-handling
+    title: "Handle parent multileg fill events cleanly in iron_condor callback"
+    status: pending
+    priority: P2
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-04: Tradier emits a fill event for the parent multileg order in addition to individual legs. on_filled_order treats the parent order as an unmatched leg and warns: 'Ignoring fill without broker child details; no ledger leg matched.'."
+    acceptance:
+      - "Recognize parent multileg order fills in on_filled_order and handle them as package-level completions or ignore quietly."
+      - "Eliminate spurious warning logs for expected parent order events."
+    deliverables:
+      - strategies/iron_condor.py
+      - tests/test_iron_condor_execution_safety.py
+
+  - id: duplicate-broker-instance-cleanup
+    title: "Eliminate duplicate unassigned Tradier broker instance and telemetry emitter"
+    status: pending
+    priority: P2
+    owner: unassigned
+    implementation_notes:
+      - "2026-11-04: Two Broker instances run in the same process—one with strategy_name=null and polls_total > 5000, and one for the host strategy with polls_total ~ 1900. The unassigned broker wastes API quota and emits redundant telemetry."
+    acceptance:
+      - "Ensure only a single instrumented Broker instance is created and maintained per runner."
+      - "Prevent auxiliary credential imports or data source initializations from spinning up rogue polling and telemetry threads."
+    deliverables:
+      - main.py
+      - strategies/broker_reads.py
+      - tests/test_tradier_order_routing.py

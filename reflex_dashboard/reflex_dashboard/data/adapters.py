@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
 from dashboard.presentation import finite_number, format_numeric, option_mark
 from dashboard.positions import build_positions, quote_symbols, read_packages
 
@@ -168,8 +168,9 @@ def get_bot_status_from_log(log_path: str = "logs/trading.log") -> dict[str, str
 
 def get_broker_telemetry() -> dict[str, Any]:
     """Fetch live broker account telemetry, balances, positions, orders."""
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
     from dashboard.app import broker_settings
-    env = {**dotenv_values(PROJECT_ROOT / ".env"), **os.environ}
+    env = {**os.environ, **dotenv_values(PROJECT_ROOT / ".env")}
     config_error = ""
     try:
         settings = broker_settings(env)
@@ -644,6 +645,7 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
 
 def get_incubator_data() -> dict[str, Any]:
     """Compile performance matrix and metrics for all incubator variants."""
+    load_dotenv(PROJECT_ROOT / ".env", override=True)
     try:
         from strategies.incubator import get_incubator_specs
         configured_count = os.getenv("INCUBATOR_STRATEGY_COUNT", "").strip()
@@ -655,7 +657,7 @@ def get_incubator_data() -> dict[str, Any]:
         except ImportError:
             specs = []
 
-    env = {**dotenv_values(PROJECT_ROOT / ".env"), **os.environ}
+    env = {**os.environ, **dotenv_values(PROJECT_ROOT / ".env")}
     fee_per_contract = float(env.get("OPTION_FEE_PER_CONTRACT", "0.40") or 0.40)
 
     _, closed_all, open_all = get_reconciled_trades(fee_per_contract)
