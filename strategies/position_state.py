@@ -26,6 +26,7 @@ class PositionState:
     pending_gross_pnl: float | None = None
     pending_fees: float | None = None
     pending_net_pnl: float | None = None
+    pending_decision: dict[str, Any] | None = None
 
 
 def position_attribute(name: str) -> property:

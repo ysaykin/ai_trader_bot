@@ -240,6 +240,7 @@ def test_unbalanced_residual_position_scoped_recovery(tmp_path: Path) -> None:
     strategy.broker.name = "Tradier"
     strategy.initialize()
     strategy._position_ledger = ledger
+    strategy.get_datetime = Mock(return_value=datetime(2026, 11, 20, 15, 0, tzinfo=timezone.utc))
     strategy.create_order = Mock(side_effect=lambda asset, quantity, side: Order(
         strategy="ScopedStrat", asset=asset, quantity=quantity, side=side,
     ))
@@ -268,15 +269,13 @@ def test_unbalanced_residual_position_scoped_recovery(tmp_path: Path) -> None:
         position.position_open = True
         strategy._close_all_options(exit_reason="STOP_LOSS")
 
-        # Verify reduce-only order was created and submitted
-        strategy.submit_order.assert_called_once()
-        submitted_order = strategy.submit_order.call_args[0][0]
-        assert getattr(submitted_order, "_reduce_only", False) is True
-        assert submitted_order.side == "sell_to_close"
+        # Verify unverified orders are not unsafely submitted directly
+        strategy.submit_order.assert_not_called()
 
         # Verify position-scoped recovery job was enqueued in durable ledger
         scoped_jobs = ledger.list_recovery_jobs(scope="position")
         assert len(scoped_jobs) == 1
         assert scoped_jobs[0]["target_id"] == position.position_id
+        assert scoped_jobs[0]["status"] == "pending"
     finally:
         ledger.close()

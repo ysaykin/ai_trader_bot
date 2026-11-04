@@ -547,6 +547,14 @@ class PositionLedger:
                 if result.rowcount != 1:
                     raise KeyError(position_id)
 
+    def clear_exit_reason(self, position_id: str) -> None:
+        with self._lock, self._connection:
+            result = self._connection.execute(
+                "UPDATE positions SET exit_reason = NULL WHERE position_id = ?", (position_id,)
+            )
+            if result.rowcount != 1:
+                raise KeyError(position_id)
+
     def journaled(self, package_id: str, event: str) -> bool:
         with self._lock:
             return self._connection.execute(

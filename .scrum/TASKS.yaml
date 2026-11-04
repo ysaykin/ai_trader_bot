@@ -10,7 +10,104 @@ dashboard_review:
     - "https://toslc.thinkorswim.com/center/howToTos/thinkManual/Monitor/Activity-and-Positions/Position-Statement"
     - "https://toslc.thinkorswim.com/center/howToTos/thinkManual/Analyze"
     - "https://www.tastylive.com/news-insights/track-options-trades-automatically-with-order-chains"
+  strategy_integrity_audit:
+    date: "2026-11-04"
+    scope: "Incubator Grid at localhost:3000, local trade journal and read-only execution ledger"
+    limitations:
+      - "Observed counts and amounts describe the audit snapshot. They are not certified account P&L or actual broker fee totals."
+      - "XSP can expire and cash settle without a closing fill. Missing EXIT events alone do not establish a defect."
+      - "Profit-target labels on realized losses require investigation; the audit does not establish whether the trigger, execution or label is wrong."
+    priority_order:
+      - trade-journal-source-isolation-and-rebuild
+      - xsp-cash-settlement-lifecycle-and-fees
+      - bug-06-reflex-trade-event-aggregation-and-win-rate
+      - dashboard-current-strategy-comparison
+      - dashboard-grouped-execution-history
+      - dashboard-regression-fixtures-and-browser-checks
+    references:
+      - "https://www.cboe.com/tradable_products/sp_500/mini_spx_options/cash_settlement"
+      - "https://cdn.cboe.com/resources/xsp/XSP_Options_Fact_Sheet.pdf"
 tasks:
+  # --- Strategy integrity audit, 2026-11-04: P0 before presentation work ---
+  - id: profit-target-exit-loss-investigation
+    title: "Investigate XSP profit-target exits with realized losses and preserve trigger-to-fill evidence"
+    status: completed
+    priority: P0
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-04: Reconstructed trade lifecycles for ORB trades 01ae3697f0d44a1c90ffa2f657875ef8 and 95dbd4c2b7a9421a8c910a3b96f8c72b. Enforced a debit ceiling for discretionary profit exits (calculate_profit_exit_ceiling_debit in strategies/iron_condor_math.py). When close repricing exceeds the ceiling, the close package is canceled and withdrawn back into active position management (withdrawn_at). Protective exits (STOP_LOSS, EOD_CLOSE, ABRUPT_CLOSE) override profit-bounded triggers, submit uncapped limit orders up to wing width, and cannot be withdrawn. Decoupled trigger reasons and decision-time expected P&L from fill-based gross P&L and outcome labels (trade_logger.py and strategies/position_ledger.py). Preserved redacted replay fixture tests/fixtures/profit_target_exit_loss_2026_11_04.json and added deterministic regression tests in tests/test_regressions.py. All 370 tests pass cleanly."
+    evidence:
+      - "2026-11-04: Added profit-bounded discretionary pricing, withdrawal and decision evidence, a redacted ledger fixture, and fill-based outcome labels. Offline regressions and Tradier routing tests pass (100 tests); routing tests unchanged. Replay covers submission, cancellation, withdrawal and resumed management using the recorded initial limit and later debit. Verified that protective reasons override profit targets without price capping or withdrawal across EOD_CLOSE, STOP_LOSS, and ABRUPT_CLOSE."
+      - "2026-11-04: ORB trades 01ae3697f0d44a1c90ffa2f657875ef8 and 95dbd4c2b7a9421a8c910a3b96f8c72b are labeled PROFIT_TARGET. Ledger opening credits of $162 and $173 and closing debits of $269 and $304 establish gross losses of $107 and $131."
+      - "Both lifecycles include canceled close packages before filled replacements. The investigation established that close repricing exceeded the entry credit when discretionary orders slipped, converting profit targets into realized losses. Fixed by enforcing a debit ceiling and allowing protective exit overrides."
+    acceptance:
+      - "Reconstruct both lifecycles from decision logs, timestamped quotes, target settings, parent and child orders, cancellations, replacements and confirmed leg fills. Preserve a redacted replay fixture."
+      - "Record the trigger reason and decision-time expected net P&L separately from final fill-based gross P&L, fees and outcome. An outcome label never derives solely from a pending exit reason or aggregate strategy P&L."
+      - "Check quote freshness, signed leg quantities, credit/debit direction, target evaluation, replacement pricing and reason propagation. Fix demonstrated defects and cover the observed sequence with a deterministic regression."
+      - "A valid risk exit can realize a loss. Do not block protective closes or rewrite historical reasons to make a losing trade appear profitable."
+      - "Verify the corrected decision-to-fill path offline. Any new broker write verification requires its existing explicit opt-in."
+    deliverables:
+      - strategies/iron_condor.py
+      - strategies/iron_condor_math.py
+      - strategies/position_ledger.py
+      - strategies/position_state.py
+      - trade_logger.py
+      - tests/fixtures/profit_target_exit_loss_2026_11_04.json
+      - tests/test_regressions.py
+      - tests/test_tradier_order_routing.py
+
+  - id: trade-journal-source-isolation-and-rebuild
+    title: "Isolate test journals and rebuild strategy history with explicit execution provenance"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "2026-11-04: The runtime journal contains 210 filled-* trade IDs using the 95/100 put and 110/115 call fixture from tests/test_regressions.py:open_filled_position. These fixtures account for 47 of the 50 displayed recent trades."
+      - "The table labels all 252 classified closed rows as verified Tradier executions, although get_reconciled_trades only reads logs/trades.jsonl and performs no broker provenance check."
+    acceptance:
+      - "Give tests explicit temporary journal, trajectory, ledger and snapshot paths. Running unit tests, pytest or test subprocesses from the repository cannot append to or mutate runtime trading records or contact a broker."
+      - "Separate test, demo, backtest, paper and live records. Scope execution evidence by broker, account and environment; a strategy name, event ID or local filled status alone does not prove broker execution."
+      - "Back up the original journal and produce an auditable quarantine and reconciliation report before rebuilding history. Keep raw records and ambiguous legacy history recoverable; absence from the current ledger alone is not proof of a test record."
+      - "Rebuild accepted history from attributable broker executions and verified XSP expiration outcomes. Make unknown attribution visible and exclude known fixtures from strategy metrics, rankings and exports."
+      - "Replace unsupported verified-broker and exact-fee claims with source and reconciliation status. Show the visible count separately from the total export count."
+      - "Verify runtime journal and database contents remain unchanged during isolated test runs. Repeating the history rebuild produces the same accepted records and totals without duplicates."
+    deliverables:
+      - trade_logger.py
+      - dashboard/trade_logger.py
+      - tests/test_regressions.py
+      - tests/test_reflex_dashboard.py
+      - tests/test_comparison_dashboard.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/components/incubator_view.py
+      - tools/reconcile_trade_history.py
+
+  - id: xsp-cash-settlement-lifecycle-and-fees
+    title: "Account for XSP expiration cash settlement and actual fees without requiring closing fills"
+    status: pending
+    priority: P0
+    owner: unassigned
+    evidence:
+      - "2026-11-04: get_reconciled_trades classifies a past-expiry ENTRY as closed and assumes gross P&L equals the full opening credit when no realization is recorded. The snapshot contains 114 entry-only rows classified closed."
+      - "XSP is European style and cash settled. An expired setup can complete without a closing order; its result depends on signed leg settlement, not the passage of the expiry date alone."
+    references:
+      - "https://www.cboe.com/tradable_products/sp_500/mini_spx_options/cash_settlement"
+      - "https://cdn.cboe.com/resources/xsp/XSP_Options_Fact_Sheet.pdf"
+    acceptance:
+      - "Model closed by trade, expired worthless, cash settled and expired awaiting settlement as distinct outcomes. A missing closing fill is valid for expiration; a missing settlement value or confirmation is not a full-credit profit."
+      - "Use the official settlement value for the exact XSP series and expiry, signed remaining quantities and the $100 multiplier. Record the settlement source and value, and reconcile the resulting cash movement with broker activity."
+      - "Compute lifecycle net P&L from opening and additional premium cash, partial and final closing cash, signed settlement cash and actual fees. Settle only remaining inventory and never count a closing fill and settlement twice."
+      - "Do not invent closing execution fees on legs held to expiration. Use actual broker execution and exercise or settlement charges where available, and label any estimate separately. Missing legacy fees are unknown or estimated, not silently zero or reported as paid."
+      - "Preserve pending settlement across refresh, restart and delayed cash posting. Replayed settlement evidence is idempotent, and ambiguous outcomes do not enter verified completed-trade returns or win rates."
+      - "Cover all-OTM expiry, ITM put and call wings, spread boundaries, prior trims, trade closure before expiry, delayed settlement and missing fee data with deterministic fixtures. No physical-share inventory is created."
+    deliverables:
+      - strategies/position_ledger.py
+      - trade_logger.py
+      - dashboard/trade_logger.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - tests/test_position_ledger.py
+      - tests/test_trade_logger_win_rate.py
+      - tests/test_reflex_dashboard.py
+
   # --- Foundation, risk guardrails and catalog upkeep ---
   - id: user-features-catalog
     title: "Reconcile feature catalog, dashboard documentation and sprint claims with the running Reflex app"
@@ -18,6 +115,7 @@ tasks:
     priority: P1
     owner: antigravity
     review_notes:
+      - "2026-11-04: Document the distinction between delivered current-position grouping and pending grouped execution history. Remove unqualified verified-Tradier, exact-fee and full-history display claims when reconciling the catalog."
       - "Reopened 2026-10-30. Follow-up 2026-11-01 delivered and verified the actual-leg expiration explorer. Catalog this scope separately from the pending theoretical today/mixed-expiry analysis."
       - "DASHBOARD.md needs to describe the new grouped trades, strategy filters and parsed leg details. IV is still unavailable in this view."
       - "README.md and dashboard/README.md still direct users to Streamlit although docker-compose.yml serves Reflex."
@@ -279,6 +377,7 @@ tasks:
     status: completed
     owner: antigravity
     review_notes:
+      - "2026-11-04: Retain completion for counting trades at inception. The Incubator Grid incorrectly labels open + closed as COMPLETED TRADES; the correction is included in reopened bug-06-reflex-trade-event-aggregation-and-win-rate."
       - "Open trade rows and inception counts exist. An OPEN label is not a marked aggregate P&L. Grouped valuation and current-position comparison remain pending below."
       - "test_incubator_data still assumes visible_trades_50 equals all closed trades, despite open rows and the 50-row limit. Covered by dashboard-regression-fixtures-and-browser-checks."
     deliverables:
@@ -291,7 +390,7 @@ tasks:
     status: completed
     owner: antigravity
     review_notes:
-      - "Keep completed for numerical win/loss accounting. This does not cover display colors; dashboard-signed-value-formatting remains pending."
+      - "Keep completed for classifying positive and negative net values. End-to-end input reconciliation is reopened in bug-06-reflex-trade-event-aggregation-and-win-rate; this status does not certify historical net P&L. Signed-value formatting is tracked separately."
     deliverables:
       - reflex_dashboard/reflex_dashboard/data/adapters.py
       - tests/test_reflex_dashboard.py
@@ -422,6 +521,7 @@ tasks:
     priority: P1
     owner: codex
     implementation_notes:
+      - "2026-11-04: Delivered scope is the current-position workspace. The flat Incubator execution history does not use this model; reuse its durable ownership rules in dashboard-grouped-execution-history."
       - "Read-only ledger fill snapshots now produce stable per-trade inventory and reconcile signed quantities to broker positions. Shared contracts stay separate; ambiguous legacy closes and unmatched inventory remain unavailable."
       - "Confirmed additions, trims, pending closes and explicitly linked rolls are covered by deterministic tests. Supported standard equity/index option contracts use the 100-share multiplier; fees missing from the journal are explicitly estimated."
     depends_on:
@@ -450,6 +550,7 @@ tasks:
     priority: P1
     owner: codex
     implementation_notes:
+      - "2026-11-04: Keep completed for Positions. Completed-trade leg expansion and XSP settlement outcomes in the Incubator Grid are separate pending work in dashboard-grouped-execution-history."
       - "Positions is the landing view. Strategy groups contain whole-trade rows with open/realized/net P&L, reported or estimated fees, entry cash, signed liquidation value, opening risk and signed-quantity Greeks."
       - "Leg expansion and actual filled structure are verified against the running paper dashboard. Account risk controls are collapsed above the position workspace."
     depends_on:
@@ -465,6 +566,35 @@ tasks:
       - reflex_dashboard/reflex_dashboard/components/positions_view.py
       - reflex_dashboard/reflex_dashboard/reflex_dashboard.py
       - reflex_dashboard/reflex_dashboard/state.py
+
+  - id: dashboard-grouped-execution-history
+    title: "Show executed XSP setups as expandable trade lifecycles with leg fills and settlement"
+    status: pending
+    priority: P1
+    owner: unassigned
+    depends_on:
+      - dashboard-owned-position-model
+      - trade-journal-source-isolation-and-rebuild
+      - xsp-cash-settlement-lifecycle-and-fees
+      - bug-06-reflex-trade-event-aggregation-and-win-rate
+    evidence:
+      - "2026-11-04: The Incubator history groups JSONL events by trade_id but never joins executed packages and leg fills. It has no expandable basket or broker order evidence."
+      - "All 260 reconciled journal records lack structure metadata. format_structure defaults to Iron Condor, including two-leg StrategyBro and TrendFlow verticals."
+    acceptance:
+      - "Display strategy > logical executed setup > packages and legs. Use durable position and trade identities, preserving distinct trades that share strikes, underlying or expiry. Link adds, trims, replacements and rolls only with recorded ownership evidence."
+      - "Derive actual IC, bull put, bear call or incomplete structure from signed executed legs. Normalize supported legacy strike keys; ambiguous roles stay unknown and never default to Iron Condor. Keep configured strategy type separate from actual structure."
+      - "Show XSP underlying, strategy configuration identity, expiry, signed quantity, opening premium, closing cash or settlement, fee provenance, gross and net P&L, reconciliation status and a defined return denominator. Label premium points and cash dollars distinctly."
+      - "Expand each setup to show entry and exit leg prices, quantities, timestamps and parent/child broker order links, plus any expiration settlement value and signed leg cash amounts."
+      - "Keep trigger reason separate from realized outcome. Show closed by trade, expired worthless, cash settled and awaiting settlement without inventing an exit order."
+      - "Use the same account, environment, strategy and reporting-period filters for history, metrics and exports. Expose entry and completion times with explicit sorting, and show visible rows versus total matching setups accurately."
+      - "Verify shared contracts, multiple setups, verticals, trims, replacements and cash-settled expiry in the browser and exported CSV. Expanded legs reconcile to their setup and strategy totals."
+    deliverables:
+      - dashboard/positions.py
+      - reflex_dashboard/reflex_dashboard/data/adapters.py
+      - reflex_dashboard/reflex_dashboard/state.py
+      - reflex_dashboard/reflex_dashboard/components/incubator_view.py
+      - tests/test_position_workspace.py
+      - tests/test_reflex_dashboard.py
 
   - id: dashboard-strategy-filters
     title: "Filter positions immediately by strategy variant and actual option structure"
@@ -486,25 +616,37 @@ tasks:
       - reflex_dashboard/reflex_dashboard/components/positions_view.py
 
   - id: dashboard-current-strategy-comparison
-    title: "Compare currently held positions across selected strategies on a consistent basis"
+    title: "Compare current and historical strategy performance using consistent scope and actual defined risk"
     status: in_progress
     priority: P1
     owner: codex
     implementation_notes:
+      - "2026-11-04: Extend remaining historical scope to exact strategy configuration identity, consistent headline/history populations, disjoint ranking groups and fill-derived risk denominators. Current-position comparison remains delivered."
       - "Delivered current-holdings comparison from one broker/ledger snapshot, separating open P&L, realized portions, fee provenance, net P&L and defined opening risk. Aggregate percentages use summed P&L and risk."
       - "Remaining: reporting-period controls for fully closed trades and stored historical P&L time series."
     depends_on:
       - dashboard-strategy-filters
       - dashboard-configured-risk-telemetry
+      - trade-journal-source-isolation-and-rebuild
+      - xsp-cash-settlement-lifecycle-and-fees
+      - bug-06-reflex-trade-event-aggregation-and-win-rate
+    evidence:
+      - "2026-11-04: The current IC_V19_30DTE_D15_W5_PT50_T1015 row includes a legacy IC_V19_D25_W5_PT50_T1030 trade by prefix. IC_V27 and IC_V28 appear in both Top 5 and Bottom 3."
+      - "The screenshot shows 12 selected closed trades and a 50% win rate, while the history includes 252 classified closed records across other strategies and fixtures. Returns use logged wing collateral rather than consistently derived maximum loss after opening cash."
     acceptance:
       - "Select two or more strategies from the same positions workflow and show their current grouped positions alongside aggregate results."
       - "Separate current open P&L, realized P&L in the chosen period, booked fees, net total, open-position count and defined risk. Do not present closed-trade totals as current-position performance."
       - "Offer dollars and return on clearly defined initial risk. Calculate aggregate return as summed P&L divided by summed eligible risk, not an average of percentages."
       - "Use the same quote snapshot, filters, account scope and reporting period. Show sample size and unavailable data; closed-trade win rate excludes open trades."
       - "Keep observed P&L over time distinct from projected payoff across underlying prices. Historical series require stored snapshots and use one common time axis."
+      - "Persist or recover exact strategy configuration identity for historical trades. Never merge different DTE, delta or schedule configurations solely by IC_Vxx prefix; any deliberate family rollup is labeled and exposes its members."
+      - "Derive headline counts, closed win rate, fees, P&L, table rows and exports from one eligible population with explicit account, environment, strategy and period filters. Disclose unknown or excluded outcomes."
+      - "Rank only strategies with eligible completed observations. Top and bottom groups are disjoint, shrink to fit the eligible strategy count, and do not classify untraded zero-P&L strategies as proven leaders."
+      - "Calculate historical initial defined risk from actual signed legs, quantities, multipliers and opening cash. State the treatment of fees, additions and rolls; unknown risk never uses a made-up $500 denominator. Aggregate returns use summed eligible P&L divided by summed eligible risk."
     deliverables:
       - reflex_dashboard/reflex_dashboard/components/ab_lab_view.py
       - reflex_dashboard/reflex_dashboard/components/positions_view.py
+      - reflex_dashboard/reflex_dashboard/components/incubator_view.py
       - reflex_dashboard/reflex_dashboard/state.py
       - reflex_dashboard/reflex_dashboard/data/
 
@@ -555,9 +697,10 @@ tasks:
   - id: dashboard-regression-fixtures-and-browser-checks
     title: "Verify dashboard grouping, sign colors, filters and data states with deterministic fixtures and browser checks"
     status: in_progress
-    priority: P2
+    priority: P1
     owner: codex
     implementation_notes:
+      - "2026-11-04: Raised from P2 to P1 as the final verification gate for the strategy integrity audit. Runtime journal isolation is owned by trade-journal-source-isolation-and-rebuild."
       - "Added tests/test_position_workspace.py with deterministic fixtures for shared contracts, partial fills/closes, additions, linked rolls, unknown marks, broker failures, fees, filters, payoff and read-only SQLite behavior."
       - "Targeted verification: 71 passed and 6 subtests passed; Reflex 0.10.1 dry compilation passed. Browser checks cover current held positions, All/Clear, multi-strategy selection, structure filters, comparison units, leg expansion and red losses."
       - "Inconsistent marks outside a complete credit spread's defined payoff bounds now suppress marked P&L and aggregate totals with an explicit quote-quality issue; confirmed-fill payoff remains available."
@@ -567,14 +710,21 @@ tasks:
       - dashboard-current-strategy-comparison
       - dashboard-position-payoff-analysis
       - dashboard-comparison-selection-integrity
+      - dashboard-grouped-execution-history
+      - profit-target-exit-loss-investigation
     acceptance:
       - "Replace tests that depend on changing local trade logs or exact nine-row curation with deterministic source fixtures and explicit behavioral expectations."
       - "Correct visible_trades_50 assertions for open rows and the 50-row limit; keep separate assertions for open, closed and total counts."
       - "Exercise shared contracts, partial closes, linked rolls, fees, missing/stale marks and unmatched broker inventory. Assert sum reconciliation and signed Greek units."
       - "In the browser, verify negative values are red in every view, selection survives refresh, comparison banners match cards and loading/error states never show fabricated performance."
       - "Check keyboard controls and layouts at mobile and desktop widths. Do not mark dashboard behavior complete solely from adapter tests."
+      - "Use an isolated end-to-end fixture that includes a test record, two configurations sharing a variant prefix, open and closed setups, adds and trims, and OTM/ITM XSP settlement. Assert source exclusion, exact population counts, disjoint ranks and gross minus fees equals net."
+      - "Verify a $200 gross trade with $1.60 entry and $1.60 exit fees reports $196.80 net. Repeated event and settlement replay cannot change totals."
+      - "Exercise Incubator headline metrics, strategy rows, expanded executed legs and CSV together. Check matching scopes, actual structure labels, accurate visible counts and pending settlement states."
     deliverables:
       - tests/test_reflex_dashboard.py
+      - tests/test_comparison_dashboard.py
+      - tests/test_trade_logger_win_rate.py
       - tools/audit_dashboard_ui.py
 
   - id: bug-01-panic-liquidation-import-and-flatten
@@ -603,6 +753,8 @@ tasks:
     status: completed
     priority: P0
     owner: unassigned
+    review_notes:
+      - "2026-11-04: Keep completed for dynamic execution leg counts. Actual fee provenance, missing historical fees and expiration without closing executions belong to xsp-cash-settlement-lifecycle-and-fees; lifecycle fee omission is reopened in bug-06-reflex-trade-event-aggregation-and-win-rate."
     evidence:
       - "strategies/iron_condor.py:800,871,1824,1900,1929 hardcode 4 or 8 legs when computing entry, addition, exit, and roundtrip fees, overcharging 2-leg bull_put/bear_call vertical spreads by 2x and distorting live net_pnl exit triggers."
       - "trade_logger.py:467,566,645,670,674 similarly hardcode 4 or 8 legs for fee accounting."
@@ -668,26 +820,44 @@ tasks:
       - tests/test_reflex_dashboard.py
 
   - id: bug-06-reflex-trade-event-aggregation-and-win-rate
-    title: "Aggregate ENTRY, ADDITION, ADJUSTMENT, and EXIT trade events in Reflex adapters and fix open-trade win-rate dilution"
-    status: completed
-    priority: P1
+    title: "Reconcile strategy trade counts, lifecycle fees, net P&L and closed-trade win rates"
+    status: pending
+    priority: P0
     owner: antigravity
+    review_notes:
+      - "Reopened 2026-11-04. Accumulating event net_pnl omits entry fees even though displayed fees include them. The closed-only win-rate denominator fix remains delivered, but its inputs are not fully reconciled."
+      - "Expired XSP setups can complete through verified cash settlement without EXIT fills. Implement the settlement task before certifying lifecycle outcomes."
+    depends_on:
+      - trade-journal-source-isolation-and-rebuild
+      - xsp-cash-settlement-lifecycle-and-fees
     evidence:
-      - "reflex_dashboard/reflex_dashboard/data/adapters.py:471-504 merges trade events via dict.update(), overwriting entry timestamps and entry fees on EXIT and ignoring ADDITION and ADJUSTMENT cash flows."
-      - "adapters.py:666,761 divides closed wins by (closed + open) trades when computing overall_win_rate."
+      - "2026-11-04: Exact adapter reproduction yields 18 headline completed trades = 12 closed + 6 open, gross -$59.00, fees $32.80 and shown net -$75.80. Gross minus displayed fees is -$91.80, not a certified broker result."
+      - "124 of 252 classified closed rows violate displayed gross minus fees equals net. A minimal ENTRY/EXIT fixture yields $200 gross, $3.20 total fees and incorrect $198.40 net."
+      - "Historical pre-fix evidence: adapters.py merged lifecycle events via dict.update(), overwriting entry timestamps and entry fees and ignoring additions and adjustments. Event accumulation now exists, but the new audit exposes incomplete lifecycle net reconciliation."
+      - "Historical pre-fix evidence: overall_win_rate divided closed wins by open + closed trades. The current closed-only denominator is retained; the reopened scope fixes financial inputs and completed-count labels."
     acceptance:
       - "Accumulate quantities, credits, fees, and realized adjustment P&L across ENTRY, ADDITION, ADJUSTMENT, and EXIT events consistently with trade_logger.load_all_trades()."
       - "Compute win_rate strictly over closed trades while keeping open trade counts separate."
+      - "Calculate lifecycle net once from reconciled gross cash flows minus all applicable entry, addition, trim, exit and settlement fees. Preserve fee provenance and keep missing inputs unavailable rather than trusting an independently accumulated event net."
+      - "Use a shared reconciliation result for Reflex, the core trade loader and exports. Handle supported legacy and current schemas explicitly, including duplicate events, additions and partial realizations."
+      - "Label inception count as total trades and completed count as verified closed or settled logical trades. Keep open, pending-entry and awaiting-settlement counts distinct; none dilutes the completed win-rate denominator."
+      - "Assert gross minus fees equals net within one cent whenever all inputs are known, per setup and aggregate. Assert totals equal the sum of the same eligible setup records."
     deliverables:
       - reflex_dashboard/reflex_dashboard/data/adapters.py
       - reflex_dashboard/reflex_dashboard/state.py
+      - trade_logger.py
+      - dashboard/trade_logger.py
+      - reflex_dashboard/reflex_dashboard/components/incubator_view.py
       - tests/test_reflex_dashboard.py
+      - tests/test_trade_logger_win_rate.py
 
   - id: bug-07-ledger-strike-keys-and-multi-package-attribution
     title: "Standardize strike dictionary keys on ledger entry and isolate multi-package cash and risk attribution"
     status: completed
     priority: P1
     owner: antigravity
+    review_notes:
+      - "2026-11-04: Keep completed for canonical entry keys and package attribution. Historical structure normalization, legacy ambiguous keys and vertical mislabeling in Incubator history are covered by dashboard-grouped-execution-history."
     evidence:
       - "strategies/iron_condor.py:1885-1888 records strikes as put_1/put_2/call_3/call_4, causing adapters.py:format_strikes() to render blank ' / | / ' strings."
       - "strategies/position_ledger.py:607 drops opening_credit when multiple expirations are open, and _refresh_package (line 740) mutates all open packages."
@@ -773,7 +943,7 @@ tasks:
 
   - id: panic-recovery-supervisor-and-coordinator-spec
     title: "Run panic liquidation recovery under a managed supervisor and complete the omitted coordinator requirements"
-    status: in_progress
+    status: completed
     priority: P0
     owner: antigravity
     depends_on:
@@ -781,11 +951,6 @@ tasks:
       - bug-14-panic-recovery-runtime-packaging
     implementation_notes:
       - "2026-11-03: Implemented standalone RecoveryCoordinator in strategies/recovery.py and entrypoint strategies/recovery_worker.py with explicit lifecycle (start, stop, heartbeat, is_ready probe, single-worker exclusion lease). Registered lumibot-recovery service in docker-compose.yml. Wired durable recovery_jobs, recovery_worker_heartbeat, and emergency_submissions tracking into strategies/position_ledger.py. Verified restart-safe tracking, short-option sequencing, and ambiguous outcome retention in dashboard/broker_client.py. Added position-scoped recovery for unbalanced residual legs in strategies/iron_condor.py while preserving balanced entry validation. Verified that recovery continues after trading exits in tests/test_container_recovery.py."
-    review_notes:
-      - "2026-11-03 repair: scoped recovery and restart-safe broker reconciliation remain incomplete. Unresolved emergency submissions block replacement and scoped jobs remain pending; further implementation and verification are required."
-      - "2026-11-03: Stop-loss close pricing now uses the emergency fallback for non-expiring positions and remains a bounded debit limit. Independent supervisor and durable recovery-order attribution remain unimplemented; do not run the existing liquidation routine as a retrying supervisor."
-      - "Repair cycle verified retries during halted strategy iterations, but no separately managed recovery supervisor with startup and shutdown was implemented; retries therefore depend on strategy iterations continuing."
-      - "The approved plan text available to the implementation cycle was truncated in the Jev-bot section and omitted the detailed coordinator specification. Obtain the missing remainder before claiming the emergency verification gate or whole plan complete."
     acceptance:
       - "Add a recovery supervisor with explicit startup and graceful shutdown that retries broker reconciliation/liquidation while the durable panic halt is active, independent of strategy iteration cadence."
       - "Implement and verify the full coordinator requirements from the complete approved plan, including submission exclusion and confirmed short-fill sequencing, with no success reported from unverified broker state."
@@ -793,9 +958,7 @@ tasks:
       - strategies/recovery.py
       - strategies/recovery_worker.py
       - docker-compose.yml
-      - strategies/iron_condor.py
       - strategies/position_ledger.py
-      - dashboard/broker_client.py
       - tests/test_emergency_liquidation.py
       - tests/test_container_recovery.py
 
@@ -994,10 +1157,11 @@ tasks:
 
   - id: dashboard-last-successful-snapshot
     title: "Retain the last successful dashboard values through refresh failures"
-    status: in_progress
+    status: completed
     priority: P0
     owner: antigravity
     implementation_notes:
+      - "2026-11-04: build_dashboard_presentation_bundle and Reflex verification are fully delivered. The legacy Streamlit fallback defect in dashboard/broker_client.py is explicitly decoupled and owned by bug-09-ui-telemetry-fallbacks-and-sign-colors."
       - "2026-11-03: Added shared presentation helper build_dashboard_presentation_bundle in dashboard/presentation.py, unified per-resource snapshot bundle reads across Reflex (reflex_dashboard/reflex_dashboard/data/adapters.py) and Streamlit (dashboard/app.py). Retained historical positions and orders separately from current totals so exposure does not disappear when expired, while excluding expired balances from active totals without fabricating zero P&L. Passed per-resource generations, age, errors, provider timestamps, and valuation coverage through each refresh. Verified in tests/test_dashboard_integrity.py."
       - "2026-11-03 review: reopened because retained legacy dashboard views do not yet satisfy all expired snapshot and per-source freshness acceptance criteria."
       - "2026-11-02: Implemented independent retention and age/error reporting for balances, inventory, orders and per-symbol quotes. Browser verification retained $100,000 equity and $90 open P&L through HTTP 500s and recovered to $100,050 and $120. Expired values are excluded from current totals. Orders no longer claim successful clearance after a read failure."
@@ -1128,23 +1292,6 @@ tasks:
       - strategies/position_ledger.py
       - strategies/iron_condor.py
       - tests/test_iron_condor_execution_safety.py
-
-  - id: scoped-recovery-reconciliation-and-test-alignment
-    title: "Complete scoped recovery job reconciliation and align emergency liquidation test expectations with fail-closed safety"
-    status: pending
-    priority: P1
-    owner: antigravity
-    review_notes:
-      - "2026-11-03: Repair cycle added fail-closed safety for ambiguous emergency submissions (blocking replacements until reconciliation). 4 existing test cases failed: 2 in test_emergency_liquidation.py expected empty response dicts to succeed through the polling loop, 1 in scoped recovery expected unconfirmed submissions to mark jobs complete, and 1 mocked-clock test. Reconcile scoped recovery jobs and align test fixtures with the strict order ID requirement."
-    acceptance:
-      - "Ensure scoped recovery jobs reconcile terminal fills without leaving untracked orders in flight."
-      - "Align emergency liquidation test fixtures with the required broker order ID and error payloads."
-      - "Verify the full 360+ test suite passes cleanly with zero regressions."
-    deliverables:
-      - dashboard/broker_client.py
-      - strategies/recovery.py
-      - tests/test_emergency_liquidation.py
-      - tests/test_container_recovery.py
 
   - id: tradier-quote-batch-partial-failure-resilience
     title: "Prevent missing symbols (VIX, VIX9D, expired legs) from aborting entire quote batch"

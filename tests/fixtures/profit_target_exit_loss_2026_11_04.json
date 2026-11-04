@@ -1,0 +1,280 @@
+[
+  {
+    "trade_alias": "trade_1",
+    "strategy": "IC_V29_1DTE_ORB_DYNAMIC",
+    "symbol": "XSP",
+    "expiry": "2026-11-04",
+    "strikes": {
+      "long_put": 745,
+      "short_put": 750,
+      "short_call": 766,
+      "long_call": 771
+    },
+    "quantity": 1,
+    "profit_target": 0.4,
+    "stop_loss_mult": 1.3,
+    "wing_width": 5,
+    "packages": [
+      {
+        "intent": "open",
+        "state": "closed",
+        "limit_price": 1.49,
+        "created_at": "2026-11-03T18:16:08.744937+00:00",
+        "updated_at": "2026-11-04T14:57:13.448896+00:00",
+        "reprice_count": 0,
+        "alias": "package_1",
+        "replacement_of": null,
+        "legs": [
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":766.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 1.19
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":771.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 0.38
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":745.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 0.8
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":750.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 1.61
+          }
+        ]
+      },
+      {
+        "intent": "close",
+        "state": "canceled",
+        "limit_price": 0.73,
+        "created_at": "2026-11-04T14:41:08.868947+00:00",
+        "updated_at": "2026-11-04T14:56:06.924788+00:00",
+        "reprice_count": 0,
+        "alias": "package_2",
+        "replacement_of": null,
+        "legs": [
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":766.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":771.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":745.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":750.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          }
+        ]
+      },
+      {
+        "intent": "close",
+        "state": "closed",
+        "limit_price": 2.69,
+        "created_at": "2026-11-04T14:56:08.332600+00:00",
+        "updated_at": "2026-11-04T14:57:13.448896+00:00",
+        "reprice_count": 1,
+        "alias": "package_3",
+        "replacement_of": "package_2",
+        "legs": [
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":766.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 3.54
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":771.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 0.88
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":745.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 0.02
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":750.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 0.05
+          }
+        ]
+      }
+    ],
+    "marks": {
+      "09:36_net": -34.2,
+      "09:41_gross": 89,
+      "09:41_fees": 3.2,
+      "09:41_net": 85.8,
+      "profit_threshold": 64.8,
+      "stop_threshold": -210.6
+    },
+    "realized": {
+      "gross": -107,
+      "net": -108.6
+    },
+    "notes": "Decision-time leg quotes were not saved. Log times are ET; ledger times are UTC."
+  },
+  {
+    "trade_alias": "trade_2",
+    "strategy": "IC_V29_1DTE_ORB_DYNAMIC",
+    "symbol": "XSP",
+    "expiry": "2026-11-04",
+    "strikes": {
+      "long_put": 745,
+      "short_put": 750,
+      "short_call": 765,
+      "long_call": 770
+    },
+    "quantity": 1,
+    "profit_target": 0.4,
+    "stop_loss_mult": 1.3,
+    "wing_width": 5,
+    "packages": [
+      {
+        "intent": "open",
+        "state": "closed",
+        "limit_price": 1.62,
+        "created_at": "2026-11-03T19:31:06.076979+00:00",
+        "updated_at": "2026-11-04T14:57:13.478171+00:00",
+        "reprice_count": 0,
+        "alias": "package_1",
+        "replacement_of": null,
+        "legs": [
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":765.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 1.33
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":770.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 0.41
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":745.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 0.71
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":750.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 1.52
+          }
+        ]
+      },
+      {
+        "intent": "close",
+        "state": "canceled",
+        "limit_price": 0.83,
+        "created_at": "2026-11-04T14:41:10.822069+00:00",
+        "updated_at": "2026-11-04T14:56:07.046906+00:00",
+        "reprice_count": 0,
+        "alias": "package_2",
+        "replacement_of": null,
+        "legs": [
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":765.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":770.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":745.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":750.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 0,
+            "fill_price": null
+          }
+        ]
+      },
+      {
+        "intent": "close",
+        "state": "closed",
+        "limit_price": 3.11,
+        "created_at": "2026-11-04T14:56:10.296827+00:00",
+        "updated_at": "2026-11-04T14:57:13.478171+00:00",
+        "reprice_count": 1,
+        "alias": "package_3",
+        "replacement_of": "package_2",
+        "legs": [
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":765.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 4.24
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"call\",\"strike\":770.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 1.23
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":745.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": -1,
+            "filled_signed_quantity": -1,
+            "fill_price": 0.02
+          },
+          {
+            "asset_key": "{\"expiration\":\"2026-11-04\",\"right\":\"put\",\"strike\":750.0,\"symbol\":\"XSP\"}",
+            "requested_signed_quantity": 1,
+            "filled_signed_quantity": 1,
+            "fill_price": 0.05
+          }
+        ]
+      }
+    ],
+    "marks": {
+      "09:36_net": -58.2,
+      "09:41_gross": 90,
+      "09:41_fees": 3.2,
+      "09:41_net": 86.8,
+      "profit_threshold": 69.2,
+      "stop_threshold": -224.9
+    },
+    "realized": {
+      "gross": -131,
+      "net": -132.6
+    },
+    "notes": "Decision-time leg quotes were not saved. Log times are ET; ledger times are UTC."
+  }
+]

@@ -1,5 +1,28 @@
 # Implementation task plan
 
+## Strategy dashboard integrity backlog, 2026-11-04
+
+Scope: update the task list from the strategy dashboard audit and the XSP
+cash-settlement correction. Keep trading code, account settings and journals
+unchanged. Preserve completed work that applies only to the Positions view.
+
+1. Compare each finding with all existing tasks and reuse matching task IDs.
+2. Reopen lifecycle accounting and extend strategy comparison and verification.
+3. Add missing journal isolation, XSP settlement, exit-loss investigation and
+   grouped execution-history tasks with evidence, acceptance and dependencies.
+4. Record priority order, keeping execution investigation and unreliable
+   financial records ahead of presentation work.
+5. Add and run a read-only backlog validator for unique IDs, dependency links,
+   dependency cycles and the recorded audit priority order. Inspect the diff.
+
+Completed the backlog update. Added four tasks, reopened accounting at P0,
+extended historical comparison and raised regression verification to P1.
+The audit records seven ordered tasks with evidence and acceptance criteria.
+Validation passes for IDs, dependencies, cycles and priority order. The
+validator also rejects duplicate IDs, missing dependencies, dependency cycles,
+reversed priorities and unknown audit task IDs. Unrelated concurrent edits are
+preserved. No trading implementation or journal changes belong to this update.
+
 ## Position workspace implementation, 2026-11-01
 
 Implement the reviewed position workflow in the active Reflex dashboard. Preserve

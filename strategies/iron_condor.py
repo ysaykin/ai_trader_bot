@@ -42,6 +42,7 @@ from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
 
 from strategies.iron_condor_math import (
+    DEFAULT_MFE_TRAIL_LOCK_FRACTION,
     calculate_realized_vol_ratio,
     calculate_zscore,
     credit_strategy_pnl,
@@ -62,6 +63,8 @@ from strategies.iron_condor_math import (
 )
 from strategies.position_ledger import LedgerLeg, PositionLedger, TERMINAL_STATES, asset_key
 from strategies.position_state import PositionState, position_attribute
+
+PROFIT_BOUNDED_EXIT_REASONS = frozenset({"PROFIT_TARGET", "MFE_TRAIL_LOCK"})
 
 logger = logging.getLogger(__name__)
 
@@ -863,12 +866,14 @@ class SPXIronCondor(Strategy):
                 bounds = self._quote_bounds(quote)
             except Exception as error:
                 logger.warning("Could not quote owned option %s: %s", asset, error)
+                quote = None
                 midpoint, bounds = None, None
             leg_quotes.append({
                 "asset": asset,
                 "signed_quantity": signed_quantity,
                 "midpoint": midpoint,
                 "bounds": bounds,
+                "quote_time": self._quote_timestamp(quote),
             })
             if midpoint is None:
                 incomplete = True
@@ -981,9 +986,11 @@ class SPXIronCondor(Strategy):
 
         if net_pnl >= pt_threshold and net_pnl > 0:
             logger.info("🎯 NET PROFIT TARGET HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
+            self._capture_exit_decision(position, "PROFIT_TARGET", gross_pnl, roundtrip_fees, net_pnl, pt_threshold, leg_quotes)
             self._close_all_options(position_id=position.position_id, exit_reason="PROFIT_TARGET", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
         elif sl_threshold < 0 and net_pnl <= sl_threshold:
             logger.warning("🛑 STOP LOSS HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
+            self._capture_exit_decision(position, "STOP_LOSS", gross_pnl, roundtrip_fees, net_pnl, sl_threshold, leg_quotes)
             self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
         elif bool(position.settings.get("enable_mfe_ratchet", False)) or os.getenv("IC_MFE_RATCHET_ENABLED", "").strip().lower() in ("true", "1", "yes", "on"):
             ratchet_reason = evaluate_mfe_ratchet(
@@ -996,6 +1003,8 @@ class SPXIronCondor(Strategy):
                     "🔒 %s HIT — locking in profit/breakeven (MFE $%.2f -> Current Net $%.2f)",
                     ratchet_reason, position.mfe_pnl, net_pnl,
                 )
+                self._capture_exit_decision(position, ratchet_reason, gross_pnl, roundtrip_fees, net_pnl,
+                                            position.mfe_pnl * DEFAULT_MFE_TRAIL_LOCK_FRACTION if ratchet_reason == "MFE_TRAIL_LOCK" else 0.0, leg_quotes)
                 self._close_all_options(position_id=position.position_id,
                     exit_reason=ratchet_reason,
                     gross_pnl=gross_pnl,
@@ -1300,7 +1309,11 @@ class SPXIronCondor(Strategy):
             return
         position = self._runtime(position_id)
         if position.exit_requested and position.pending_exit_reason:
-            if exit_reason and not position.pending_exit_reason:
+            if (
+                exit_reason
+                and exit_reason not in PROFIT_BOUNDED_EXIT_REASONS
+                and position.pending_exit_reason in PROFIT_BOUNDED_EXIT_REASONS
+            ):
                 position.pending_exit_reason = exit_reason
         else:
             position.pending_exit_reason = exit_reason or position.pending_exit_reason or "MANUAL"
@@ -1501,7 +1514,14 @@ class SPXIronCondor(Strategy):
             if not math.isfinite(width) or width <= 0 or not math.isfinite(price):
                 logger.error("Cannot establish a bounded close price; retaining management.")
                 return
+            market_debit = price
             price = min(width, price + min(reprice_count, self._close_max_reprices) * self._close_price_step)
+            if position.pending_exit_reason in PROFIT_BOUNDED_EXIT_REASONS:
+                ceiling = self._profit_close_debit_ceiling(position, legs)
+                if ceiling is None or market_debit > ceiling:
+                    self._withdraw_discretionary_exit(position, market_debit=market_debit, ceiling=ceiling)
+                    return
+                price = min(price, ceiling)
             orders = self._submit_package(
                 legs,
                 intent="close",
@@ -1519,6 +1539,50 @@ class SPXIronCondor(Strategy):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _quote_timestamp(quote: Any) -> str | None:
+        try:
+            for name in ("timestamp", "bid_date", "ask_date"):
+                value = quote.get(name) if isinstance(quote, dict) else getattr(quote, name, None)
+                if value is not None:
+                    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+        except Exception:
+            return None
+        return None
+
+    def _profit_close_debit_ceiling(self, position: PositionState, legs: list[tuple[Asset, int]]) -> float | None:
+        """Max per-unit debit that keeps realized net P&L >= 0 after round-trip fees."""
+        credit = position.entry_credit_cash
+        if credit is None or not math.isfinite(credit) or credit <= 0:
+            return None
+        qty = max((abs(q) for _, q in legs), default=0)
+        if qty <= 0:
+            return None
+        fees = 2 * option_execution_fees((q for _, q in legs), option_fee_per_contract())
+        ceiling = (credit - fees) / (100.0 * qty)
+        return math.floor(ceiling * 100) / 100 if ceiling > 0 else None
+
+    def _withdraw_discretionary_exit(self, position: PositionState, *, market_debit: float, ceiling: float | None) -> None:
+        logger.warning("Withdrawing %s exit for %s: market debit %.2f exceeds profit ceiling %s; resuming management.",
+                       position.pending_exit_reason, position.position_id, market_debit, ceiling)
+        if position.position_id is not None:
+            self._position_ledger.clear_exit_reason(position.position_id)
+        position.exit_requested = False
+        position.pending_exit_reason = None
+        position.pending_gross_pnl = position.pending_fees = position.pending_net_pnl = None
+        position.pending_decision = None
+
+    def _capture_exit_decision(self, position: PositionState, reason: str, gross: float, fees: float,
+                               net: float, threshold: float | None, leg_quotes: list[dict[str, Any]]) -> None:
+        position.pending_decision = {
+            "reason": reason, "at": self._as_aware_utc(self._current_datetime()).isoformat(),
+            "gross_pnl": gross, "fees": fees, "net_pnl": net, "threshold": threshold,
+            "legs": [{"asset_key": asset_key(q["asset"]), "signed_quantity": q["signed_quantity"],
+                      "bid": q["bounds"][0] if q["bounds"] else None,
+                      "ask": q["bounds"][1] if q["bounds"] else None,
+                      "mid": q["midpoint"], "quote_time": q.get("quote_time")} for q in leg_quotes],
+        }
 
     def _emergency_close_debit_fallback(self, legs: list[tuple[Asset, int]], position_id: str | None = None) -> float | None:
         """Bound an emergency debit limit strictly by wing_width and credit multiplier."""
@@ -2507,6 +2571,10 @@ class SPXIronCondor(Strategy):
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
                 exit_reason=reason,
+                exit_trigger=reason,
+                decision_gross_pnl=position.pending_gross_pnl,
+                decision_net_pnl=position.pending_net_pnl,
+                decision_evidence=position.pending_decision,
                 pnl=actual_net,
                 fees=close_fees,
                 gross_pnl=actual_gross,
@@ -2724,6 +2792,7 @@ class SPXIronCondor(Strategy):
         position.pending_gross_pnl = None
         position.pending_fees = None
         position.pending_net_pnl = None
+        position.pending_decision = None
         position.mfe_pnl = 0.0
         position.mae_pnl = 0.0
         position.last_pnl = 0.0
@@ -3156,8 +3225,13 @@ class SPXIronCondor(Strategy):
             dte = int(position.settings.get("dte", self.parameters.get("dte", 0)))
             should_close = dte == 0 or self._is_expiring_today(position_id=position.position_id)
             if position.position_open and should_close:
+                exit_reason = (
+                    "EOD_CLOSE"
+                    if position.pending_exit_reason in PROFIT_BOUNDED_EXIT_REASONS
+                    else (position.pending_exit_reason or "EOD_CLOSE")
+                )
                 self._close_all_options(
-                    exit_reason=position.pending_exit_reason or "EOD_CLOSE", position_id=position.position_id)
+                    exit_reason=exit_reason, position_id=position.position_id)
         for follower in getattr(self, "_attached_strategies", ()):
             try:
                 follower.before_market_closes()
@@ -3177,7 +3251,13 @@ class SPXIronCondor(Strategy):
         """Handle unexpected shutdowns gracefully."""
         logger.warning("Abrupt shutdown detected. Attempting to close positions.")
         if self._position_open:
-            self._close_all_options(exit_reason=getattr(self, "_pending_exit_reason", None) or "ABRUPT_CLOSE")
+            pending = getattr(self, "_pending_exit_reason", None)
+            exit_reason = (
+                "ABRUPT_CLOSE"
+                if pending in PROFIT_BOUNDED_EXIT_REASONS
+                else (pending or "ABRUPT_CLOSE")
+            )
+            self._close_all_options(exit_reason=exit_reason)
         for follower in getattr(self, "_attached_strategies", ()):
             try:
                 follower.on_abrupt_closing()

@@ -8,9 +8,15 @@ from dashboard.broker_client import TradierClient
 def test_cancel_timeout_is_failure() -> None:
     client = TradierClient("token", "account")
     working = [{"id": "1", "status": "open"}]
+    clock = [0.0]
+    def monotonic():
+        val = clock[0]
+        clock[0] += 5.0
+        return val
+
     with patch.object(client, "_fetch_all_orders", return_value=working), \
          patch("dashboard.broker_client.requests.delete") as delete, \
-         patch("dashboard.broker_client.time.monotonic", side_effect=[0, 4]):
+         patch("dashboard.broker_client.time.monotonic", side_effect=monotonic):
         delete.return_value.status_code = 200
         assert client.emergency_cancel_orders() is False
 
@@ -28,14 +34,20 @@ def test_flatten_stops_if_cancellation_unverified() -> None:
 def test_flatten_timeout_cannot_report_success_from_positions_alone() -> None:
     client = TradierClient("token", "account")
     positions = [{"symbol": "ABC", "quantity": 1}]
+    clock = [0.0]
+    def monotonic():
+        val = clock[0]
+        clock[0] += 15.0
+        return val
+
     with patch.object(client, "emergency_cancel_orders", return_value=True), \
          patch.object(client, "_fetch_all_positions", side_effect=[positions, []]), \
          patch("dashboard.broker_client.requests.post") as post, \
-         patch("dashboard.broker_client.time.monotonic", side_effect=[0, 11]):
+         patch("dashboard.broker_client.time.monotonic", side_effect=monotonic):
         post.return_value.status_code = 200
         post.return_value.json.return_value = {}
         assert client.emergency_flatten_positions() is False
-        assert "__verification__" in client.flatten_failures
+        assert client.flatten_failures.get("ABC") == "Broker acceptance could not be verified"
 
 
 def test_failed_cancel_followed_by_terminal_order_closes_filled_position() -> None:
@@ -50,7 +62,7 @@ def test_failed_cancel_followed_by_terminal_order_closes_filled_position() -> No
          patch("dashboard.broker_client.time.sleep"):
         delete.return_value.status_code = 400
         post.return_value.status_code = 200
-        post.return_value.json.return_value = {}
+        post.return_value.json.return_value = {"order": {"id": 12345, "status": "ok"}}
         assert client.emergency_flatten_positions()
         post.assert_called_once()
 

@@ -178,6 +178,7 @@ def _finite_positive(value: Real, name: str) -> float:
 
 
 __all__ = [
+    "DEFAULT_MFE_TRAIL_LOCK_FRACTION",
     "calculate_realized_vol_ratio",
     "calculate_zscore",
     "credit_strategy_pnl",
@@ -376,6 +377,9 @@ def resolve_orb_structure(
     return "iron_condor"
 
 
+DEFAULT_MFE_TRAIL_LOCK_FRACTION: float = 0.65
+
+
 def evaluate_mfe_ratchet(
     entry_credit_cash: Real,
     mfe_pnl: Real,
@@ -383,7 +387,7 @@ def evaluate_mfe_ratchet(
     *,
     breakeven_trigger_pct: Real = 0.30,
     trail_trigger_pct: Real = 0.45,
-    trail_lock_fraction: Real = 0.65,
+    trail_lock_fraction: Real = DEFAULT_MFE_TRAIL_LOCK_FRACTION,
 ) -> str | None:
     """Evaluate dynamic MFE profit-ratchet exit to prevent winning trades from turning into losses:
 

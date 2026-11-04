@@ -599,6 +599,10 @@ def record_trade_addition(
     _append_trade_event(log_path, addition, event_id)
 
 
+def realized_outcome(net_pnl: float, tolerance: float = 0.005) -> str:
+    return "WIN" if net_pnl > tolerance else "LOSS" if net_pnl < -tolerance else "SCRATCH"
+
+
 def record_trade_exit(
     trade_id: str,
     strategy_name: str,
@@ -616,6 +620,10 @@ def record_trade_exit(
     quantity: Optional[int] = None,
     legs: Optional[int] = None,
     event_id: Optional[str] = None,
+    exit_trigger: Optional[str] = None,
+    decision_gross_pnl: Optional[float] = None,
+    decision_net_pnl: Optional[float] = None,
+    decision_evidence: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Record a trade exit event to logs/trades.jsonl with fee and net P&L tracking."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -649,6 +657,8 @@ def record_trade_exit(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "strategy": strategy_name,
         "exit_reason": exit_reason,
+        "exit_trigger": exit_trigger or exit_reason,
+        "outcome": realized_outcome(calc_net),
         "gross_pnl": calc_gross,
         "fees": calc_fees,
         "pnl": calc_net,
@@ -658,6 +668,11 @@ def record_trade_exit(
         "closing_cash": closing_cash,
         "status": "CLOSED",
     }
+    for key, value in (("decision_gross_pnl", decision_gross_pnl),
+                       ("decision_net_pnl", decision_net_pnl),
+                       ("decision_evidence", decision_evidence)):
+        if value is not None:
+            exit_data[key] = value
     if mfe_pnl is not None:
         exit_data["mfe_pnl"] = float(mfe_pnl)
     if mae_pnl is not None:

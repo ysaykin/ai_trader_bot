@@ -365,6 +365,181 @@ class IronCondorTests(unittest.TestCase):
             "ask": quote_by_strike[asset.strike] + 0.05,
         }
 
+    def test_profit_target_replay_withdraws_instead_of_realizing_loss(self) -> None:
+        fixture = json.loads((ROOT / "tests/fixtures/profit_target_exit_loss_2026_11_04.json").read_text())
+        for trade in fixture:
+            with self.subTest(trade=trade["trade_alias"]):
+                entry = {json.loads(leg["asset_key"])["strike"]: leg["fill_price"]
+                         for leg in trade["packages"][0]["legs"]}
+                strikes = trade["strikes"]
+                ordered = [strikes[k] for k in ("long_put", "short_put", "short_call", "long_call")]
+                previous = set(self.strategy._position_states)
+                self.open_filled_position(prices=tuple(entry[strike] for strike in ordered))
+                position = self.strategy._runtime((set(self.strategy._position_states) - previous).pop())
+                position.settings.update(wing_width=5, profit_target=0.4, stop_loss_mult=1.3)
+                owned = list(position.owned_legs)
+                initial_limit = trade["packages"][1]["limit_price"]
+                with patch.object(self.strategy, "_package_price", return_value=initial_limit):
+                    self.strategy._close_all_options(exit_reason="PROFIT_TARGET", position_id=position.position_id)
+                self.assertEqual(self.strategy.submit_order.call_count, 1)
+                ledger = self.strategy._position_ledger
+                basket = self.strategy._latest_position_basket(position, {"close"})
+                self.assertEqual(basket.limit_price, initial_limit)
+                children = [SimpleNamespace(identifier=f"close-{trade['trade_alias']}-{index}", status="canceled",
+                            asset=self.strategy._asset_registry[leg["asset_key"]], side=leg["side"],
+                            exec_quantity=0, avg_fill_price=0)
+                            for index, leg in enumerate(basket.legs)]
+                parent = SimpleNamespace(identifier=f"parent-{trade['trade_alias']}", status="canceled", child_orders=children)
+                ledger.bind_broker_submission(basket.package_id, parent)
+                self.strategy._reconcile_inflight_orders([parent])
+                self.assertEqual(ledger.get_basket(basket.package_id).state, "canceled")
+                self.strategy.get_datetime.return_value = datetime.fromisoformat(basket.created_at) + timedelta(seconds=120)
+                market_debit = trade["packages"][2]["limit_price"] - 0.05
+                with patch.object(self.strategy, "_package_price", return_value=market_debit):
+                    self.strategy._close_all_options(position_id=position.position_id)
+                self.assertEqual(self.strategy.submit_order.call_count, 1)
+                self.assertFalse(position.exit_requested)
+                self.assertIsNone(ledger.get_position(position.position_id).exit_reason)
+                self.assertEqual(position.owned_legs, owned)
+                close_fills = {json.loads(leg["asset_key"])["strike"]: leg["fill_price"]
+                               for leg in trade["packages"][2]["legs"]}
+                mids = [close_fills[strike] for strike in ordered]
+                mids[2] -= 0.05
+                by_strike = dict(zip((95, 100, 110, 115), mids))
+                self.strategy.get_quote.side_effect = lambda asset: {
+                    "bid": by_strike[asset.strike], "ask": by_strike[asset.strike]}
+                with patch.object(self.strategy, "_is_expiring_today", return_value=False):
+                    self.strategy._manage_position(position.position_id)
+                self.assertEqual(self.strategy.submit_order.call_count, 1)
+                self.strategy.submit_order.reset_mock()
+
+    def test_profit_ceiling_and_protective_exit(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        position.settings["wing_width"] = 5
+        legs = [(asset, -qty) for asset, qty in position.owned_legs]
+        with patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
+            self.assertEqual(self.strategy._profit_close_debit_ceiling(position, legs), 1.96)
+            with patch.object(self.strategy, "_package_price", return_value=2.69), \
+                 patch.object(self.strategy, "_submit_package", return_value=[]) as submit:
+                self.strategy._close_all_options(exit_reason="STOP_LOSS", position_id=position.position_id)
+            self.assertEqual(submit.call_args.kwargs["price"], 2.69)
+
+    def test_profit_target_reprice_step_clamped_to_ceiling(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        position.settings["wing_width"] = 5
+        package_id = self.record_pending_close()
+        self.strategy._position_ledger.record_terminal_status(package_id, "canceled")
+        with patch.object(self.strategy, "_package_price", return_value=1.94), \
+             patch.object(self.strategy, "_submit_package", return_value=[]) as submit, \
+             patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
+            self.strategy._close_all_options(exit_reason="PROFIT_TARGET", position_id=position.position_id)
+        self.assertEqual(submit.call_args.kwargs["price"], 1.96)
+        self.assertEqual(submit.call_args.kwargs["reprice_count"], 1)
+
+    def test_pending_profit_target_does_not_cap_or_withdraw_eod_close(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        position.settings["wing_width"] = 5.0
+        position.settings["dte"] = 0
+        package_id = self.record_pending_close()
+        self.strategy._position_ledger.record_terminal_status(package_id, "canceled")
+        position.exit_requested = True
+        position.pending_exit_reason = "PROFIT_TARGET"
+        self.strategy._position_ledger.update_position(position.position_id, exit_reason="PROFIT_TARGET")
+        with patch.object(self.strategy, "_is_expiring_today", return_value=True), \
+             patch.object(self.strategy, "_package_price", return_value=2.50), \
+             patch.object(self.strategy, "_submit_package", return_value=[]) as submit, \
+             patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
+            self.strategy.before_market_closes()
+        submit.assert_called_once()
+        self.assertAlmostEqual(submit.call_args.kwargs["price"], 2.55)
+        self.assertTrue(position.exit_requested)
+        self.assertEqual(position.pending_exit_reason, "EOD_CLOSE")
+        self.assertEqual(self.strategy._position_ledger.get_position(position.position_id).exit_reason, "EOD_CLOSE")
+
+    def test_pending_profit_target_does_not_cap_or_withdraw_stop_loss(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        position.settings["wing_width"] = 5.0
+        package_id = self.record_pending_close()
+        self.strategy._position_ledger.record_terminal_status(package_id, "canceled")
+        position.exit_requested = True
+        position.pending_exit_reason = "PROFIT_TARGET"
+        self.strategy._position_ledger.update_position(position.position_id, exit_reason="PROFIT_TARGET")
+        with patch.object(self.strategy, "_package_price", return_value=2.50), \
+             patch.object(self.strategy, "_submit_package", return_value=[]) as submit, \
+             patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
+            self.strategy._close_all_options(exit_reason="STOP_LOSS", position_id=position.position_id)
+        submit.assert_called_once()
+        self.assertAlmostEqual(submit.call_args.kwargs["price"], 2.55)
+        self.assertTrue(position.exit_requested)
+        self.assertEqual(position.pending_exit_reason, "STOP_LOSS")
+        self.assertEqual(self.strategy._position_ledger.get_position(position.position_id).exit_reason, "STOP_LOSS")
+
+    def test_pending_profit_target_does_not_cap_or_withdraw_abrupt_close(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        position.settings["wing_width"] = 5.0
+        package_id = self.record_pending_close()
+        self.strategy._position_ledger.record_terminal_status(package_id, "canceled")
+        position.exit_requested = True
+        position.pending_exit_reason = "PROFIT_TARGET"
+        self.strategy._position_ledger.update_position(position.position_id, exit_reason="PROFIT_TARGET")
+        with patch.object(self.strategy, "_package_price", return_value=2.50), \
+             patch.object(self.strategy, "_submit_package", return_value=[]) as submit, \
+             patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
+            self.strategy.on_abrupt_closing()
+        submit.assert_called_once()
+        self.assertAlmostEqual(submit.call_args.kwargs["price"], 2.55)
+        self.assertTrue(position.exit_requested)
+        self.assertEqual(position.pending_exit_reason, "ABRUPT_CLOSE")
+        self.assertEqual(self.strategy._position_ledger.get_position(position.position_id).exit_reason, "ABRUPT_CLOSE")
+
+    def test_missing_profit_ceiling_withdraws(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        position.settings["wing_width"] = 5
+        with patch.object(self.strategy, "_hydrate_from_ledger"), \
+             patch.object(self.strategy, "_profit_close_debit_ceiling", return_value=None), \
+             patch.object(self.strategy, "_package_price", return_value=1), \
+             patch.object(self.strategy, "_submit_package") as submit:
+            self.strategy._close_all_options(exit_reason="PROFIT_TARGET", position_id=position.position_id)
+        submit.assert_not_called()
+        self.assertFalse(position.exit_requested)
+        self.assertIsNone(self.strategy._position_ledger.get_position(position.position_id).exit_reason)
+
+    def test_quote_timestamp_and_decision_capture(self) -> None:
+        self.open_filled_position()
+        position = self.strategy._runtime()
+        timestamp = datetime(2026, 11, 4, tzinfo=timezone.utc)
+        self.assertEqual(self.strategy._quote_timestamp({"bid_date": timestamp}), timestamp.isoformat())
+        self.assertEqual(self.strategy._quote_timestamp(SimpleNamespace(timestamp=timestamp)), timestamp.isoformat())
+        asset, quantity = position.owned_legs[0]
+        self.strategy._capture_exit_decision(position, "PROFIT_TARGET", 89, 3.2, 85.8, 64.8,
+            [{"asset": asset, "signed_quantity": quantity, "bounds": (0.1, 0.2),
+              "midpoint": 0.15, "quote_time": timestamp.isoformat()}])
+        self.assertEqual(position.pending_decision["legs"][0]["quote_time"], timestamp.isoformat())
+        self.assertEqual(position.pending_decision["threshold"], 64.8)
+        self.strategy._reset_flat_state(position.position_id)
+        self.assertIsNone(position.pending_decision)
+
+    def test_realized_outcome_and_decision_evidence(self) -> None:
+        from trade_logger import record_trade_exit, realized_outcome
+        self.assertEqual([realized_outcome(n) for n in (1.0, -1.0, 0.005, -0.005)],
+                         ["WIN", "LOSS", "SCRATCH", "SCRATCH"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trades.jsonl"
+            record_trade_exit("trade", "strategy", "PROFIT_TARGET", -10, fees=1,
+                              gross_pnl=-9, net_pnl=-10, log_path=path,
+                              decision_net_pnl=85.8, decision_evidence={"legs": []})
+            event = json.loads(path.read_text())
+        self.assertEqual(event["exit_trigger"], "PROFIT_TARGET")
+        self.assertEqual(event["outcome"], "LOSS")
+        self.assertEqual(event["decision_net_pnl"], 85.8)
+        self.assertEqual(event["decision_evidence"], {"legs": []})
+
     def test_zero_credit_does_not_access_missing_framework_counter(self) -> None:
         self.open_filled_position(prices=(1.0, 1.0, 1.0, 1.0))
         self.assertEqual(self.strategy._entry_credit, 0.0)
@@ -888,6 +1063,7 @@ class IronCondorTests(unittest.TestCase):
         self.assertEqual(len(self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())), 1)
 
         # 2. Close Trade #1
+        self.strategy.get_quote.side_effect = lambda asset: {"bid": 0.95, "ask": 1.05}
         self.strategy._close_all_options(exit_reason="PROFIT_TARGET")
         self.strategy.submit_order.assert_called_once()
         self.strategy.submit_order.reset_mock()
@@ -950,6 +1126,7 @@ class IronCondorTests(unittest.TestCase):
         self.assertTrue(self.strategy._position_open)
 
         # 4. Close Trade #2
+        self.strategy.get_quote.side_effect = lambda asset: {"bid": 0.95, "ask": 1.05}
         self.strategy._close_all_options(exit_reason="PROFIT_TARGET")
         self.strategy.submit_order.assert_called_once()
         close_basket = next(

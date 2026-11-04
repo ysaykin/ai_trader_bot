@@ -331,13 +331,16 @@ class StrategyBroExecutionTests(unittest.TestCase):
 
     def test_incubator_grid_covers_configured_run_times(self) -> None:
         """All incubator strategies (including IC_V25..IC_V29) run on the default screening schedule through 15:30."""
-        grid = incubator.INCUBATOR_GRID_20
-        run_times = {v["entry_time"] for v in grid}
-        self.assertIn("15:30", list(run_times)[0])
-        self.assertIn("09:45", list(run_times)[0])
-        specs = incubator.get_incubator_specs()
-        for s in specs:
-            self.assertIn("15:30", str(s.get("entry_time", "")))
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NEURAL_STRATEGY_ENTRY_TIME", None)
+            os.environ.pop("IC_ENTRY_TIME", None)
+            grid = incubator.INCUBATOR_GRID_20
+            run_times = {v["entry_time"] for v in grid}
+            self.assertIn("15:30", list(run_times)[0])
+            self.assertIn("09:45", list(run_times)[0])
+            specs = incubator.get_incubator_specs()
+            for s in specs:
+                self.assertIn("15:30", str(s.get("entry_time", "")))
 
 
 class DynamicSuiteStrategiesTests(unittest.TestCase):

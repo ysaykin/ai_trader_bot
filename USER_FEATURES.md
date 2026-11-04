@@ -91,6 +91,10 @@ This document is the **single source of truth** for all user-facing features sup
 #### `ENG-06` & `ENG-07`: Automated Profit Target & Stop Loss
 * **User Story**: As a trader, I want predefined exit rules to lock in profits early (e.g. 30% or 50% of credit) and cut losses if market moves sharply against a wing (e.g. 2.0x credit).
 * **Parameters**: `IC_PROFIT_TARGET` (default: `0.30`), `IC_STOP_LOSS_MULT` (default: `2.0`).
+* **Safeguards**:
+  * **Debit Ceilings & Withdrawal**: Discretionary profit targets (`PROFIT_TARGET`, `MFE_TRAIL_LOCK`) enforce a maximum debit ceiling based on confirmed opening credit. If close repricing exceeds this ceiling due to market movement or spread widening, the order package is canceled and withdrawn back to active position management rather than locking in a loss.
+  * **Protective Exit Priority**: Emergency and protective closes (`STOP_LOSS`, `EOD_CLOSE`, `ABRUPT_CLOSE`) override pending profit targets without debit capping or withdrawal.
+  * **Fill-Based Outcome Attribution**: Trade logs and analytics decouple trigger reasons from final fill-based P&L, ensuring outcome labels reflect verified closing fills.
 * **GUI Manifestation**: Progress bar showing current P&L relative to the Take-Profit and Stop-Loss boundaries, color-coded green/red.
 
 #### `ENG-08`: End-of-Day Auto-Close Safety Net
