@@ -495,6 +495,7 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
     trades_by_id: dict[str, dict[str, Any]] = {}
 
     verified_trade_ids: set[str] = set()
+    fee_incomplete_trade_ids: set[str] = set()
     try:
         lp = resolve_ledger_path()
         if lp.exists():
@@ -504,6 +505,18 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
                     "SELECT DISTINCT trade_id FROM packages WHERE trade_id IS NOT NULL AND broker_parent_id IS NOT NULL"
                 ).fetchall()
                 verified_trade_ids = {r[0] for r in rows if r[0]}
+                try:
+                    s_rows = conn.execute(
+                        "SELECT trade_id, fees_complete FROM settlement_reconciliations WHERE trade_id IS NOT NULL"
+                    ).fetchall()
+                    for r in s_rows:
+                        if r[0]:
+                            if r[1] == 1:
+                                verified_trade_ids.add(r[0])
+                            else:
+                                fee_incomplete_trade_ids.add(r[0])
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -603,6 +616,11 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["partition"] = "quarantined"
             t["source"] = "synthetic"
             t["reconciliation_status"] = "QUARANTINED"
+            t["is_eligible"] = False
+        elif tid in fee_incomplete_trade_ids or t.get("fees_complete") is False:
+            t["partition"] = "accepted"
+            t["source"] = "fee_incomplete"
+            t["reconciliation_status"] = "FEE_INCOMPLETE"
             t["is_eligible"] = False
         elif (
             tid in verified_trade_ids

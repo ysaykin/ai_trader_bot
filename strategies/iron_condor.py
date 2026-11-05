@@ -800,14 +800,19 @@ class SPXIronCondor(Strategy):
                     )
                 return
             if position.owned_legs and self._all_owned_legs_expired(position_id=position.position_id):
-                self._position_ledger.expire_strategy_positions(
+                retired = self._position_ledger.expire_strategy_positions(
                     self._strategy_id(), self.get_datetime().date(), position_id=position.position_id
                 )
                 self._hydrate_from_ledger()
-                if not self._position_quantities(position):
-                    self._record_exit_log("EXPIRED", float(getattr(position, "last_pnl", 0.0)), position_id=position.position_id)
+                if retired > 0 and not self._position_quantities(position):
+                    self._position_ledger.flush_outbox()
                     self._reset_flat_state(position_id=position.position_id)
                     return
+                else:
+                    logger.info(
+                        "Position %s has expired legs but is awaiting settlement evidence; retaining inventory.",
+                        position.position_id,
+                    )
             if self._position_quantities(position):
                 logger.warning("Owned ledger contracts are not visible at the broker; retaining state.")
                 return
@@ -1983,10 +1988,16 @@ class SPXIronCondor(Strategy):
                     and not any(self._position_ledger.is_inflight(b) for b in self._position_baskets(position))
                     and not self._filter_owned_option_positions(positions, position_id=position.position_id)
                     and self._all_owned_legs_expired(position_id=position.position_id)):
-                self._position_ledger.expire_strategy_positions(
+                retired = self._position_ledger.expire_strategy_positions(
                     self._strategy_id(), self.get_datetime().date(), position_id=position.position_id)
-                self._record_exit_log("EXPIRED", position.last_pnl, position_id=position.position_id)
-                self._reset_flat_state(position_id=position.position_id)
+                if retired > 0:
+                    self._position_ledger.flush_outbox()
+                    self._reset_flat_state(position_id=position.position_id)
+                else:
+                    logger.info(
+                        "Startup: Position %s has expired legs but is awaiting settlement evidence; retaining inventory.",
+                        position.position_id,
+                    )
         self._hydrate_from_ledger()
         ledger_totals = self._position_ledger.all_owned_quantities()
         inflight = any(

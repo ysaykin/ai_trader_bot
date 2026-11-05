@@ -19,7 +19,7 @@ from typing import Any
 
 from strategies.iron_condor_math import max_defined_loss
 
-ACTIVE_STATES = frozenset({"submitted", "partial", "open", "closing"})
+ACTIVE_STATES = frozenset({"submitted", "partial", "open", "closing", "awaiting_settlement"})
 TERMINAL_STATES = frozenset({"closed", "canceled", "expired", "failed", "rejected"})
 
 
@@ -258,6 +258,59 @@ class PositionLedger:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS settlement_values (
+                    expiration TEXT NOT NULL,
+                    symbol TEXT NOT NULL DEFAULT 'XSP',
+                    value REAL NOT NULL,
+                    source_url TEXT NOT NULL,
+                    retrieved_at TEXT NOT NULL,
+                    response_hash TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    PRIMARY KEY (expiration, symbol)
+                );
+                CREATE TABLE IF NOT EXISTS broker_cash_evidence (
+                    activity_id TEXT PRIMARY KEY,
+                    account_scope TEXT NOT NULL,
+                    expiration TEXT NOT NULL,
+                    symbol TEXT NOT NULL DEFAULT 'XSP',
+                    cash_cents INTEGER NOT NULL,
+                    disposition_confirmed INTEGER NOT NULL DEFAULT 1,
+                    description TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fee_evidence (
+                    identity TEXT PRIMARY KEY,
+                    trade_id TEXT,
+                    package_id TEXT,
+                    position_id TEXT,
+                    amount_cents INTEGER,
+                    complete INTEGER NOT NULL DEFAULT 1,
+                    category TEXT NOT NULL DEFAULT 'execution',
+                    provenance TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS settlement_reconciliations (
+                    position_id TEXT PRIMARY KEY,
+                    strategy_id TEXT NOT NULL,
+                    trade_id TEXT,
+                    expiration TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    settlement_cash_cents INTEGER,
+                    gross_cents INTEGER,
+                    fees_cents INTEGER,
+                    net_cents INTEGER,
+                    known_fees_cents INTEGER NOT NULL DEFAULT 0,
+                    fees_complete INTEGER NOT NULL DEFAULT 1,
+                    reconciled_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS outbox (
+                    outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    dispatched_at TEXT
+                );
                 """
             )
             self._add_columns(
@@ -319,6 +372,16 @@ class PositionLedger:
                     ON legs(broker_order_id);
                 CREATE INDEX IF NOT EXISTS legs_broker_parent
                     ON legs(broker_parent_id);
+                CREATE INDEX IF NOT EXISTS settlement_values_exp
+                    ON settlement_values(expiration);
+                CREATE INDEX IF NOT EXISTS broker_cash_exp
+                    ON broker_cash_evidence(expiration);
+                CREATE INDEX IF NOT EXISTS fee_evidence_trade
+                    ON fee_evidence(trade_id);
+                CREATE INDEX IF NOT EXISTS fee_evidence_pos
+                    ON fee_evidence(position_id);
+                CREATE INDEX IF NOT EXISTS outbox_status
+                    ON outbox(status);
                 """
             )
             self._migrate_position_links()
@@ -389,12 +452,12 @@ class PositionLedger:
                     inventories[pid][str(leg["asset_key"])] += int(leg["filled_signed_quantity"])
 
     def _submission_position(self, package_id, strategy_id, intent, legs,
-                             position_id, replacement_of, now, settings) -> str:
+                             position_id, replacement_of, now, settings, trade_id=None) -> str:
         if intent == "open":
             pid = position_id or package_id
             self._connection.execute(
-                "INSERT INTO positions(position_id,strategy_id,settings,created_at) VALUES(?,?,?,?)",
-                (pid, strategy_id, json.dumps(dict(settings or {}), allow_nan=False), now),
+                "INSERT INTO positions(position_id,strategy_id,trade_id,settings,created_at) VALUES(?,?,?,?,?)",
+                (pid, strategy_id, str(trade_id) if trade_id is not None else None, json.dumps(dict(settings or {}), allow_nan=False), now),
             )
             return pid
         if position_id is None and replacement_of:
@@ -709,6 +772,7 @@ class PositionLedger:
         reprice_count: int = 0,
         created_at: datetime | str | None = None,
         position_id: str | None = None,
+        trade_id: str | None = None,
         settings: Mapping[str, Any] | None = None,
         submission_started: int | None = None,
     ) -> None:
@@ -746,7 +810,7 @@ class PositionLedger:
         with self._lock, self._connection:
             position_id = self._submission_position(
                 package_id, strategy_id, normalized_intent, normalized,
-                position_id, replacement_of, now, settings,
+                position_id, replacement_of, now, settings, trade_id=trade_id,
             )
             package_data = {
                 "package_id": package_id,
@@ -1379,33 +1443,426 @@ class PositionLedger:
             row = self._connection.execute(query, tuple(parameters)).fetchone()
             return self._basket_from_row(row) if row is not None else None
 
-    def expire_strategy_positions(self, strategy_id: str, as_of_date: date,
-                                  position_id: str | None = None) -> int:
-        """Mark past-expiration packages expired after broker confirms settlement."""
-        updated = 0
+    def record_settlement_value(self, settlement: Any) -> None:
+        """Store verified index settlement value in SQLite transaction."""
+        from decimal import Decimal
+        exp_str = str(settlement.expiration)[:10]
+        val = (
+            float(settlement.value)
+            if isinstance(settlement.value, (Decimal, int, float))
+            else float(str(settlement.value))
+        )
+        retrieved = str(
+            getattr(settlement, "retrieved_at", datetime.now(timezone.utc).isoformat())
+        )
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT OR REPLACE INTO settlement_values
+                   (expiration, symbol, value, source_url, retrieved_at, response_hash, category)
+                   VALUES (?, 'XSP', ?, ?, ?, ?, ?)""",
+                (
+                    exp_str,
+                    val,
+                    str(getattr(settlement, "source_url", "cboe.com")),
+                    retrieved,
+                    str(getattr(settlement, "response_hash", "")),
+                    str(getattr(settlement, "category", "official")),
+                ),
+            )
+
+    def record_broker_cash_evidence(self, evidence: Any) -> None:
+        """Store broker cash evidence in SQLite transaction."""
+        exp_str = str(evidence.expiration)[:10]
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection:
-            query = "SELECT package_id FROM packages WHERE strategy_id = ? AND state != 'expired'"
+            self._connection.execute(
+                """INSERT OR REPLACE INTO broker_cash_evidence
+                   (activity_id, account_scope, expiration, symbol, cash_cents, disposition_confirmed, description, created_at)
+                   VALUES (?, ?, ?, 'XSP', ?, ?, ?, ?)""",
+                (
+                    str(evidence.activity_id),
+                    str(evidence.account_scope),
+                    exp_str,
+                    int(evidence.cash_cents),
+                    1 if getattr(evidence, "disposition_confirmed", True) else 0,
+                    str(getattr(evidence, "description", "")),
+                    now,
+                ),
+            )
+
+    def record_fee_evidence(
+        self,
+        fee: Any,
+        *,
+        trade_id: str | None = None,
+        package_id: str | None = None,
+        position_id: str | None = None,
+    ) -> None:
+        """Store fee evidence in SQLite transaction."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT OR REPLACE INTO fee_evidence
+                   (identity, trade_id, package_id, position_id, amount_cents, complete, category, provenance, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(fee.identity),
+                    trade_id,
+                    package_id,
+                    position_id,
+                    int(fee.amount_cents) if fee.amount_cents is not None else None,
+                    1 if getattr(fee, "complete", True) else 0,
+                    str(getattr(fee, "category", "execution")),
+                    str(getattr(fee, "provenance", "")),
+                    now,
+                ),
+            )
+
+    def get_settlement_value(self, expiration: date | str, symbol: str = "XSP") -> Any | None:
+        """Retrieve stored settlement value for an expiration date."""
+        from decimal import Decimal
+        from strategies.xsp_settlement import SettlementValue
+        exp_str = str(expiration)[:10]
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM settlement_values WHERE expiration = ? AND symbol = ?",
+                (exp_str, symbol),
+            ).fetchone()
+            if row is None:
+                return None
+            try:
+                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            except Exception:
+                exp_date = expiration if isinstance(expiration, date) else date.fromisoformat(exp_str)
+            try:
+                retrieved_dt = datetime.fromisoformat(str(row["retrieved_at"]))
+            except Exception:
+                retrieved_dt = datetime.now(timezone.utc)
+            return SettlementValue(
+                expiration=exp_date,
+                value=Decimal(str(row["value"])),
+                source_url=str(row["source_url"]),
+                retrieved_at=retrieved_dt,
+                response_hash=str(row["response_hash"]),
+                category=str(row["category"]),
+            )
+
+    def get_broker_cash_evidence(
+        self,
+        expiration: date | str,
+        account_scope: str | None = None,
+        symbol: str = "XSP",
+    ) -> list[Any]:
+        """Retrieve stored broker cash evidence for an expiration date."""
+        from strategies.xsp_settlement import BrokerCashEvidence
+        exp_str = str(expiration)[:10]
+        query = "SELECT * FROM broker_cash_evidence WHERE expiration = ? AND symbol = ?"
+        args: list[Any] = [exp_str, symbol]
+        if account_scope is not None:
+            query += " AND account_scope = ?"
+            args.append(account_scope)
+        with self._lock:
+            rows = self._connection.execute(query, tuple(args)).fetchall()
+            results = []
+            for row in rows:
+                try:
+                    exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                except Exception:
+                    exp_date = expiration if isinstance(expiration, date) else date.fromisoformat(exp_str)
+                results.append(
+                    BrokerCashEvidence(
+                        account_scope=str(row["account_scope"]),
+                        activity_id=str(row["activity_id"]),
+                        expiration=exp_date,
+                        cash_cents=int(row["cash_cents"]),
+                        disposition_confirmed=bool(row["disposition_confirmed"]),
+                    )
+                )
+            return results
+
+    def get_fee_evidence(
+        self,
+        trade_id: str | None = None,
+        position_id: str | None = None,
+    ) -> list[Any]:
+        """Retrieve stored fee evidence for a trade or position."""
+        from strategies.xsp_settlement import FeeEvidence
+        query = "SELECT * FROM fee_evidence WHERE 1=1"
+        args: list[Any] = []
+        if trade_id is not None:
+            query += " AND trade_id = ?"
+            args.append(trade_id)
+        if position_id is not None:
+            query += " AND position_id = ?"
+            args.append(position_id)
+        with self._lock:
+            rows = self._connection.execute(query, tuple(args)).fetchall()
+            return [
+                FeeEvidence(
+                    identity=str(row["identity"]),
+                    amount_cents=int(row["amount_cents"]) if row["amount_cents"] is not None else None,
+                    complete=bool(row["complete"]),
+                    category=str(row["category"]),
+                    provenance=str(row["provenance"] or ""),
+                )
+                for row in rows
+            ]
+
+    def get_settlement_reconciliation(self, position_id: str) -> dict[str, Any] | None:
+        """Return reconciled settlement record for a position if available."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM settlement_reconciliations WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def reconcile_settlement(
+        self,
+        strategy_id: str,
+        as_of_date: date,
+        *,
+        position_id: str | None = None,
+        settlement: Any | None = None,
+        broker_cash: Any | None = None,
+        fees: Iterable[Any] | None = None,
+        fee_coverage_complete: bool = True,
+    ) -> list[Any]:
+        """Transactionally reconcile past-expiration positions against broker evidence."""
+        from strategies.xsp_settlement import (
+            parse_asset_key_to_leg,
+            reconcile_lifecycle,
+        )
+
+        if settlement is not None:
+            self.record_settlement_value(settlement)
+        if broker_cash is not None:
+            self.record_broker_cash_evidence(broker_cash)
+        if fees is not None:
+            for f in fees:
+                self.record_fee_evidence(f, position_id=position_id)
+
+        now = datetime.now(timezone.utc).isoformat()
+        results = []
+
+        with self._lock, self._connection:
+            query = "SELECT * FROM packages WHERE strategy_id = ? AND state != 'expired'"
             args = [strategy_id]
             if position_id is not None:
                 query += " AND position_id = ?"
                 args.append(position_id)
-            packages = self._connection.execute(query, args).fetchall()
-            for package in packages:
-                package_id = str(package["package_id"])
-                legs = self._connection.execute(
-                    "SELECT asset_key FROM legs WHERE package_id = ?", (package_id,)
-                ).fetchall()
-                if legs and all(
-                    self._is_expired_asset_key(str(leg["asset_key"]), as_of_date)
-                    for leg in legs
-                ):
+            query += " ORDER BY created_at, package_id"
+            packages = self._connection.execute(query, tuple(args)).fetchall()
+
+            pos_groups: dict[str, list[sqlite3.Row]] = defaultdict(list)
+            for pkg in packages:
+                pid = str(pkg["position_id"]) if pkg["position_id"] else str(pkg["package_id"])
+                pos_groups[pid].append(pkg)
+
+            for pid, pkgs in pos_groups.items():
+                pkg_ids = [str(p["package_id"]) for p in pkgs]
+                all_legs = []
+                for p in pkgs:
+                    p_legs = self._connection.execute(
+                        "SELECT * FROM legs WHERE package_id = ?", (str(p["package_id"]),)
+                    ).fetchall()
+                    all_legs.extend(p_legs)
+
+                if not all_legs:
+                    continue
+
+                if not all(self._is_expired_asset_key(str(l["asset_key"]), as_of_date) for l in all_legs):
+                    continue
+
+                try:
+                    first_key = json.loads(str(all_legs[0]["asset_key"]))
+                    exp_date = datetime.strptime(str(first_key["expiration"])[:10], "%Y-%m-%d").date()
+                except Exception:
+                    continue
+
+                active_settlement = settlement or self.get_settlement_value(exp_date)
+                cash_evidence_list = (
+                    [broker_cash]
+                    if broker_cash is not None
+                    else self.get_broker_cash_evidence(exp_date)
+                )
+
+                if active_settlement is None or not cash_evidence_list:
+                    for p_id in pkg_ids:
+                        self._connection.execute(
+                            "UPDATE packages SET state = 'awaiting_settlement', updated_at = ? WHERE package_id = ? AND state != 'awaiting_settlement'",
+                            (now, p_id),
+                        )
+                    continue
+
+                active_cash = cash_evidence_list[0]
+
+                leg_quantities: dict[str, int] = defaultdict(int)
+                for l in all_legs:
+                    leg_quantities[str(l["asset_key"])] += int(l["filled_signed_quantity"])
+
+                remaining_legs = [
+                    parse_asset_key_to_leg(k, q)
+                    for k, q in leg_quantities.items()
+                    if q != 0
+                ]
+
+                trade_id = next((p["trade_id"] for p in pkgs if p["trade_id"]), None)
+                opening_cash_dollars = sum(float(p["opening_cash_flow"] or 0.0) for p in pkgs if p["intent"] in {"open", "add"})
+                closing_cash_dollars = sum(float(p["closing_cash_flow"] or 0.0) for p in pkgs if p["intent"] in {"trim", "close"})
+                opening_cash_cents = int(round(opening_cash_dollars * 100))
+                closing_cash_cents = int(round(closing_cash_dollars * 100))
+
+                stored_fees = self.get_fee_evidence(trade_id=trade_id, position_id=pid)
+                active_fees = fees if fees is not None else stored_fees
+
+                lifecycle = reconcile_lifecycle(
+                    opening_cash_cents=opening_cash_cents,
+                    closing_cash_cents=closing_cash_cents,
+                    remaining_legs=remaining_legs,
+                    settlement=active_settlement,
+                    broker_cash=active_cash,
+                    fees=active_fees,
+                    fee_coverage_complete=fee_coverage_complete,
+                    expiration_passed=True,
+                )
+
+                if lifecycle.reconciliation_complete:
+                    for p_id in pkg_ids:
+                        self._connection.execute(
+                            "UPDATE packages SET state = 'expired', updated_at = ? WHERE package_id = ?",
+                            (now, p_id),
+                        )
                     self._connection.execute(
-                        "UPDATE packages SET state = 'expired', updated_at = ? WHERE package_id = ?",
-                        (now, package_id),
+                        """INSERT OR REPLACE INTO settlement_reconciliations
+                           (position_id, strategy_id, trade_id, expiration, outcome,
+                            settlement_cash_cents, gross_cents, fees_cents, net_cents,
+                            known_fees_cents, fees_complete, reconciled_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            pid,
+                            strategy_id,
+                            trade_id,
+                            str(exp_date),
+                            lifecycle.outcome,
+                            lifecycle.settlement_cash_cents,
+                            lifecycle.gross_cents,
+                            lifecycle.fees_cents,
+                            lifecycle.net_cents,
+                            lifecycle.known_fees_cents,
+                            1 if lifecycle.fees_complete else 0,
+                            now,
+                        ),
                     )
-                    updated += 1
-        return updated
+                    outbox_payload = {
+                        "event": "EXIT",
+                        "trade_id": trade_id or pid,
+                        "strategy": strategy_id,
+                        "exit_reason": lifecycle.outcome,
+                        "outcome": lifecycle.outcome,
+                        "gross_pnl": (lifecycle.gross_cents / 100.0) if lifecycle.gross_cents is not None else None,
+                        "fees": (lifecycle.fees_cents / 100.0) if lifecycle.fees_cents is not None else (lifecycle.known_fees_cents / 100.0),
+                        "net_pnl": (lifecycle.net_cents / 100.0) if lifecycle.net_cents is not None else None,
+                        "known_fees": lifecycle.known_fees_cents / 100.0,
+                        "fees_complete": lifecycle.fees_complete,
+                        "status": "CLOSED",
+                        "source": "broker_verified",
+                        "reconciliation_status": "VERIFIED" if lifecycle.fees_complete else "FEE_INCOMPLETE",
+                    }
+                    self._connection.execute(
+                        "INSERT INTO outbox (event_type, payload, status, created_at) VALUES ('EXIT', ?, 'pending', ?)",
+                        (json.dumps(outbox_payload), now),
+                    )
+                    for p_id in pkg_ids:
+                        self._connection.execute(
+                            "INSERT OR IGNORE INTO journal_events (package_id, event) VALUES (?, 'EXIT')",
+                            (p_id,),
+                        )
+                    results.append(lifecycle)
+                else:
+                    for p_id in pkg_ids:
+                        self._connection.execute(
+                            "UPDATE packages SET state = 'awaiting_settlement', updated_at = ? WHERE package_id = ? AND state != 'awaiting_settlement'",
+                            (now, p_id),
+                        )
+            return results
+
+    def expire_strategy_positions(
+        self,
+        strategy_id: str,
+        as_of_date: date,
+        position_id: str | None = None,
+        *,
+        settlement: Any | None = None,
+        broker_cash: Any | None = None,
+        fees: Iterable[Any] | None = None,
+        fee_coverage_complete: bool = True,
+    ) -> int:
+        """Mark past-expiration packages expired after broker confirms settlement."""
+        with self._lock:
+            before_query = "SELECT COUNT(*) FROM packages WHERE strategy_id = ? AND state = 'expired'"
+            before_args = [strategy_id]
+            if position_id is not None:
+                before_query += " AND position_id = ?"
+                before_args.append(position_id)
+            before_count = self._connection.execute(before_query, tuple(before_args)).fetchone()[0]
+
+            self.reconcile_settlement(
+                strategy_id,
+                as_of_date,
+                position_id=position_id,
+                settlement=settlement,
+                broker_cash=broker_cash,
+                fees=fees,
+                fee_coverage_complete=fee_coverage_complete,
+            )
+
+            after_count = self._connection.execute(before_query, tuple(before_args)).fetchone()[0]
+            return max(0, after_count - before_count)
+
+    def flush_outbox(self, log_path: Path | None = None) -> int:
+        """Dispatch pending outbox records to trades.jsonl atomically."""
+        from trade_logger import record_trade_exit
+        from strategies.runtime_records import resolve_record_path
+
+        target_path = (
+            Path(log_path)
+            if log_path is not None
+            else resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
+        )
+        dispatched = 0
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT outbox_id, event_type, payload FROM outbox WHERE status = 'pending' ORDER BY outbox_id"
+            ).fetchall()
+            for row in rows:
+                oid = row["outbox_id"]
+                data = json.loads(row["payload"])
+                if row["event_type"] == "EXIT":
+                    record_trade_exit(
+                        trade_id=data.get("trade_id", ""),
+                        strategy_name=data.get("strategy", ""),
+                        exit_reason=data.get("exit_reason", "CASH_SETTLED"),
+                        pnl=data.get("net_pnl")
+                        if data.get("net_pnl") is not None
+                        else (
+                            (data.get("gross_pnl") or 0.0)
+                            - (data.get("fees") or 0.0)
+                        ),
+                        gross_pnl=data.get("gross_pnl"),
+                        fees=data.get("fees"),
+                        net_pnl=data.get("net_pnl"),
+                        log_path=target_path,
+                        source=data.get("source", "broker_verified"),
+                    )
+                with self._connection:
+                    self._connection.execute(
+                        "UPDATE outbox SET status = 'dispatched', dispatched_at = ? WHERE outbox_id = ?",
+                        (now, oid),
+                    )
+                dispatched += 1
+        return dispatched
 
     def owned_quantities(self, strategy_id: str) -> dict[str, int]:
         """Return net confirmed fills attributable to one logical strategy."""
@@ -1444,7 +1901,7 @@ class PositionLedger:
 
     def open_baskets(self, strategy_id: str | None = None) -> tuple[BasketRecord, ...]:
         """Return active packages, optionally restricted to one strategy owner."""
-        query = "SELECT * FROM packages WHERE state IN ('submitted','partial','open','closing')"
+        query = "SELECT * FROM packages WHERE state IN ('submitted','partial','open','closing','awaiting_settlement')"
         parameters: tuple[str, ...] = ()
         if strategy_id is not None:
             query += " AND strategy_id = ?"

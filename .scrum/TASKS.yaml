@@ -90,9 +90,14 @@ tasks:
 
   - id: xsp-cash-settlement-lifecycle-and-fees
     title: "Account for XSP expiration cash settlement and actual fees without requiring closing fills"
-    status: pending
+    status: completed
     priority: P0
-    owner: unassigned
+    owner: antigravity
+    implementation_notes:
+      - "2026-11-05: Implemented pure CBOE cash settlement formula in strategies/xsp_settlement.py, exposing known charges and fee evidence provenance even when fee coverage is incomplete, while keeping final net P&L unavailable until coverage completes."
+      - "2026-11-05: Extended position ledger schema with settlement_values, broker_cash_evidence, fee_evidence, settlement_reconciliations, and outbox tables. Past-expiration packages transition to awaiting_settlement and retain inventory and risk reservations until attributable disposition and broker cash reconcile."
+      - "2026-11-05: Integrated outbox flushing to trades.jsonl and decoupled strategy runtime from estimated EXPIRED P&L logging. Reconciled trade loaders, Reflex data adapters, and reconciliation CLI to exclude fee-incomplete and awaiting-settlement trades from certified win rates (is_eligible = False)."
+      - "2026-11-05: Added 18 comprehensive unit and integration tests in tests/test_xsp_settlement_lifecycle.py covering all-OTM, ITM wings, spread boundaries, prior trims, delayed settlement, and fee provenance. Updated obsolete date-only fixtures to assert fail-closed inventory retention. All 401 tests pass cleanly."
     evidence:
       - "2026-11-04: get_reconciled_trades classifies a past-expiry ENTRY as closed and assumes gross P&L equals the full opening credit when no realization is recorded. The snapshot contains 114 entry-only rows classified closed."
       - "XSP is European style and cash settled. An expired setup can complete without a closing order; its result depends on signed leg settlement, not the passage of the expiry date alone."
@@ -107,13 +112,17 @@ tasks:
       - "Preserve pending settlement across refresh, restart and delayed cash posting. Replayed settlement evidence is idempotent, and ambiguous outcomes do not enter verified completed-trade returns or win rates."
       - "Cover all-OTM expiry, ITM put and call wings, spread boundaries, prior trims, trade closure before expiry, delayed settlement and missing fee data with deterministic fixtures. No physical-share inventory is created."
     deliverables:
+      - strategies/xsp_settlement.py
       - strategies/position_ledger.py
+      - strategies/iron_condor.py
       - trade_logger.py
       - dashboard/trade_logger.py
       - reflex_dashboard/reflex_dashboard/data/adapters.py
-      - tests/test_position_ledger.py
-      - tests/test_trade_logger_win_rate.py
-      - tests/test_reflex_dashboard.py
+      - tools/reconcile_trade_history.py
+      - tests/test_xsp_settlement_lifecycle.py
+      - tests/test_iron_condor_math.py
+      - tests/test_regressions.py
+      - tests/test_concurrent_positions.py
 
   # --- Foundation, risk guardrails and catalog upkeep ---
   - id: user-features-catalog

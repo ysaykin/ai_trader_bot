@@ -62,6 +62,15 @@ def get_verified_ledger_trades(ledger_path: Path) -> set[str]:
             for (tid,) in rows:
                 if tid:
                     verified.add(str(tid).strip())
+            try:
+                settle_rows = cursor.execute(
+                    "SELECT DISTINCT trade_id FROM settlement_reconciliations WHERE trade_id IS NOT NULL AND fees_complete = 1"
+                ).fetchall()
+                for (tid,) in settle_rows:
+                    if tid:
+                        verified.add(str(tid).strip())
+            except sqlite3.OperationalError:
+                pass
         finally:
             conn.close()
     except Exception as e:
@@ -392,6 +401,43 @@ def command_rollback(rebuild_dir: Path, journal_path: Path) -> bool:
     return True
 
 
+def command_reconcile_settlement(
+    ledger_path: Path,
+    journal_path: Path,
+    as_of_date_str: str | None = None,
+) -> None:
+    """Reconcile expired positions in the ledger against recorded settlement evidence."""
+    from strategies.position_ledger import PositionLedger
+
+    if not ledger_path.exists():
+        print(f"Error: ledger {ledger_path} not found", file=sys.stderr)
+        return
+
+    as_of = (
+        datetime.date.fromisoformat(as_of_date_str)
+        if as_of_date_str
+        else datetime.datetime.now(datetime.timezone.utc).date()
+    )
+    ledger = PositionLedger(ledger_path)
+    try:
+        # Find all distinct strategies with open or awaiting packages
+        with ledger._lock:
+            rows = ledger._connection.execute(
+                "SELECT DISTINCT strategy_id FROM packages WHERE state != 'expired'"
+            ).fetchall()
+            strategies = [r[0] for r in rows if r[0]]
+
+        total_retired = 0
+        for strat in strategies:
+            retired = ledger.expire_strategy_positions(strat, as_of)
+            total_retired += retired
+
+        flushed = ledger.flush_outbox(journal_path)
+        print(f"Settlement reconciliation: {total_retired} package(s) retired, {flushed} journal event(s) flushed.")
+    finally:
+        ledger.close()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reconcile and rebuild trade journal history.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -423,6 +469,12 @@ def main() -> None:
     p_rollback.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
     p_rollback.add_argument("--rebuild-dir", type=Path, default=DEFAULT_REBUILD_DIR)
 
+    # reconcile-settlement
+    p_settle = subparsers.add_parser("reconcile-settlement", help="Reconcile expired positions with settlement evidence")
+    p_settle.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
+    p_settle.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
+    p_settle.add_argument("--as-of-date", type=str, default=None)
+
     args = parser.parse_args()
 
     if args.command == "report":
@@ -438,6 +490,8 @@ def main() -> None:
     elif args.command == "rollback":
         ok = command_rollback(args.rebuild_dir, args.journal)
         sys.exit(0 if ok else 1)
+    elif args.command == "reconcile-settlement":
+        command_reconcile_settlement(args.ledger, args.journal, args.as_of_date)
 
 
 if __name__ == "__main__":

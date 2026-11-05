@@ -172,12 +172,41 @@ class PositionLedgerTests(unittest.TestCase):
         self.assertEqual(self.ledger.open_baskets("strategy-a")[0].state, "partial")
 
     def test_post_expiration_settlement_clears_expired_contracts_only(self) -> None:
+        from decimal import Decimal
+        from datetime import datetime, timezone
+        from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
+
         self.ledger.record_submission("package-a", "strategy-a", "open", self.legs)
         for leg in self.legs:
             self.ledger.record_fill(leg.order_id, leg.requested_signed_quantity, 1.0)
+        # Prior to expiration, returns 0 and retains ownership
         self.assertEqual(self.ledger.expire_strategy_positions("strategy-a", date(2026, 10, 26)), 0)
         self.assertTrue(self.ledger.owned_quantities("strategy-a"))
-        self.assertEqual(self.ledger.expire_strategy_positions("strategy-a", date(2026, 10, 27)), 1)
+
+        # Past expiration date WITHOUT settlement evidence: retains inventory fail-closed
+        self.assertEqual(self.ledger.expire_strategy_positions("strategy-a", date(2026, 10, 27)), 0)
+        self.assertTrue(self.ledger.owned_quantities("strategy-a"))
+        self.assertTrue(self.ledger.open_baskets("strategy-a"))
+
+        # With explicit matching settlement evidence: all legs OTM (settlement at 105.0, broker cash $0.00)
+        settlement = SettlementValue(
+            date(2026, 10, 26),
+            Decimal("105.0"),
+            "cboe.com",
+            datetime.now(timezone.utc),
+            "settle-hash",
+            "official",
+        )
+        broker_cash = BrokerCashEvidence("test_account", "act-settle-1", date(2026, 10, 26), 0, True)
+        self.assertEqual(
+            self.ledger.expire_strategy_positions(
+                "strategy-a",
+                date(2026, 10, 27),
+                settlement=settlement,
+                broker_cash=broker_cash,
+            ),
+            1,
+        )
         self.assertEqual(self.ledger.owned_quantities("strategy-a"), {})
         self.assertEqual(self.ledger.open_baskets("strategy-a"), ())
 

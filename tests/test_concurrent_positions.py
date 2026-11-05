@@ -510,6 +510,13 @@ def test_settlement_of_one_expiry_keeps_other_position_managed(strategy, ledger)
     strategy.get_positions = Mock(side_effect=lambda: [
         SimpleNamespace(asset=strategy._asset_registry[key], quantity=q)
         for key, q in ledger.position_quantities(b).items()])
+    from datetime import date, datetime, timezone
+    from decimal import Decimal
+    from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
+    settlement = SettlementValue(date(2026, 11, 20), Decimal("105.0"), "cboe.com", datetime.now(timezone.utc), "hash", "official")
+    broker_cash = BrokerCashEvidence("test_account", "act-settle-a", date(2026, 11, 20), 0, True)
+    ledger.record_settlement_value(settlement)
+    ledger.record_broker_cash_evidence(broker_cash)
     assert strategy._reconcile_broker_state()
     assert ledger.get_basket(ledger.position_baskets(a)[0].package_id).state == "expired"
     assert ledger.position_opening_cash(b) == 60

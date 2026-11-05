@@ -647,6 +647,9 @@ def record_trade_exit(
     decision_evidence: Optional[Dict[str, Any]] = None,
     scope: Any = None,
     source: Optional[str] = None,
+    outcome: Optional[str] = None,
+    fees_complete: bool = True,
+    known_fees: Optional[float] = None,
 ) -> None:
     """Record a trade exit event to logs/trades.jsonl with fee and net P&L tracking."""
     log_path = Path(log_path) if log_path is not None else resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
@@ -682,7 +685,7 @@ def record_trade_exit(
         "strategy": strategy_name,
         "exit_reason": exit_reason,
         "exit_trigger": exit_trigger or exit_reason,
-        "outcome": realized_outcome(calc_net),
+        "outcome": outcome or realized_outcome(calc_net),
         "gross_pnl": calc_gross,
         "fees": calc_fees,
         "pnl": calc_net,
@@ -691,7 +694,10 @@ def record_trade_exit(
         "opening_credit_cash": opening_credit_cash,
         "closing_cash": closing_cash,
         "status": "CLOSED",
+        "fees_complete": bool(fees_complete),
     }
+    if known_fees is not None:
+        exit_data["known_fees"] = float(known_fees)
     if source is not None:
         exit_data["source"] = source
     for key, value in (("decision_gross_pnl", decision_gross_pnl),
@@ -723,6 +729,7 @@ def load_all_trades(
         return []
 
     verified_trade_ids: set[str] = set()
+    fee_incomplete_trade_ids: set[str] = set()
     try:
         lp = ledger_path or resolve_ledger_path()
         if lp.exists():
@@ -732,6 +739,18 @@ def load_all_trades(
                     "SELECT DISTINCT trade_id FROM packages WHERE trade_id IS NOT NULL AND broker_parent_id IS NOT NULL"
                 ).fetchall()
                 verified_trade_ids = {r[0] for r in rows if r[0]}
+                try:
+                    s_rows = conn.execute(
+                        "SELECT trade_id, fees_complete FROM settlement_reconciliations WHERE trade_id IS NOT NULL"
+                    ).fetchall()
+                    for r in s_rows:
+                        if r[0]:
+                            if r[1] == 1:
+                                verified_trade_ids.add(r[0])
+                            else:
+                                fee_incomplete_trade_ids.add(r[0])
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -857,6 +876,11 @@ def load_all_trades(
                 t_partition = "quarantined"
                 source = "synthetic"
                 reconciliation_status = "QUARANTINED"
+                is_eligible = False
+            elif t_id in fee_incomplete_trade_ids or (terminal and terminal.get("fees_complete") is False):
+                t_partition = "accepted"
+                source = "fee_incomplete"
+                reconciliation_status = "FEE_INCOMPLETE"
                 is_eligible = False
             elif (
                 t_id in verified_trade_ids

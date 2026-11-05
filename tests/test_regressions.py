@@ -1049,8 +1049,18 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.get_datetime.return_value = datetime(2026, 10, 23, 19, tzinfo=timezone.utc)
         self.strategy.on_trading_iteration()
         self.assertTrue(self.strategy._position_open)
-        # Next calendar day after expiration with confirmed flat broker book: resets cleanly
+        # Next calendar day after expiration without settlement evidence: retains inventory fail-closed
         self.strategy.get_datetime.return_value = datetime(2026, 10, 24, 14, tzinfo=timezone.utc)
+        self.strategy.on_trading_iteration()
+        self.assertTrue(self.strategy._position_open)
+        self.assertTrue(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()))
+        # With explicit matching settlement evidence: resets cleanly
+        from decimal import Decimal
+        from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
+        settlement = SettlementValue(date(2026, 10, 23), Decimal("105.0"), "cboe.com", datetime.now(timezone.utc), "hash", "official")
+        broker_cash = BrokerCashEvidence("test_account", "act-exp-1", date(2026, 10, 23), 0, True)
+        self.strategy._position_ledger.record_settlement_value(settlement)
+        self.strategy._position_ledger.record_broker_cash_evidence(broker_cash)
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
         self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
@@ -1113,8 +1123,28 @@ class IronCondorTests(unittest.TestCase):
 
         # 2. Advance to expiration day and expire Trade #1
         self.strategy.get_datetime.return_value = datetime(2026, 10, 27, 14, tzinfo=timezone.utc)
-        self.strategy._position_ledger.expire_strategy_positions(
+        ret = self.strategy._position_ledger.expire_strategy_positions(
             self.strategy._strategy_id(), self.strategy.get_datetime().date()
+        )
+        self.assertEqual(ret, 0)
+        self.assertTrue(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()))
+
+        from decimal import Decimal
+        from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
+        settlement = SettlementValue(
+            date(2026, 10, 26),
+            Decimal("105.0"),
+            "cboe.com",
+            datetime.now(timezone.utc),
+            "settle-hash",
+            "official",
+        )
+        broker_cash = BrokerCashEvidence("test_account", "act-reg-1", date(2026, 10, 26), 0, True)
+        self.strategy._position_ledger.expire_strategy_positions(
+            self.strategy._strategy_id(),
+            self.strategy.get_datetime().date(),
+            settlement=settlement,
+            broker_cash=broker_cash,
         )
         self.strategy._hydrate_from_ledger()
         self.strategy.get_positions.return_value = []
