@@ -170,3 +170,18 @@ def test_terminal_partial_package_retires_on_full_closure_and_restores_mismatch_
         assert mismatch is True
     finally:
         ledger.close()
+
+
+def test_writable_ledger_scope_binding(tmp_path):
+    from strategies.runtime_records import RecordScope
+
+    path = tmp_path / "bound.sqlite3"
+    scope = RecordScope("paper", "tradier", "account_a")
+    ledger = PositionLedger(path, scope=scope)
+    ledger.close()
+    ledger = PositionLedger(path, scope=scope)
+    ledger.close()
+    with pytest.raises(ValueError, match="different record scope"):
+        PositionLedger(path, scope=RecordScope("live", "tradier", "account_a"))
+    ledger = PositionLedger(path, read_only=True)
+    ledger.close()

@@ -218,6 +218,11 @@ class TradeJournalTests(unittest.TestCase):
                     "event": "ENTRY", "trade_id": "t1", "timestamp": "2026-10-26T10:00:00",
                     "strategy": "IC", "symbol": "XSP", "quantity": 2, "credit": 0.8,
                     "opening_credit_cash": 160.0, "entry_fees": 3.2, "max_risk": 840.0,
+                    "execution_evidence": {
+                        "broker": "tradier", "account_id": "VA1", "environment": "paper",
+                        "package_id": "p1", "broker_parent_id": "b_1",
+                        "legs": [{"contract": "XSP_1", "side": "buy_to_open", "quantity": 2}, {"contract": "XSP_2", "side": "sell_to_open", "quantity": 2}],
+                    },
                 },
                 {
                     "event": "ADJUSTMENT", "trade_id": "t1", "timestamp": "2026-10-26T11:00:00",
@@ -227,6 +232,11 @@ class TradeJournalTests(unittest.TestCase):
                     "event": "EXIT", "trade_id": "t1", "timestamp": "2026-10-26T12:00:00",
                     "gross_pnl": 30.0, "fees": 1.6, "net_pnl": 28.4,
                     "exit_reason": "PROFIT_TARGET",
+                    "execution_evidence": {
+                        "broker": "tradier", "account_id": "VA1", "environment": "paper",
+                        "package_id": "p2", "broker_parent_id": "b_2",
+                        "legs": [{"contract": "XSP_1", "side": "sell_to_close", "quantity": 1}, {"contract": "XSP_2", "side": "buy_to_close", "quantity": 1}],
+                    },
                 },
             ]
             path.write_text("".join(json.dumps(row) + "\n" for row in records))

@@ -381,7 +381,16 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
         self.assertEqual(rec["settlement_cash_cents"], -20000)
 
     def test_fee_incomplete_settlement_excluded_from_certified_win_rate(self) -> None:
-        # Write an entry to trade journal
+        # Matching execution evidence keeps the trade accepted while incomplete
+        # fees exclude it from certified performance.
+        entry_evidence = {"broker": "tradier", "account_id": "default", "environment": "paper", "package_id": "entry-1", "broker_parent_id": "order-1", "legs": [
+            {"contract": f"XSP_{strike}_{right}", "side": side, "quantity": 1}
+            for strike, right, side in [(500, "P", "buy_to_open"), (505, "P", "sell_to_open"), (520, "C", "sell_to_open"), (525, "C", "buy_to_open")]
+        ]}
+        exit_evidence = {**entry_evidence, "package_id": "exit-1", "broker_parent_id": "order-2", "legs": [
+            {"contract": leg["contract"], "side": "sell_to_close" if leg["side"] == "buy_to_open" else "buy_to_close", "quantity": 1}
+            for leg in entry_evidence["legs"]
+        ]}
         record_trade_entry(
             strategy_name="IC_STRAT",
             symbol="XSP",
@@ -393,6 +402,8 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
             log_path=self.journal_path,
             trade_id="T-FEE-INC",
             source="broker_verified",
+            scope="paper",
+            execution_evidence=entry_evidence,
         )
         # Record exit with incomplete fees
         record_trade_exit(
@@ -406,6 +417,8 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
             log_path=self.journal_path,
             source="broker_verified",
             fees_complete=False,
+            scope="paper",
+            execution_evidence=exit_evidence,
         )
 
         trades = load_all_trades(self.journal_path, ledger_path=self.ledger_path)

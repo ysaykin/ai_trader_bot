@@ -32,7 +32,7 @@ root_logger.addHandler(console_handler)
 
 try:
     from logging.handlers import RotatingFileHandler
-    from strategies.runtime_records import resolve_record_path
+    from strategies.runtime_records import RecordScope, resolve_record_path
     log_file = resolve_record_path("TRADING_LOG_PATH", "logs/trading.log")
     log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
@@ -260,7 +260,7 @@ def build_strategies_for_mode(
         try:
             collector = TrajectoryLogger(
                 [strategy.name for strategy in comparison_strategies],
-                Path(os.getenv("TRAJECTORY_LOG_PATH", "logs/trajectories.jsonl")),
+                resolve_record_path("TRAJECTORY_LOG_PATH", "logs/trajectories.jsonl", RecordScope.from_env()),
                 completed_snapshot_callback=(controller.on_snapshot if controller else None),
             )
         except OSError as error:

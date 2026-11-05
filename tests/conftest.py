@@ -19,8 +19,12 @@ if str(_ROOT / "tests") not in sys.path:
 from strategies.runtime_records import (
     install_test_context,
     is_protected_runtime_path,
+    protected_record_inventory,
     test_record_root,
 )
+
+# Capture initial inventory of protected runtime records before application imports
+_initial_inventory = protected_record_inventory()
 
 if test_record_root() is None:
     _test_directory = tempfile.TemporaryDirectory(prefix="lumibot-pytest-")
@@ -30,31 +34,21 @@ else:
     _root = test_record_root()
 
 
-def _compute_protected_digests() -> dict[Path, str]:
-    digests: dict[Path, str] = {}
-    logs_dir = _ROOT / "logs"
-    if logs_dir.exists():
-        for name in ("trades.jsonl", "trajectories.jsonl", "position_ledger.sqlite3"):
-            item = logs_dir / name
-            if item.is_file():
-                try:
-                    digests[item] = hashlib.sha256(item.read_bytes()).hexdigest()
-                except Exception:
-                    pass
-    return digests
-
-
 @pytest.fixture(scope="session", autouse=True)
 def verify_runtime_records_unchanged() -> Generator[None, None, None]:
-    """Verify runtime journals and databases are never mutated during test runs."""
-    pre_digests = _compute_protected_digests()
+    """Verify runtime journals, databases, snapshots, and sidecars are never mutated or added during test runs."""
+    pre_inventory = _initial_inventory
     yield
-    post_digests = _compute_protected_digests()
-    for path, digest in pre_digests.items():
-        assert path in post_digests, f"Protected file {path} was deleted during test run!"
-        assert (
-            post_digests[path] == digest
-        ), f"Protected file {path} was mutated during test run! (Pre: {digest}, Post: {post_digests[path]})"
+    post_inventory = protected_record_inventory()
+
+    deleted = set(pre_inventory.keys()) - set(post_inventory.keys())
+    assert not deleted, f"Protected runtime records were deleted during test run: {deleted}"
+
+    mutated = [k for k in pre_inventory if k in post_inventory and pre_inventory[k] != post_inventory[k]]
+    assert not mutated, f"Protected runtime records were mutated during test run: {mutated}"
+
+    created = set(post_inventory.keys()) - set(pre_inventory.keys())
+    assert not created, f"Protected runtime records directory was polluted with new files during test run: {created}"
 
 # An inherited test root still requires guards in this interpreter.
 install_test_context(_root)

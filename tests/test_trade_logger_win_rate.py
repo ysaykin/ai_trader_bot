@@ -91,6 +91,18 @@ class TestTradeLoggerFeeAccounting(unittest.TestCase):
 
     def test_load_all_trades_and_metrics_with_dynamic_fees(self) -> None:
         strikes_2 = {"put_short": 5800.0, "put_long": 5795.0}
+        entry_ev = {
+            "broker": "tradier", "account_id": "VA123", "environment": "paper",
+            "package_id": "pkg_entry_1", "broker_parent_id": "ord_entry_1",
+            "legs": [{"contract": "SPX_5800_P", "side": "sell_to_open", "quantity": 1},
+                     {"contract": "SPX_5795_P", "side": "buy_to_open", "quantity": 1}],
+        }
+        exit_ev = {
+            "broker": "tradier", "account_id": "VA123", "environment": "paper",
+            "package_id": "pkg_exit_1", "broker_parent_id": "ord_exit_1",
+            "legs": [{"contract": "SPX_5800_P", "side": "buy_to_close", "quantity": 1},
+                     {"contract": "SPX_5795_P", "side": "sell_to_close", "quantity": 1}],
+        }
         t_id = record_trade_entry(
             strategy_name="STRAT_V2",
             symbol="SPX",
@@ -100,6 +112,9 @@ class TestTradeLoggerFeeAccounting(unittest.TestCase):
             credit=1.00,  # $100 opening cash
             max_risk=500.0,
             log_path=self.log_path,
+            execution_evidence=entry_ev,
+            scope="paper",
+            source="broker_verified",
         )
         # Close at a small gross gain of $1.00 (gross_pnl = $1.00)
         # Total fees: entry $0.80 + exit $0.80 = $1.60
@@ -112,6 +127,9 @@ class TestTradeLoggerFeeAccounting(unittest.TestCase):
             gross_pnl=1.00,
             fees=0.80,
             log_path=self.log_path,
+            execution_evidence=exit_ev,
+            scope="paper",
+            source="broker_verified",
         )
 
         trades = load_all_trades(self.log_path)

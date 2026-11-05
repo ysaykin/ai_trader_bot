@@ -486,39 +486,19 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
     import sqlite3
     from strategies.position_ledger import resolve_ledger_path
     from strategies.runtime_records import (
+        RecordScope,
+        classify_trade,
+        is_fixture_trade,
         is_protected_runtime_path,
         is_test_mode_active,
+        load_ledger_execution_evidence,
         resolve_record_path,
     )
 
-    trades_path = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
+    trades_path = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl", RecordScope.from_env())
     trades_by_id: dict[str, dict[str, Any]] = {}
 
-    verified_trade_ids: set[str] = set()
-    fee_incomplete_trade_ids: set[str] = set()
-    try:
-        lp = resolve_ledger_path()
-        if lp.exists():
-            uri = f"{lp.resolve().as_uri()}?mode=ro"
-            with sqlite3.connect(uri, uri=True) as conn:
-                rows = conn.execute(
-                    "SELECT DISTINCT trade_id FROM packages WHERE trade_id IS NOT NULL AND broker_parent_id IS NOT NULL"
-                ).fetchall()
-                verified_trade_ids = {r[0] for r in rows if r[0]}
-                try:
-                    s_rows = conn.execute(
-                        "SELECT trade_id, fees_complete FROM settlement_reconciliations WHERE trade_id IS NOT NULL"
-                    ).fetchall()
-                    for r in s_rows:
-                        if r[0]:
-                            if r[1] == 1:
-                                verified_trade_ids.add(r[0])
-                            else:
-                                fee_incomplete_trade_ids.add(r[0])
-                except Exception:
-                    pass
-    except Exception:
-        pass
+    ledger_ev = load_ledger_execution_evidence()
 
     if trades_path.exists():
         try:
@@ -597,55 +577,12 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
         struct = str(t.get("structure") or "").lower()
         strikes = t.get("strikes") or {}
 
-        # Attribution & Partitioning
-        is_fixture = (
-            "filled-" in tid.lower()
-            or tid.startswith("test_")
-            or tid.startswith("mock_")
-            or "fixture" in tid.lower()
-        )
-        if (
-            strikes.get("long_put") == 95
-            and strikes.get("short_put") == 100
-            and strikes.get("short_call") == 110
-            and strikes.get("long_call") == 115
-        ):
-            is_fixture = True
-
-        if is_fixture:
-            t["partition"] = "quarantined"
-            t["source"] = "synthetic"
-            t["reconciliation_status"] = "QUARANTINED"
-            t["is_eligible"] = False
-        elif tid in fee_incomplete_trade_ids or t.get("fees_complete") is False:
-            t["partition"] = "accepted"
-            t["source"] = "fee_incomplete"
-            t["reconciliation_status"] = "FEE_INCOMPLETE"
-            t["is_eligible"] = False
-        elif (
-            tid in verified_trade_ids
-            or t.get("source") in {"broker_verified", "tradier_verified", "accepted"}
-        ):
-            t["partition"] = "accepted"
-            t["source"] = "tradier_verified"
-            t["reconciliation_status"] = "VERIFIED"
-            t["is_eligible"] = True
-        elif is_test_mode_active() and not is_protected_runtime_path(trades_path):
-            t["partition"] = "accepted"
-            t["source"] = "accepted_test"
-            t["reconciliation_status"] = "VERIFIED"
-            t["is_eligible"] = True
-        else:
-            if is_expired and status != "CLOSED" and evt != "EXIT":
-                t["partition"] = "unattributed"
-                t["source"] = "unattributed"
-                t["reconciliation_status"] = "UNRESOLVED_EXPIRY"
-                t["is_eligible"] = False
-            else:
-                t["partition"] = "unattributed"
-                t["source"] = "unattributed"
-                t["reconciliation_status"] = "UNATTRIBUTED"
-                t["is_eligible"] = False
+        # Attribution & Partitioning via shared classifier
+        classification = classify_trade(t, ledger_ev)
+        t["partition"] = classification["partition"]
+        t["source"] = classification["source"]
+        t["reconciliation_status"] = classification["reconciliation_status"]
+        t["is_eligible"] = classification["is_eligible"]
 
         t["fee_source"] = "exact" if t.get("has_broker_fees") else "estimated"
         t["fee_label"] = "$0.40/leg (Estimated)" if t["fee_source"] == "estimated" else "Broker Confirmed"
@@ -1115,6 +1052,7 @@ def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
     """Format a list of trades into RFC 4180 CSV string with full analytics fields."""
     import io
     import csv
+    from strategies.runtime_records import is_fixture_trade
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1139,6 +1077,14 @@ def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
         "Reconciliation Status",
     ])
     for t in trades:
+        tid = str(t.get("trade_id", ""))
+        if (
+            is_fixture_trade(tid, t)
+            or t.get("partition") == "quarantined"
+            or t.get("reconciliation_status") == "QUARANTINED"
+            or t.get("source") == "synthetic"
+        ):
+            continue
         writer.writerow([
             t.get("trade_id", ""),
             t.get("timestamp", ""),

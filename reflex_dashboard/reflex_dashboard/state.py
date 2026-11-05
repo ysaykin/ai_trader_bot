@@ -836,8 +836,15 @@ class DashboardState(rx.State):
     # -------------------------------------------------------------
     def download_visible_trades_csv(self):
         """Export the currently visible 50 historical trades to CSV."""
+        from strategies.runtime_records import is_fixture_trade
         inc = get_incubator_data()
-        trades = inc.get("visible_trades_50", [])
+        trades = [
+            t for t in inc.get("visible_trades_50", [])
+            if not is_fixture_trade(t.get("trade_id", ""), t)
+            and t.get("partition") != "quarantined"
+            and t.get("reconciliation_status") != "QUARANTINED"
+            and t.get("source") != "synthetic"
+        ]
         csv_content = generate_trades_csv(trades)
         return rx.download(
             data=csv_content,
@@ -847,8 +854,15 @@ class DashboardState(rx.State):
 
     def download_all_trades_csv(self):
         """Export eligible broker-verified historical trades to CSV archive."""
+        from strategies.runtime_records import is_fixture_trade
         inc = get_incubator_data()
-        trades = inc.get("eligible_closed_trades", inc.get("all_closed_trades", []))
+        trades = [
+            t for t in inc.get("eligible_closed_trades", [])
+            if not is_fixture_trade(t.get("trade_id", ""), t)
+            and t.get("partition") != "quarantined"
+            and t.get("reconciliation_status") != "QUARANTINED"
+            and t.get("source") != "synthetic"
+        ]
         csv_content = generate_trades_csv(trades)
         return rx.download(
             data=csv_content,
@@ -865,8 +879,15 @@ class DashboardState(rx.State):
     def load_more_and_export_csv(self):
         """Forces the user to download the full CSV export to view/audit historical trades beyond the visible 50."""
         self.load_more_modal_open = False
+        from strategies.runtime_records import is_fixture_trade
         inc = get_incubator_data()
-        trades = inc.get("all_closed_trades", [])
+        trades = [
+            t for t in inc.get("eligible_closed_trades", [])
+            if not is_fixture_trade(t.get("trade_id", ""), t)
+            and t.get("partition") != "quarantined"
+            and t.get("reconciliation_status") != "QUARANTINED"
+            and t.get("source") != "synthetic"
+        ]
         csv_content = generate_trades_csv(trades)
         return rx.download(
             data=csv_content,

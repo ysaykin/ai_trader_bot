@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from strategies.iron_condor_math import max_defined_loss
+from strategies.runtime_records import RecordScope
 
 ACTIVE_STATES = frozenset({"submitted", "partial", "open", "closing", "awaiting_settlement"})
 TERMINAL_STATES = frozenset({"closed", "canceled", "expired", "failed", "rejected"})
@@ -117,7 +118,8 @@ def resolve_ledger_path(path: str | Path | None = None) -> Path:
 class PositionLedger:
     """Persist package submissions and confirmed fills in SQLite transactions."""
 
-    def __init__(self, path: str | Path = ":memory:", *, read_only: bool = False) -> None:
+    def __init__(self, path: str | Path = ":memory:", *, read_only: bool = False,
+                 scope: RecordScope | None = None) -> None:
         self.path = ":memory:" if str(path) == ":memory:" else str(resolve_ledger_path(path))
         if not read_only and self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +133,37 @@ class PositionLedger:
         self._connection.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         if not read_only:
-            self._initialize()
+            try:
+                self._bind_scope(scope or RecordScope.from_env())
+                self._initialize()
+            except BaseException:
+                self._connection.close()
+                raise
+
+    def _bind_scope(self, scope: RecordScope) -> None:
+        """Bind a writable ledger to one broker, account, and environment."""
+        with self._lock:
+            self._connection.execute("BEGIN IMMEDIATE")
+            try:
+                self._connection.execute(
+                    "CREATE TABLE IF NOT EXISTS record_scope "
+                    "(id INTEGER PRIMARY KEY CHECK(id = 1), broker TEXT NOT NULL, "
+                    "account_id TEXT NOT NULL, environment TEXT NOT NULL)"
+                )
+                row = self._connection.execute(
+                    "SELECT broker, account_id, environment FROM record_scope WHERE id = 1"
+                ).fetchone()
+                identity = (scope.broker, scope.account_id, scope.environment)
+                if row is not None and tuple(row) != identity:
+                    raise ValueError("Ledger is already bound to a different record scope")
+                if row is None:
+                    self._connection.execute(
+                        "INSERT INTO record_scope VALUES (1, ?, ?, ?)", identity
+                    )
+                self._connection.commit()
+            except BaseException:
+                self._connection.rollback()
+                raise
 
     @contextmanager
     def execution_gate(self):

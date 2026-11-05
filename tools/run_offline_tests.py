@@ -21,21 +21,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from strategies.runtime_records import install_test_context, is_protected_runtime_path
-
-PROTECTED_RECORDS = [
-    ROOT / "logs/trades.jsonl",
-    ROOT / "logs/trajectories.jsonl",
-    ROOT / "logs/position_ledger.sqlite3",
-]
-
-
-def compute_digests() -> dict[Path, str]:
-    digests: dict[Path, str] = {}
-    for p in PROTECTED_RECORDS:
-        if p.exists() and p.is_file():
-            digests[p] = hashlib.sha256(p.read_bytes()).hexdigest()
-    return digests
+from strategies.runtime_records import (
+    install_test_context,
+    is_protected_runtime_path,
+    protected_record_inventory,
+)
 
 
 def main() -> None:
@@ -45,8 +35,8 @@ def main() -> None:
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
-    # Pre-run digests
-    pre_digests = compute_digests()
+    # Pre-run inventory of all protected files, scoped records, and sidecars
+    pre_inventory = protected_record_inventory()
 
     # Install isolated test context
     test_dir = tempfile.TemporaryDirectory(prefix="lumibot-offline-runner-")
@@ -83,7 +73,7 @@ def main() -> None:
     print("=" * 70)
     print("STARTING OFFLINE TEST RUNNER")
     print(f"Isolated Test Root: {root_path}")
-    print(f"Protected Files:     {len(pre_digests)} verified")
+    print(f"Protected Files:     {len(pre_inventory)} verified")
     print("=" * 70)
 
     try:
@@ -91,18 +81,19 @@ def main() -> None:
         retcode = res.returncode
     finally:
         # Post-run verification
-        post_digests = compute_digests()
-        for path, digest in pre_digests.items():
-            if path not in post_digests:
-                print(f"CRITICAL ERROR: Protected record {path} was deleted!", file=sys.stderr)
-                sys.exit(1)
-            if post_digests[path] != digest:
-                print(
-                    f"CRITICAL ERROR: Protected record {path} was mutated during test run!\n"
-                    f"Pre:  {digest}\nPost: {post_digests[path]}",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+        post_inventory = protected_record_inventory()
+        deleted = set(pre_inventory.keys()) - set(post_inventory.keys())
+        mutated = [k for k in pre_inventory if k in post_inventory and pre_inventory[k] != post_inventory[k]]
+        created = set(post_inventory.keys()) - set(pre_inventory.keys())
+        if deleted or mutated or created:
+            print("CRITICAL ERROR: Protected records violated during test run!", file=sys.stderr)
+            if deleted:
+                print(f"  Deleted: {deleted}", file=sys.stderr)
+            if mutated:
+                print(f"  Mutated: {mutated}", file=sys.stderr)
+            if created:
+                print(f"  Created: {created}", file=sys.stderr)
+            sys.exit(1)
         print("=" * 70)
         print("PROTECTED RECORD INTEGRITY: PASSED (Zero mutations to production records)")
         print("=" * 70)

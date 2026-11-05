@@ -39,7 +39,7 @@ class TestReflexDashboard(unittest.TestCase):
         fixtures = [
             {
                 "event": "ENTRY",
-                "trade_id": "test_trade_ic_v04",
+                "trade_id": "trade_20261030_ic_v04",
                 "timestamp": "2026-10-30T14:36:00Z",
                 "strategy": "IC_V04_D10_W5_PT40_T1030",
                 "symbol": "XSP",
@@ -51,12 +51,25 @@ class TestReflexDashboard(unittest.TestCase):
                 "opening_credit_cash": 25.0,
                 "entry_fees": 1.60,
                 "status": "OPEN",
-                "source": "accepted_test",
+                "source": "tradier_verified",
                 "reconciliation_status": "VERIFIED",
+                "execution_evidence": {
+                    "broker": "tradier",
+                    "account_id": "VA_TEST_ACCOUNT",
+                    "environment": "paper",
+                    "package_id": "pkg_v04_entry",
+                    "broker_parent_id": "ord_1001",
+                    "legs": [
+                        {"contract": "XSP_757_P", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b1"},
+                        {"contract": "XSP_762_P", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b2"},
+                        {"contract": "XSP_774_C", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b3"},
+                        {"contract": "XSP_779_C", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b4"},
+                    ],
+                },
             },
             {
                 "event": "EXIT",
-                "trade_id": "test_trade_ic_v04",
+                "trade_id": "trade_20261030_ic_v04",
                 "timestamp": "2026-10-30T15:30:00Z",
                 "strategy": "IC_V04_D10_W5_PT40_T1030",
                 "exit_reason": "PROFIT_TARGET",
@@ -66,12 +79,25 @@ class TestReflexDashboard(unittest.TestCase):
                 "pnl": 16.80,
                 "exit_price": 0.05,
                 "status": "CLOSED",
-                "source": "accepted_test",
+                "source": "tradier_verified",
                 "reconciliation_status": "VERIFIED",
+                "execution_evidence": {
+                    "broker": "tradier",
+                    "account_id": "VA_TEST_ACCOUNT",
+                    "environment": "paper",
+                    "package_id": "pkg_v04_exit",
+                    "broker_parent_id": "ord_1002",
+                    "legs": [
+                        {"contract": "XSP_757_P", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b5"},
+                        {"contract": "XSP_762_P", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b6"},
+                        {"contract": "XSP_774_C", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b7"},
+                        {"contract": "XSP_779_C", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b8"},
+                    ],
+                },
             },
             {
                 "event": "ENTRY",
-                "trade_id": "test_trade_ic_v13",
+                "trade_id": "trade_20261030_ic_v13",
                 "timestamp": "2026-10-30T15:01:00Z",
                 "strategy": "IC_V13_D15_W10_PT40_T1100",
                 "symbol": "XSP",
@@ -83,12 +109,25 @@ class TestReflexDashboard(unittest.TestCase):
                 "opening_credit_cash": 1.0,
                 "entry_fees": 1.60,
                 "status": "OPEN",
-                "source": "accepted_test",
+                "source": "tradier_verified",
                 "reconciliation_status": "VERIFIED",
+                "execution_evidence": {
+                    "broker": "tradier",
+                    "account_id": "VA_TEST_ACCOUNT",
+                    "environment": "paper",
+                    "package_id": "pkg_v13_entry",
+                    "broker_parent_id": "ord_1003",
+                    "legs": [
+                        {"contract": "XSP_748_P", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b9"},
+                        {"contract": "XSP_758_P", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b10"},
+                        {"contract": "XSP_778_C", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b11"},
+                        {"contract": "XSP_788_C", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b12"},
+                    ],
+                },
             },
             {
                 "event": "EXIT",
-                "trade_id": "test_trade_ic_v13",
+                "trade_id": "trade_20261030_ic_v13",
                 "timestamp": "2026-10-30T15:31:00Z",
                 "strategy": "IC_V13_D15_W10_PT40_T1100",
                 "exit_reason": "PROFIT_TARGET",
@@ -98,8 +137,21 @@ class TestReflexDashboard(unittest.TestCase):
                 "pnl": -2.20,
                 "exit_price": 0.0,
                 "status": "CLOSED",
-                "source": "accepted_test",
+                "source": "tradier_verified",
                 "reconciliation_status": "VERIFIED",
+                "execution_evidence": {
+                    "broker": "tradier",
+                    "account_id": "VA_TEST_ACCOUNT",
+                    "environment": "paper",
+                    "package_id": "pkg_v13_exit",
+                    "broker_parent_id": "ord_1004",
+                    "legs": [
+                        {"contract": "XSP_748_P", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b13"},
+                        {"contract": "XSP_758_P", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b14"},
+                        {"contract": "XSP_778_C", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b15"},
+                        {"contract": "XSP_788_C", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b16"},
+                    ],
+                },
             },
         ]
         with open(trades_file, "w", encoding="utf-8") as f:
@@ -285,6 +337,90 @@ class TestReflexDashboard(unittest.TestCase):
                 self.assertIn("IC_MAX_POSITION_RISK=20000", saved_text)
                 self.assertIn("IC_MAX_PORTFOLIO_RISK=150000", saved_text)
                 self.assertIn("TRADIER_PAPER=false", saved_text)
+
+    def test_csv_download_handlers_exclude_fixtures_and_quarantined(self):
+        """Test all 3 CSV download handlers with nonempty mixed populations."""
+        from unittest.mock import patch
+
+        mixed_trades = [
+            {
+                "trade_id": "verified_trade_1",
+                "strategy": "IC_V01",
+                "status": "CLOSED",
+                "gross_pnl": 50.0,
+                "fees": 1.60,
+                "net_pnl": 48.40,
+                "partition": "accepted",
+                "reconciliation_status": "VERIFIED",
+                "is_eligible": True,
+            },
+            {
+                "trade_id": "fee_inc_trade_2",
+                "strategy": "IC_V02",
+                "status": "CLOSED",
+                "gross_pnl": 40.0,
+                "fees": 1.60,
+                "net_pnl": 38.40,
+                "partition": "accepted",
+                "reconciliation_status": "FEE_INCOMPLETE",
+                "is_eligible": False,
+            },
+            {
+                "trade_id": "unattributed_trade_3",
+                "strategy": "IC_V03",
+                "status": "CLOSED",
+                "gross_pnl": 30.0,
+                "fees": 1.60,
+                "net_pnl": 28.40,
+                "partition": "unattributed",
+                "reconciliation_status": "UNATTRIBUTED",
+                "is_eligible": False,
+            },
+            {
+                "trade_id": "filled-synthetic-95-100",
+                "strategy": "IC_V04",
+                "status": "CLOSED",
+                "strikes": {"long_put": 95, "short_put": 100, "short_call": 110, "long_call": 115},
+                "gross_pnl": 999.0,
+                "fees": 1.60,
+                "net_pnl": 997.40,
+                "partition": "quarantined",
+                "reconciliation_status": "QUARANTINED",
+                "source": "synthetic",
+                "is_eligible": False,
+            },
+        ]
+
+        mock_inc_data = {
+            "visible_trades_50": mixed_trades,
+            "all_closed_trades": mixed_trades,
+            "eligible_closed_trades": [mixed_trades[0]],
+        }
+
+        state = DashboardState(_reflex_internal_init=True)
+        with patch("reflex_dashboard.state.get_incubator_data", return_value=mock_inc_data), \
+             patch("reflex_dashboard.state.rx.download", side_effect=lambda **kwargs: kwargs["data"]):
+            # 1. Visible CSV: excludes synthetic/quarantined fixture
+            vis_action = state.download_visible_trades_csv()
+            vis_csv = getattr(vis_action, "data", str(vis_action))
+            self.assertIn("verified_trade_1", vis_csv)
+            self.assertIn("unattributed_trade_3", vis_csv)
+            self.assertNotIn("filled-synthetic", vis_csv)
+
+            # 2. Eligible CSV: strictly eligible only, no unverified or fixtures
+            all_action = state.download_all_trades_csv()
+            all_csv = getattr(all_action, "data", str(all_action))
+            self.assertIn("verified_trade_1", all_csv)
+            self.assertNotIn("fee_inc_trade_2", all_csv)
+            self.assertNotIn("unattributed_trade_3", all_csv)
+            self.assertNotIn("filled-synthetic", all_csv)
+
+            # 3. Load More exports the eligible population.
+            more_action = state.load_more_and_export_csv()
+            more_csv = getattr(more_action, "data", str(more_action))
+            self.assertIn("verified_trade_1", more_csv)
+            self.assertNotIn("unattributed_trade_3", more_csv)
+            self.assertNotIn("filled-synthetic", more_csv)
 
 
 if __name__ == "__main__":

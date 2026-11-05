@@ -197,3 +197,23 @@ class TestRuntimeRecordIsolationUnittest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_append_event(journal, {"event": "ENTRY", "trade_id": "t2"}, scope=scope_b)
 
+
+
+def test_sqlite_uri_and_filesystem_mutations_are_guarded(tmp_path: Path) -> None:
+    import sqlite3
+
+    protected = ROOT / "logs" / "trades.jsonl"
+    with pytest.raises(PermissionError):
+        sqlite3.connect(protected.as_uri() + "?mode=rwc", uri=True)
+    with pytest.raises(PermissionError):
+        os.replace(tmp_path / "missing", protected)
+    with pytest.raises(PermissionError):
+        os.unlink(protected)
+
+
+def test_connect_ex_blocks_external_hosts() -> None:
+    import socket
+
+    with socket.socket() as client:
+        with pytest.raises(RuntimeError, match="network guard"):
+            client.connect_ex(("192.0.2.1", 443))
