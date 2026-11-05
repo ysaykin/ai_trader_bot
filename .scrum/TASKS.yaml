@@ -58,9 +58,16 @@ tasks:
 
   - id: trade-journal-source-isolation-and-rebuild
     title: "Isolate test journals and rebuild strategy history with explicit execution provenance"
-    status: pending
+    status: completed
     priority: P0
-    owner: unassigned
+    owner: antigravity
+    implementation_notes:
+      - "Enforced process-local test root and sticky write/network guards in strategies/runtime_records.py, tests/conftest.py, sitecustomize.py, and tests/__init__.py. Test processes, pytest, unittest, and subprocesses run in isolated temporary record directories with external broker sockets blocked fail-closed."
+      - "Implemented RecordScope with token-independent account identity (scope_key), rejecting cross-scope appends and conflicting duplicate events."
+      - "Created tools/reconcile_trade_history.py to audit, back up, partition, verify, and deterministically activate verified broker trades from position_ledger.sqlite3 while quarantining synthetic test fixtures and preserving raw backups."
+      - "Updated trade_logger.py and reflex_dashboard/data/adapters.py to partition trade histories into accepted, unattributed, and quarantined, filtering synthetic fixtures from strategy metrics, rankings, and exports."
+      - "Updated incubator_view.py, adapters.py, and state.py to display explicit reconciliation statuses (VERIFIED, UNATTRIBUTED, QUARANTINED), estimated fee provenance ($0.40/leg), and separate visible vs eligible export counts."
+      - "Added comprehensive unit tests in tests/test_runtime_record_isolation.py and tests/test_reflex_dashboard.py, and offline test runner tools/run_offline_tests.py with pre/post sha256 protected-record verification. Full offline test suite (383 passed, 2 skipped) verified with zero runtime record mutations."
     evidence:
       - "2026-11-04: The runtime journal contains 210 filled-* trade IDs using the 95/100 put and 110/115 call fixture from tests/test_regressions.py:open_filled_position. These fixtures account for 47 of the 50 displayed recent trades."
       - "The table labels all 252 classified closed rows as verified Tradier executions, although get_reconciled_trades only reads logs/trades.jsonl and performs no broker provenance check."

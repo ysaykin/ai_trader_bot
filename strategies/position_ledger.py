@@ -91,14 +91,27 @@ def asset_key(asset: Any) -> str:
 
 def resolve_ledger_path(path: str | Path | None = None) -> Path:
     """Resolve a runtime ledger path consistently across working directories."""
-    value = os.getenv("POSITION_LEDGER_PATH", "") if path is None else str(path)
-    value = value.strip()
+    from strategies.runtime_records import (
+        is_protected_runtime_path,
+        is_test_mode_active,
+        resolve_record_path,
+    )
+
+    value = str(path).strip() if path is not None else os.getenv("POSITION_LEDGER_PATH", "").strip()
     if value == ":memory:":
         raise ValueError("The runtime ledger must be file-backed")
-    candidate = Path(value or "logs/position_ledger.sqlite3").expanduser()
-    if not candidate.is_absolute():
-        candidate = Path(__file__).resolve().parent.parent / candidate
-    return candidate.resolve()
+
+    if path is not None:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(__file__).resolve().parent.parent / candidate
+        resolved = candidate.resolve()
+        if is_test_mode_active() and is_protected_runtime_path(resolved):
+            raise PermissionError(
+                f"Explicit runtime path to protected production ledger '{resolved}' is rejected in test mode."
+            )
+        return resolved
+    return resolve_record_path("POSITION_LEDGER_PATH", "logs/position_ledger.sqlite3")
 
 
 class PositionLedger:

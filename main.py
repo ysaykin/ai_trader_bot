@@ -32,8 +32,11 @@ root_logger.addHandler(console_handler)
 
 try:
     from logging.handlers import RotatingFileHandler
+    from strategies.runtime_records import resolve_record_path
+    log_file = resolve_record_path("TRADING_LOG_PATH", "logs/trading.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(
-        "logs/trading.log", maxBytes=5 * 1024 * 1024, backupCount=3
+        str(log_file), maxBytes=5 * 1024 * 1024, backupCount=3
     )
     file_handler.setFormatter(log_formatter)
     root_logger.addHandler(file_handler)

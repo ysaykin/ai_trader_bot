@@ -333,7 +333,7 @@ def incubator_view() -> rx.Component:
                             cursor="pointer",
                         ),
                         rx.button(
-                            rx.hstack(rx.icon("file-spreadsheet", size=14), rx.text(f"Export Tradier Journal ({DashboardState.total_closed_trades_count}) CSV"), align="center", spacing="1"),
+                            rx.hstack(rx.icon("file-spreadsheet", size=14), rx.text(f"Export Eligible ({DashboardState.eligible_closed_trades_count}) CSV"), align="center", spacing="1"),
                             on_click=DashboardState.download_all_trades_csv,
                             size="1",
                             color_scheme="gray",
@@ -350,7 +350,7 @@ def incubator_view() -> rx.Component:
                     gap="2",
                 ),
                 rx.text(
-                    "Individual closed roundtrip executions with exact broker fills, vertical & condor fee accounting ($0.40/leg), and net returns:",
+                    "Individual closed roundtrip executions with reconciliation status, estimated contract fees ($0.40/leg), and net returns:",
                     size="2",
                     color=TEXT_MUTED,
                 ),
@@ -361,6 +361,7 @@ def incubator_view() -> rx.Component:
                             rx.table.row(
                                 rx.table.column_header_cell("Time (ET)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Trade ID", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Status / Source", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Strategy Variant", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Structure", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Strikes", style=TABLE_HEADER_STYLE, class_name="nowrap"),
@@ -379,6 +380,7 @@ def incubator_view() -> rx.Component:
                                 lambda t: rx.table.row(
                                     rx.table.cell(rx.text(t["time_str"], class_name="font-mono text-xs nowrap")),
                                     rx.table.cell(rx.text(t["trade_id"], class_name="font-mono text-xs text-slate-400 nowrap")),
+                                    rx.table.cell(rx.badge(t["reconciliation_status"], color_scheme="jade", size="1")),
                                     rx.table.cell(rx.text(t["strategy_label"], weight="bold", color=CYAN, class_name="nowrap")),
                                     rx.table.cell(rx.badge(t["structure_label"], color_scheme="gray", size="1")),
                                     rx.table.cell(rx.text(t["strikes_display"], class_name="font-mono text-xs nowrap")),
@@ -405,14 +407,15 @@ def incubator_view() -> rx.Component:
                             rx.icon("archive", size=20, color=INDIGO),
                             rx.vstack(
                                 rx.text(
-                                    f"Showing all {DashboardState.total_closed_trades_count} verified broker trades executed via Tradier.",
+                                    f"Showing {DashboardState.visible_closed_trades_count} visible trades of {DashboardState.total_closed_trades_count} reconciled trades ({DashboardState.eligible_closed_trades_count} verified broker executions, {DashboardState.unattributed_trades_count} unattributed/unresolved).",
                                     size="2",
                                     weight="bold",
                                     color=TEXT_PRIMARY,
                                 ),
                                 rx.text(
-                                    "Historical trades are sourced exclusively from actual Tradier fills and fee reconciliations. "
-                                    "Click below to download the complete Tradier trade execution journal in CSV format.",
+                                    "Historical trades display confirmed broker executions and estimated contract fees ($0.40/leg). "
+                                    "Quarantined fixture records are strictly excluded from strategy metrics and rankings. "
+                                    "Click below to download the complete archive in CSV format.",
                                     size="1",
                                     color=TEXT_MUTED,
                                 ),

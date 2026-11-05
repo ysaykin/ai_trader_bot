@@ -99,7 +99,9 @@ def get_market_clock() -> dict[str, Any]:
 
 def get_bot_status_from_log(log_path: str = "logs/trading.log") -> dict[str, str]:
     """Parse the most recent engine lifecycle state from the trading log."""
-    p = PROJECT_ROOT / log_path
+    from strategies.runtime_records import resolve_record_path
+
+    p = resolve_record_path("TRADING_LOG_PATH", log_path)
     if not p.exists():
         return {
             "state": "OFFLINE",
@@ -481,8 +483,29 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
     Gross P&L, Net P&L, Capital at Risk, Credit Received, and Net ROI % (RoR and RoC).
     Returns (trades_by_id, closed_trades, open_trades).
     """
-    trades_path = PROJECT_ROOT / "logs/trades.jsonl"
+    import sqlite3
+    from strategies.position_ledger import resolve_ledger_path
+    from strategies.runtime_records import (
+        is_protected_runtime_path,
+        is_test_mode_active,
+        resolve_record_path,
+    )
+
+    trades_path = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
     trades_by_id: dict[str, dict[str, Any]] = {}
+
+    verified_trade_ids: set[str] = set()
+    try:
+        lp = resolve_ledger_path()
+        if lp.exists():
+            uri = f"{lp.resolve().as_uri()}?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT trade_id FROM packages WHERE trade_id IS NOT NULL AND broker_parent_id IS NOT NULL"
+                ).fetchall()
+                verified_trade_ids = {r[0] for r in rows if r[0]}
+    except Exception:
+        pass
 
     if trades_path.exists():
         try:
@@ -547,7 +570,7 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
         t["max_risk"] = max_risk
         t["credit_cash"] = credit_cash
 
-        # Expiry check for 0DTE trades
+        # Expiry check for trades
         expiry_str = t.get("expiry")
         is_expired = False
         if expiry_str:
@@ -560,22 +583,63 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
 
         struct = str(t.get("structure") or "").lower()
         strikes = t.get("strikes") or {}
-        if status == "CLOSED" or evt == "EXIT" or is_expired:
+
+        # Attribution & Partitioning
+        is_fixture = (
+            "filled-" in tid.lower()
+            or tid.startswith("test_")
+            or tid.startswith("mock_")
+            or "fixture" in tid.lower()
+        )
+        if (
+            strikes.get("long_put") == 95
+            and strikes.get("short_put") == 100
+            and strikes.get("short_call") == 110
+            and strikes.get("long_call") == 115
+        ):
+            is_fixture = True
+
+        if is_fixture:
+            t["partition"] = "quarantined"
+            t["source"] = "synthetic"
+            t["reconciliation_status"] = "QUARANTINED"
+            t["is_eligible"] = False
+        elif (
+            tid in verified_trade_ids
+            or t.get("source") in {"broker_verified", "tradier_verified", "accepted"}
+        ):
+            t["partition"] = "accepted"
+            t["source"] = "tradier_verified"
+            t["reconciliation_status"] = "VERIFIED"
+            t["is_eligible"] = True
+        elif is_test_mode_active() and not is_protected_runtime_path(trades_path):
+            t["partition"] = "accepted"
+            t["source"] = "accepted_test"
+            t["reconciliation_status"] = "VERIFIED"
+            t["is_eligible"] = True
+        else:
+            if is_expired and status != "CLOSED" and evt != "EXIT":
+                t["partition"] = "unattributed"
+                t["source"] = "unattributed"
+                t["reconciliation_status"] = "UNRESOLVED_EXPIRY"
+                t["is_eligible"] = False
+            else:
+                t["partition"] = "unattributed"
+                t["source"] = "unattributed"
+                t["reconciliation_status"] = "UNATTRIBUTED"
+                t["is_eligible"] = False
+
+        t["fee_source"] = "exact" if t.get("has_broker_fees") else "estimated"
+        t["fee_label"] = "$0.40/leg (Estimated)" if t["fee_source"] == "estimated" else "Broker Confirmed"
+
+        # Separate verified closed executions from unresolved/open
+        if status == "CLOSED" or evt == "EXIT":
             t["status"] = "CLOSED"
             gross_pnl = number(t.get("gross_pnl"))
             if gross_pnl is None:
-                gross_pnl = number(t.get("pnl"))
-            if gross_pnl is None:
-                if is_expired:
-                    gross_pnl = credit_cash
-                else:
-                    gross_pnl = 0.0
+                gross_pnl = number(t.get("pnl")) or 0.0
             t["gross_pnl"] = gross_pnl
 
-            # Fees: 2 legs on entry + 2 legs on exit = 4 legs for vertical ($1.60/ct)
-            # 4 legs on entry + 4 legs on exit = 8 legs for iron condor ($3.20/ct)
-            struct = str(t.get("structure") or "").lower()
-            strikes = t.get("strikes") or {}
             is_vert = struct in ("bull_put", "bear_call") or len(strikes) == 2
             num_legs = 2 if is_vert else 4
             legs_per_roundtrip = num_legs * 2
@@ -610,7 +674,30 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["exit_time_str"] = format_trade_time_et(t.get("exit_timestamp", ""))
 
             closed_trades.append(t)
-        elif status == "OPEN":
+        elif is_expired:
+            # Unsupported expiration without confirmed fill or verified settlement remains unresolved
+            t["status"] = "AWAITING_SETTLEMENT"
+            t["reconciliation_status"] = "UNRESOLVED_EXPIRY"
+            t["is_eligible"] = False
+            t["gross_pnl"] = 0.0
+            t["gross_pnl_str"] = "$0.00 (PENDING)"
+            t["fees"] = 0.0
+            t["fees_str"] = "$0.00"
+            t["net_pnl"] = 0.0
+            t["net_pnl_str"] = "PENDING SETTLEMENT"
+            t["net_pnl_color"] = "amber"
+            t["net_ror_str"] = "-"
+            t["net_ror_pct"] = 0.0
+            t["net_roc_pct"] = 0.0
+            t["credit_str"] = money(credit_per_share) if credit_per_share else "-"
+            t["structure_label"] = format_structure(struct)
+            t["strategy_label"] = format_strategy_label(t.get("strategy", ""))
+            t["strikes_display"] = format_strikes(strikes, struct)
+            t["dte_str"] = f"{t.get('dte', 7)}DTE" if "dte" in t else "-"
+            t["time_str"] = format_trade_time_et(t.get("entry_timestamp") or t.get("timestamp", ""))
+            t["exit_time_str"] = "-"
+            open_trades.append(t)
+        else:
             t["status"] = "OPEN"
             t["gross_pnl"] = 0.0
             t["gross_pnl_str"] = "$0.00 (OPEN)"
@@ -635,6 +722,12 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["exit_time_str"] = format_trade_time_et(t.get("exit_timestamp", ""))
 
             open_trades.append(t)
+
+    # Sort trades chronologically descending (latest first)
+    closed_trades.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+    open_trades.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
+
+    return trades_by_id, closed_trades, open_trades
 
     # Sort trades chronologically descending (latest first)
     closed_trades.sort(key=lambda x: str(x.get("timestamp", "")), reverse=True)
@@ -728,22 +821,23 @@ def get_incubator_data() -> dict[str, Any]:
             short_id = spec_tag
 
         v_closed = [t for t in closed_all if t.get("strategy") == name or extract_variant_tag(str(t.get("strategy", ""))) == spec_tag]
+        v_eligible_closed = [t for t in v_closed if t.get("is_eligible", True)]
         v_open = [t for t in open_all if t.get("strategy") == name or extract_variant_tag(str(t.get("strategy", ""))) == spec_tag]
 
-        gross_pnl = sum(t.get("gross_pnl", 0.0) for t in v_closed)
-        fees = sum(t.get("fees", 0.0) for t in v_closed)
-        net_pnl = sum(t.get("net_pnl", 0.0) for t in v_closed)
+        gross_pnl = sum(t.get("gross_pnl", 0.0) for t in v_eligible_closed)
+        fees = sum(t.get("fees", 0.0) for t in v_eligible_closed)
+        net_pnl = sum(t.get("net_pnl", 0.0) for t in v_eligible_closed)
 
         total_gross_pnl += gross_pnl
         total_fees += fees
         total_net_pnl += net_pnl
-        total_trades_count += len(v_closed) + len(v_open)
+        total_trades_count += len(v_eligible_closed) + len(v_open)
 
         # Win rate is strictly calculated from closed trades with positive net P&L
-        wins = sum(1 for t in v_closed if t.get("net_pnl", 0.0) > 0)
-        losses = sum(1 for t in v_closed if t.get("net_pnl", 0.0) < 0)
+        wins = sum(1 for t in v_eligible_closed if t.get("net_pnl", 0.0) > 0)
+        losses = sum(1 for t in v_eligible_closed if t.get("net_pnl", 0.0) < 0)
         total_wins += wins
-        win_rate = (wins / len(v_closed) * 100.0) if v_closed else None
+        win_rate = (wins / len(v_eligible_closed) * 100.0) if v_eligible_closed else None
 
         if win_rate is None:
             win_rate_color = "#94A3B8"
@@ -813,8 +907,8 @@ def get_incubator_data() -> dict[str, Any]:
             "stop_loss": f"{spec['stop_loss_mult']:.1f}x",
             "entry_time": format_entry_schedule(spec.get("entry_time")),
             "entry_time_full": f"{spec.get('entry_time', '')} ET",
-            "closed_trades": len(v_closed),
-            "total_trades": len(v_closed) + len(v_open),
+            "closed_trades": len(v_eligible_closed),
+            "total_trades": len(v_eligible_closed) + len(v_open),
             "open_trades": len(v_open),
             "wins": wins,
             "losses": losses,
@@ -963,6 +1057,7 @@ def get_incubator_data() -> dict[str, Any]:
     # Per-Trade Highlight data: past 50 visible closed trades
     visible_trades_50 = closed_all[:50]
     all_combined_trades = open_all + closed_all
+    eligible_closed = [t for t in closed_all if t.get("is_eligible", True)]
 
     return {
         "all_rows": all_rows,
@@ -974,6 +1069,7 @@ def get_incubator_data() -> dict[str, Any]:
         "strategy_aggregates": strategy_aggregates,
         "visible_trades_50": visible_trades_50,
         "all_closed_trades": closed_all,
+        "eligible_closed_trades": eligible_closed,
         "all_combined_trades": all_combined_trades,
         "traded_rows": traded_rows,
         "monitored_rows": monitored_rows,
@@ -981,6 +1077,11 @@ def get_incubator_data() -> dict[str, Any]:
         "active_variants": len(traded_rows),
         "monitored_variants": len(monitored_rows),
         "total_trades": total_trades_count,
+        "total_closed_trades_count": len(closed_all),
+        "visible_closed_trades_count": len(visible_trades_50),
+        "eligible_closed_trades_count": len(eligible_closed),
+        "unattributed_trades_count": len([t for t in closed_all if not t.get("is_eligible", True) and t.get("reconciliation_status") != "QUARANTINED"]),
+        "quarantined_trades_count": len([t for t in closed_all if t.get("reconciliation_status") == "QUARANTINED"]),
         "total_gross_pnl": total_gross_pnl,
         "total_gross_pnl_str": money(total_gross_pnl),
         "total_fees": total_fees,
@@ -1012,9 +1113,12 @@ def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
         "Exit Reason",
         "Gross P&L ($)",
         "Contract Fees ($)",
+        "Fee Type",
         "Net Realized P&L ($)",
         "Net RoR (%)",
         "Status",
+        "Source",
+        "Reconciliation Status",
     ])
     for t in trades:
         writer.writerow([
@@ -1030,9 +1134,12 @@ def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
             t.get("exit_reason", ""),
             f"{t.get('gross_pnl', 0.0):.2f}",
             f"{t.get('fees', 0.0):.2f}",
+            t.get("fee_label", "$0.40/leg (Estimated)"),
             f"{t.get('net_pnl', 0.0):.2f}",
             f"{t.get('net_ror_pct', 0.0):.2f}%",
             t.get("status", "CLOSED"),
+            t.get("source", "unattributed"),
+            t.get("reconciliation_status", "UNATTRIBUTED"),
         ])
     return output.getvalue()
 
@@ -1249,7 +1356,9 @@ def get_neural_policy_data() -> dict[str, Any]:
 
 def get_recent_logs(max_lines: int = 150, filter_query: str = "") -> list[str]:
     """Fetch lines from logs/trading.log with optional filtering."""
-    p = PROJECT_ROOT / "logs/trading.log"
+    from strategies.runtime_records import resolve_record_path
+
+    p = resolve_record_path("TRADING_LOG_PATH", "logs/trading.log")
     if not p.exists():
         return ["[SYSTEM] No trading log file found at logs/trading.log"]
 

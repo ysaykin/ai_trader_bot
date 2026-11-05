@@ -30,6 +30,82 @@ from reflex_dashboard.state import DashboardState
 
 class TestReflexDashboard(unittest.TestCase):
 
+    @classmethod
+    def setUpClass(cls):
+        import json
+        from strategies.runtime_records import resolve_record_path
+        trades_file = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
+        trades_file.parent.mkdir(parents=True, exist_ok=True)
+        fixtures = [
+            {
+                "event": "ENTRY",
+                "trade_id": "test_trade_ic_v04",
+                "timestamp": "2026-10-30T14:36:00Z",
+                "strategy": "IC_V04_D10_W5_PT40_T1030",
+                "symbol": "XSP",
+                "expiry": "2026-10-30",
+                "strikes": {"long_put": 757.0, "short_put": 762.0, "short_call": 774.0, "long_call": 779.0},
+                "quantity": 1,
+                "credit": 0.25,
+                "max_risk": 500.0,
+                "opening_credit_cash": 25.0,
+                "entry_fees": 1.60,
+                "status": "OPEN",
+                "source": "accepted_test",
+                "reconciliation_status": "VERIFIED",
+            },
+            {
+                "event": "EXIT",
+                "trade_id": "test_trade_ic_v04",
+                "timestamp": "2026-10-30T15:30:00Z",
+                "strategy": "IC_V04_D10_W5_PT40_T1030",
+                "exit_reason": "PROFIT_TARGET",
+                "gross_pnl": 20.0,
+                "fees": 1.60,
+                "net_pnl": 16.80,
+                "pnl": 16.80,
+                "exit_price": 0.05,
+                "status": "CLOSED",
+                "source": "accepted_test",
+                "reconciliation_status": "VERIFIED",
+            },
+            {
+                "event": "ENTRY",
+                "trade_id": "test_trade_ic_v13",
+                "timestamp": "2026-10-30T15:01:00Z",
+                "strategy": "IC_V13_D15_W10_PT40_T1100",
+                "symbol": "XSP",
+                "expiry": "2026-10-30",
+                "strikes": {"long_put": 748.0, "short_put": 758.0, "short_call": 778.0, "long_call": 788.0},
+                "quantity": 1,
+                "credit": 0.01,
+                "max_risk": 1000.0,
+                "opening_credit_cash": 1.0,
+                "entry_fees": 1.60,
+                "status": "OPEN",
+                "source": "accepted_test",
+                "reconciliation_status": "VERIFIED",
+            },
+            {
+                "event": "EXIT",
+                "trade_id": "test_trade_ic_v13",
+                "timestamp": "2026-10-30T15:31:00Z",
+                "strategy": "IC_V13_D15_W10_PT40_T1100",
+                "exit_reason": "PROFIT_TARGET",
+                "gross_pnl": 1.0,
+                "fees": 3.20,
+                "net_pnl": -2.20,
+                "pnl": -2.20,
+                "exit_price": 0.0,
+                "status": "CLOSED",
+                "source": "accepted_test",
+                "reconciliation_status": "VERIFIED",
+            },
+        ]
+        with open(trades_file, "w", encoding="utf-8") as f:
+            for item in fixtures:
+                f.write(json.dumps(item) + "\n")
+
     def test_helpers(self):
         self.assertEqual(number("123.45"), 123.45)
         self.assertIsNone(number("invalid"))

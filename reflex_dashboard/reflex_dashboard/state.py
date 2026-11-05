@@ -132,6 +132,10 @@ class DashboardState(rx.State):
     }
     visible_trades_50: list[dict[str, Any]] = []
     total_closed_trades_count: int = 0
+    visible_closed_trades_count: int = 0
+    eligible_closed_trades_count: int = 0
+    unattributed_trades_count: int = 0
+    quarantined_trades_count: int = 0
     load_more_modal_open: bool = False
 
     # A/B Multi-Strategy Testing Lab (EXP-01 through EXP-04)
@@ -508,7 +512,11 @@ class DashboardState(rx.State):
                 self.top5_aggregate = inc["strategy_aggregates"].get("top5", {})
                 self.bottom3_aggregate = inc["strategy_aggregates"].get("bottom3", {})
             self.visible_trades_50 = inc.get("visible_trades_50", [])
-            self.total_closed_trades_count = len(inc.get("all_closed_trades", []))
+            self.total_closed_trades_count = inc.get("total_closed_trades_count", len(inc.get("all_closed_trades", [])))
+            self.visible_closed_trades_count = inc.get("visible_closed_trades_count", len(self.visible_trades_50))
+            self.eligible_closed_trades_count = inc.get("eligible_closed_trades_count", len(inc.get("eligible_closed_trades", [])))
+            self.unattributed_trades_count = inc.get("unattributed_trades_count", 0)
+            self.quarantined_trades_count = inc.get("quarantined_trades_count", 0)
 
             # 5. A/B Testing Lab
             ab = get_ab_lab_data()
@@ -838,13 +846,13 @@ class DashboardState(rx.State):
         )
 
     def download_all_trades_csv(self):
-        """Export all recorded historical trades to CSV archive."""
+        """Export eligible broker-verified historical trades to CSV archive."""
         inc = get_incubator_data()
-        trades = inc.get("all_closed_trades", [])
+        trades = inc.get("eligible_closed_trades", inc.get("all_closed_trades", []))
         csv_content = generate_trades_csv(trades)
         return rx.download(
             data=csv_content,
-            filename="lumibot_complete_trades_journal.csv",
+            filename="lumibot_eligible_trades_journal.csv",
             mime_type="text/csv",
         )
 

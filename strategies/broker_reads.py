@@ -85,10 +85,23 @@ class BrokerReads:
         self.headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         self.scope = hashlib.sha256(f"{sandbox}:{token}".encode()).hexdigest()
         self.account_key = hashlib.sha256(f"{self.scope}:{account}".encode()).hexdigest()
-        self.path = Path(path or settings.get("BROKER_SNAPSHOT_PATH") or
-                         Path(__file__).resolve().parents[1] / "logs/broker_snapshots.sqlite3")
-        if not self.path.is_absolute():
-            self.path = Path(__file__).resolve().parents[1] / self.path
+        from strategies.runtime_records import (
+            is_protected_runtime_path,
+            is_test_mode_active,
+            resolve_record_path,
+        )
+        if path is not None:
+            candidate = Path(path).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(__file__).resolve().parents[1] / candidate
+            resolved = candidate.resolve()
+            if is_test_mode_active() and is_protected_runtime_path(resolved):
+                raise PermissionError(
+                    f"Explicit path to protected broker snapshots '{resolved}' is rejected in test mode."
+                )
+            self.path = resolved
+        else:
+            self.path = resolve_record_path("BROKER_SNAPSHOT_PATH", "logs/broker_snapshots.sqlite3")
         self.clock, self.sleep, self.jitter = clock, sleep, jitter
         self.market_open = market_open or self._weekday_session
         self.transport = transport or requests.Session().request
