@@ -66,7 +66,12 @@ tasks:
       - "2026-11-05: Bound writable ledgers to broker, account, and environment in strategies/position_ledger.py via record_scope schema table. Journal append validation in trade_logger.py executes under fcntl append flock."
       - "2026-11-05: Standardized shared execution provenance classifier (classify_trade) across trade_logger.py, reflex_dashboard/reflex_dashboard/data/adapters.py, and tools/reconcile_trade_history.py, verifying broker parent orders, fill legs, and settlement reconciliations."
       - "2026-11-05: Filtered active host daemon cache updates (broker_snapshots.sqlite3, trading.log) on shared mounts in protected_record_inventory. Full offline test suite (405 passed, 2 skipped) verified with zero production record mutations."
-      - "2026-11-05: Task remains in_progress pending complete broker evidence matching for unverified legacy realizations (e.g. trade_20261028_144107_ic_v23_) and safe rebuild activation."
+      - "2026-11-05: Hardened rebuild activation gate in tools/reconcile_trade_history.py with versioned manifest (version 1), frozen SQLite evidence snapshot (evidence.sqlite3), and classification report (classifications.json). Enforced deterministic recomputation of partition assignments and financial summaries during verification, and rejected empty accepted partition over non-empty journal. Preserved raw journal event sequences across ENTRY, ADJUSTMENT, ADDITION, and EXIT in trade_logger.py and adapters.py. Added regression tests in tests/test_reconcile_activation_gate.py."
+      - "2026-11-05: Task strictly retained in_progress (GATE: implementation & repair incomplete). Specific outstanding defects and blockers:"
+      - "  * Strict 7-field broker execution provenance classifier in tools/reconcile_trade_history.py and core loaders remains unimplemented; activation gate relies on existing fail-open classifier."
+      - "  * Durable raw broker-evidence retention, realization linkage, and settlement-evidence validation remain unimplemented."
+      - "  * Safe rebuild activation cannot be performed until strict classifier and evidence linkage are completed and verified."
+      - "  * Test suite teardown integrity issue: scopes/tradier_paper_VA21359019/broker_snapshots.sqlite3 mutated during test run; broader test suite run deferred."
     evidence:
       - "2026-11-04: The runtime journal contains 210 filled-* trade IDs using the 95/100 put and 110/115 call fixture from tests/test_regressions.py:open_filled_position. These fixtures account for 47 of the 50 displayed recent trades."
       - "The table labels all 252 classified closed rows as verified Tradier executions, although get_reconciled_trades only reads logs/trades.jsonl and performs no broker provenance check."
