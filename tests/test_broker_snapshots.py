@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 import requests
@@ -236,6 +236,63 @@ def test_missing_symbol_does_not_block_fresh_quotes_for_other_positions(setup_re
     assert transport.calls['quotes'] == attempts + 1
 
 
+@pytest.mark.parametrize('missing', ['A_EXPIRED', 'Z_EXPIRED'])
+@pytest.mark.parametrize('fresh', [False, True])
+def test_cooling_symbol_in_collector_batch_does_not_poison_healthy_quote(setup_reads, missing, fresh):
+    reads, clock, transport = setup_reads
+    reads.quotes(['HELD'])
+    clock.advance(6)
+    transport.missing = {missing}
+    with pytest.raises(BrokerReadUnavailable):
+        reads.quotes([missing])
+    missing_snapshot = reads.snapshot('quote:' + missing)
+    attempts = transport.calls['quotes']
+    with pytest.raises(BrokerReadUnavailable):
+        reads.quotes(['HELD', missing], fresh=fresh)
+    healthy = reads.snapshot('quote:HELD', ttl=5)
+    assert healthy['error'] == ''
+    assert healthy['age'] == 0
+    assert reads.snapshot('quote:' + missing) == missing_snapshot
+    assert transport.calls['quotes'] == attempts + 1
+    assert reads.quotes(['HELD'])['quotes']['quote'][0]['symbol'] == 'HELD'
+
+
+def test_partial_first_chunk_does_not_skip_later_healthy_quotes(setup_reads):
+    reads, _, transport = setup_reads
+    transport.missing = {'A_EXPIRED'}
+    symbols = ['A_EXPIRED', *(f'HELD_{index:03d}' for index in range(101))]
+    with pytest.raises(BrokerReadUnavailable, match='Incomplete'):
+        reads.quotes(symbols)
+    assert transport.calls['quotes'] == 2
+    assert all(reads.snapshot('quote:' + symbol)['status'] == 'ready' for symbol in symbols[1:])
+
+
+def test_all_cooling_symbols_preserve_cooldowns_without_transport_retry(setup_reads):
+    reads, _, transport = setup_reads
+    transport.missing = {'EXPIRED'}
+    with pytest.raises(BrokerReadUnavailable):
+        reads.quotes(['EXPIRED'])
+    missing = reads.snapshot('quote:EXPIRED')
+    attempts = transport.calls['quotes']
+    with pytest.raises(BrokerReadUnavailable):
+        reads.quotes(['EXPIRED'], fresh=True)
+    assert transport.calls['quotes'] == attempts
+    assert reads.snapshot('quote:EXPIRED') == missing
+
+
+def test_collector_refreshes_healthy_demand_while_expired_order_cools(setup_reads):
+    reads, clock, transport = setup_reads
+    reads.quotes(['HELD'])
+    clock.advance(6)
+    transport.missing = {'XSP'}
+    transport.active = True  # The active order contributes XSP to each collector batch.
+    with pytest.raises(BrokerReadUnavailable):
+        reads.quotes(['XSP'])
+    assert reads.collect_once('bot')
+    assert reads.snapshot('quote:HELD', ttl=5)['status'] == 'ready'
+    assert reads.quotes(['HELD'])['quotes']['quote'][0]['symbol'] == 'HELD'
+
+
 def test_writes_are_not_replayed_and_invalidate_snapshots(setup_reads):
     reads, _, transport = setup_reads
     reads.get('/accounts/private-account/positions')
@@ -446,6 +503,17 @@ def test_real_broker_cannot_convert_budget_or_transport_failure_to_empty_invento
     transport.status['orders'] = requests.Timeout('offline')
     with pytest.raises(BrokerReadUnavailable):
         broker._pull_broker_all_orders()
+
+    from datetime import date
+    from lumibot.entities import Asset, Position
+    held = Position('owner', Asset('XSP', asset_type='option', expiration=date(2026, 11, 20),
+                                  strike=500, right='put'), -1)
+    broker._filled_positions.append(held)
+    with patch.object(reads, 'get', side_effect=BrokerReadUnavailable('standard request budget unavailable')):
+        # Exercise the installed SDK's polling -> sync_positions -> adapter path.
+        broker.do_polling()
+    assert held in broker._filled_positions.get_list()
+    assert held.quantity == -1
 
 
 def test_native_option_package_batch_preserves_asset_identity(setup_reads):

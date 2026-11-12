@@ -34,8 +34,8 @@ def test_focused_comparison_shows_each_selected_strategy_once():
 def test_comparison_respects_entry_limit_and_excludes_retired_trades_from_win_rate():
     adapters = load_adapters()
     closed = [
-        {"strategy": "IC_V25_90DTE_STRATEGYBRO_DYNAMIC", "net_pnl": 50.0},
-        {"strategy": "IC_V01_0DTE_D10_W2_PT30_T0945", "net_pnl": -100.0},
+        {"strategy": "IC_V25_90DTE_STRATEGYBRO_DYNAMIC", "net_pnl": 50.0, "is_eligible":True, "reconciliation_status":"VERIFIED"},
+        {"strategy": "IC_V01_0DTE_D10_W2_PT30_T0945", "net_pnl": -100.0, "is_eligible":True, "reconciliation_status":"VERIFIED"},
     ]
     with patch.dict(os.environ, {"INCUBATOR_STRATEGY_COUNT": "1"}, clear=True), \
          patch.object(adapters, "get_reconciled_trades", return_value=({}, closed, [])):
@@ -61,7 +61,7 @@ def test_scanner_keeps_every_configured_strategy_after_open_and_closed_trades(tm
     ledger.close()
     with patch.dict(os.environ, {"POSITION_LEDGER_PATH": str(tmp_path / "ledger.sqlite3")}, clear=True):
         names = [spec["strategy_name"] for spec in get_incubator_specs()]
-        closed = [{"strategy": name, "net_pnl": 10} for name in names]
+        closed = [{"strategy": name, "net_pnl": 10, "is_eligible":True, "reconciliation_status":"VERIFIED"} for name in names]
         opened = [{"strategy": name} for name in names]
         with patch.object(adapters, "get_reconciled_trades", return_value=({}, closed, opened)):
             data = adapters.get_incubator_data()
@@ -105,3 +105,16 @@ def test_scanner_does_not_claim_disabled_neural_policy_is_active(tmp_path):
         data = adapters.get_incubator_data()
     row = next(row for row in data["monitored_rows"] if row["is_neural"])
     assert row["scan_status"] == "POLICY DISABLED"
+
+
+def test_missing_eligibility_never_enters_comparison_metrics():
+    adapters=load_adapters()
+    name='IC_V25_90DTE_STRATEGYBRO_DYNAMIC'
+    records=[{'strategy':name,'net_pnl':99.0,'gross_pnl':100.0,'fees':1.0},
+             {'strategy':name,'net_pnl':2.0,'gross_pnl':3.0,'fees':1.0,'is_eligible':True,'reconciliation_status':'VERIFIED'}]
+    with patch.dict(os.environ,{'INCUBATOR_STRATEGY_COUNT':'1'},clear=True), \
+         patch.object(adapters,'get_reconciled_trades',return_value=({},records,[])):
+        result=adapters.get_incubator_data()
+    assert result['total_net_pnl']==2.0
+    assert result['eligible_closed_trades']==[records[1]]
+    assert result['eligible_closed_trades_count']==1

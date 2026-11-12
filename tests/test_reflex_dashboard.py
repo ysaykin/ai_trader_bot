@@ -33,130 +33,27 @@ class TestReflexDashboard(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import json
-        from strategies.runtime_records import resolve_record_path
-        trades_file = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
-        trades_file.parent.mkdir(parents=True, exist_ok=True)
-        fixtures = [
-            {
-                "event": "ENTRY",
-                "trade_id": "trade_20261030_ic_v04",
-                "timestamp": "2026-10-30T14:36:00Z",
-                "strategy": "IC_V04_D10_W5_PT40_T1030",
-                "symbol": "XSP",
-                "expiry": "2026-10-30",
-                "strikes": {"long_put": 757.0, "short_put": 762.0, "short_call": 774.0, "long_call": 779.0},
-                "quantity": 1,
-                "credit": 0.25,
-                "max_risk": 500.0,
-                "opening_credit_cash": 25.0,
-                "entry_fees": 1.60,
-                "status": "OPEN",
-                "source": "tradier_verified",
-                "reconciliation_status": "VERIFIED",
-                "execution_evidence": {
-                    "broker": "tradier",
-                    "account_id": "VA_TEST_ACCOUNT",
-                    "environment": "paper",
-                    "package_id": "pkg_v04_entry",
-                    "broker_parent_id": "ord_1001",
-                    "legs": [
-                        {"contract": "XSP_757_P", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b1"},
-                        {"contract": "XSP_762_P", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b2"},
-                        {"contract": "XSP_774_C", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b3"},
-                        {"contract": "XSP_779_C", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b4"},
-                    ],
-                },
-            },
-            {
-                "event": "EXIT",
-                "trade_id": "trade_20261030_ic_v04",
-                "timestamp": "2026-10-30T15:30:00Z",
-                "strategy": "IC_V04_D10_W5_PT40_T1030",
-                "exit_reason": "PROFIT_TARGET",
-                "gross_pnl": 20.0,
-                "fees": 1.60,
-                "net_pnl": 16.80,
-                "pnl": 16.80,
-                "exit_price": 0.05,
-                "status": "CLOSED",
-                "source": "tradier_verified",
-                "reconciliation_status": "VERIFIED",
-                "execution_evidence": {
-                    "broker": "tradier",
-                    "account_id": "VA_TEST_ACCOUNT",
-                    "environment": "paper",
-                    "package_id": "pkg_v04_exit",
-                    "broker_parent_id": "ord_1002",
-                    "legs": [
-                        {"contract": "XSP_757_P", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b5"},
-                        {"contract": "XSP_762_P", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b6"},
-                        {"contract": "XSP_774_C", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b7"},
-                        {"contract": "XSP_779_C", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b8"},
-                    ],
-                },
-            },
-            {
-                "event": "ENTRY",
-                "trade_id": "trade_20261030_ic_v13",
-                "timestamp": "2026-10-30T15:01:00Z",
-                "strategy": "IC_V13_D15_W10_PT40_T1100",
-                "symbol": "XSP",
-                "expiry": "2026-10-30",
-                "strikes": {"long_put": 748.0, "short_put": 758.0, "short_call": 778.0, "long_call": 788.0},
-                "quantity": 1,
-                "credit": 0.01,
-                "max_risk": 1000.0,
-                "opening_credit_cash": 1.0,
-                "entry_fees": 1.60,
-                "status": "OPEN",
-                "source": "tradier_verified",
-                "reconciliation_status": "VERIFIED",
-                "execution_evidence": {
-                    "broker": "tradier",
-                    "account_id": "VA_TEST_ACCOUNT",
-                    "environment": "paper",
-                    "package_id": "pkg_v13_entry",
-                    "broker_parent_id": "ord_1003",
-                    "legs": [
-                        {"contract": "XSP_748_P", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b9"},
-                        {"contract": "XSP_758_P", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b10"},
-                        {"contract": "XSP_778_C", "side": "sell_to_open", "quantity": 1, "broker_order_id": "b11"},
-                        {"contract": "XSP_788_C", "side": "buy_to_open", "quantity": 1, "broker_order_id": "b12"},
-                    ],
-                },
-            },
-            {
-                "event": "EXIT",
-                "trade_id": "trade_20261030_ic_v13",
-                "timestamp": "2026-10-30T15:31:00Z",
-                "strategy": "IC_V13_D15_W10_PT40_T1100",
-                "exit_reason": "PROFIT_TARGET",
-                "gross_pnl": 1.0,
-                "fees": 3.20,
-                "net_pnl": -2.20,
-                "pnl": -2.20,
-                "exit_price": 0.0,
-                "status": "CLOSED",
-                "source": "tradier_verified",
-                "reconciliation_status": "VERIFIED",
-                "execution_evidence": {
-                    "broker": "tradier",
-                    "account_id": "VA_TEST_ACCOUNT",
-                    "environment": "paper",
-                    "package_id": "pkg_v13_exit",
-                    "broker_parent_id": "ord_1004",
-                    "legs": [
-                        {"contract": "XSP_748_P", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b13"},
-                        {"contract": "XSP_758_P", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b14"},
-                        {"contract": "XSP_778_C", "side": "buy_to_close", "quantity": 1, "broker_order_id": "b15"},
-                        {"contract": "XSP_788_C", "side": "sell_to_close", "quantity": 1, "broker_order_id": "b16"},
-                    ],
-                },
-            },
-        ]
-        with open(trades_file, "w", encoding="utf-8") as f:
-            for item in fixtures:
-                f.write(json.dumps(item) + "\n")
+        import tempfile
+        from functools import partial
+        from unittest.mock import patch
+        from trade_history_fixtures import evidence_bundle, SCOPE, AS_OF
+        import reflex_dashboard.data.adapters as adapters
+        temporary=tempfile.TemporaryDirectory(prefix="reflex-provenance-")
+        cls.addClassCleanup(temporary.cleanup)
+        root=Path(temporary.name)
+        bundle=evidence_bundle(root,trade_id="reflex-positive")
+        events=bundle["events"]
+        for event in events:
+            event["strategy"]="IC_V25_90DTE_STRATEGYBRO_DYNAMIC"
+            event["max_risk"]=500.0
+        events[0].update(opening_credit_cash=100.0,entry_fees=0.8,credit=1.0)
+        events[1].update(gross_pnl=1.0,fees=0.8,net_pnl=0.2,exit_reason="PROFIT_TARGET")
+        bundle["journal"].write_text("".join(json.dumps(event)+"\n" for event in events))
+        cls.evidence_bundle=bundle
+        replacement=partial(adapters.get_reconciled_trades,journal_path=bundle["journal"],ledger_path=bundle["ledger"],expected_scope=SCOPE,as_of_date=AS_OF)
+        fixture=patch.object(adapters,"get_reconciled_trades",side_effect=replacement)
+        fixture.start()
+        cls.addClassCleanup(fixture.stop)
 
     def test_helpers(self):
         self.assertEqual(number("123.45"), 123.45)
@@ -179,7 +76,7 @@ class TestReflexDashboard(unittest.TestCase):
 
     def test_bot_status(self):
         status = get_bot_status_from_log()
-        self.assertIn(status["state"], ["RUNNING", "STANDBY (SLEEPING)", "ACTIVE & MONITORING", "OFFLINE", "INITIALIZING", "WARNING / CHECK LOGS"])
+        self.assertIn(status["state"], ["RECENT LOG ACTIVITY", "STALE / UNCONFIRMED", "STANDBY (SLEEPING)", "ACTIVE & MONITORING", "OFFLINE", "INITIALIZING", "WARNING / CHECK LOGS"])
 
     def test_incubator_data(self):
         from strategies.incubator import get_incubator_specs
@@ -236,7 +133,7 @@ class TestReflexDashboard(unittest.TestCase):
 
     def test_dashboard_state_attributes(self):
         fields = DashboardState.get_fields()
-        self.assertEqual(fields["current_tab"].default, "positions")
+        self.assertEqual(fields["current_tab"].default, "overview")
         self.assertEqual(fields["broker_name"].default, "TRADIER")
         self.assertGreaterEqual(fields["open_risk_cap"].default, 5000.0)
 
@@ -394,7 +291,7 @@ class TestReflexDashboard(unittest.TestCase):
         mock_inc_data = {
             "visible_trades_50": mixed_trades,
             "all_closed_trades": mixed_trades,
-            "eligible_closed_trades": [mixed_trades[0]],
+            "eligible_closed_trades": mixed_trades + [{**mixed_trades[0], "trade_id":"missing_eligibility", "is_eligible":None}],
         }
 
         state = DashboardState(_reflex_internal_init=True)
@@ -412,6 +309,7 @@ class TestReflexDashboard(unittest.TestCase):
             all_csv = getattr(all_action, "data", str(all_action))
             self.assertIn("verified_trade_1", all_csv)
             self.assertNotIn("fee_inc_trade_2", all_csv)
+            self.assertNotIn("missing_eligibility", all_csv)
             self.assertNotIn("unattributed_trade_3", all_csv)
             self.assertNotIn("filled-synthetic", all_csv)
 
@@ -425,3 +323,78 @@ class TestReflexDashboard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_isolated_adapter_and_csv_preserve_unknown_fee_net_values(tmp_path):
+    import csv
+    import io
+    import json
+    from trade_history_fixtures import evidence_bundle, SCOPE, AS_OF
+    from reflex_dashboard.data.adapters import get_reconciled_trades,generate_trades_csv
+    bundle=evidence_bundle(tmp_path,fees=False)
+    events=bundle['events']
+    events[1].update(fees=None,net_pnl=None,fees_complete=False)
+    bundle['journal'].write_text(''.join(json.dumps(event)+'\n' for event in events))
+    _,closed,_=get_reconciled_trades(journal_path=bundle['journal'],ledger_path=bundle['ledger'],expected_scope=SCOPE,as_of_date=AS_OF)
+    assert len(closed)==1
+    assert closed[0]['reconciliation_status']=='FEE_INCOMPLETE'
+    assert closed[0]['fees'] is None and closed[0]['net_pnl'] is None
+    rows=list(csv.DictReader(io.StringIO(generate_trades_csv(closed))))
+    assert rows[0]['Contract Fees ($)']==''
+    assert rows[0]['Net Realized P&L ($)']==''
+    assert rows[0]['Reconciliation Status']=='FEE_INCOMPLETE'
+
+
+@pytest.mark.parametrize('field', ['fees', 'entry_fees', 'net_pnl'])
+def test_unknown_amount_with_complete_evidence_stays_auditable_and_out_of_performance(tmp_path: Path, field: str) -> None:
+    import csv
+    import io
+    import json
+    from unittest.mock import patch
+    from strategies.incubator import get_incubator_specs
+    from trade_history_fixtures import evidence_bundle, SCOPE, AS_OF
+    from reflex_dashboard.data import adapters
+
+    bundle = evidence_bundle(tmp_path)
+    spec = get_incubator_specs(limit=1)[0]
+    for event in bundle['events']:
+        event.update(strategy=spec['strategy_name'], fees_complete=True)
+    bundle['events'][0 if field == 'entry_fees' else 1][field] = None
+    bundle['journal'].write_text(''.join(json.dumps(event) + '\n' for event in bundle['events']))
+    reconciled = adapters.get_reconciled_trades(journal_path=bundle['journal'], ledger_path=bundle['ledger'],
+                                               expected_scope=SCOPE, as_of_date=AS_OF)
+    [trade] = reconciled[1]
+    assert trade['reconciliation_status'] == 'VERIFIED' and trade['is_eligible'] is False
+    assert trade['fee_source'] == 'retained_actual'
+    assert 'JOURNAL_AMOUNTS_INCOMPLETE' in trade['provenance_reasons']
+    assert trade['net_pnl'] is None
+    [csv_row] = list(csv.DictReader(io.StringIO(adapters.generate_trades_csv([trade]))))
+    assert csv_row['Net Realized P&L ($)'] == ''
+    if field != 'net_pnl':
+        assert csv_row['Contract Fees ($)'] == ''
+    with patch.object(adapters, 'get_reconciled_trades', return_value=reconciled), \
+         patch('strategies.incubator.get_incubator_specs', return_value=[spec]):
+        dashboard = adapters.get_incubator_data()
+    assert dashboard['total_net_pnl'] == 0. and dashboard['total_fees'] == 0.
+    assert dashboard['eligible_closed_trades'] == []
+    assert [row['trade_id'] for row in dashboard['visible_trades_50']] == [trade['trade_id']]
+
+
+def test_analysis_labs_are_retained_but_not_exposed_or_loaded():
+    from unittest.mock import patch
+    import reflex_dashboard.reflex_dashboard as application
+    import reflex_dashboard.state as state_module
+    assert state_module.ANALYSIS_LABS_ENABLED is False
+    from reflex_dashboard.components import ab_lab_view, benchmark_view
+    rendered=str(application.index().render())
+    assert 'S&P 500 Benchmark' not in rendered
+    assert 'A/B Lab' not in rendered
+    assert callable(ab_lab_view) and callable(benchmark_view)
+    assert [item[1] for item in application.NAVIGATION] == ['Overview', 'Positions', 'Orders', 'Strategies', 'System health', 'Settings']
+    state=DashboardState(_reflex_internal_init=True)
+    for tab in ('ab_lab','benchmark'):
+        state.set_tab(tab)
+        assert state.current_tab=='overview'
+    with patch.object(state_module,'get_ab_lab_data',side_effect=AssertionError('hidden lab loaded')) as loader:
+        state.load_all()
+    loader.assert_not_called()

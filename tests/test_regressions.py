@@ -13,6 +13,8 @@ from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 
+from strategies.broker_reads import _fresh
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,7 +27,10 @@ def load_module(name: str, path: str) -> ModuleType:
     traders = ModuleType("lumibot.traders")
     traders.Trader = Mock()
     strategy = ModuleType("lumibot.strategies.strategy")
-    strategy.Strategy = type("Strategy", (), {"name": "SPXIronCondor"})
+    strategy.Strategy = type("Strategy", (), {
+        "name": "SPXIronCondor",
+        "__init__": lambda self, **kwargs: self.__dict__.update(kwargs),
+    })
     entities = ModuleType("lumibot.entities")
     entities.Asset = Mock()
     entities.Asset.AssetType.OPTION = "option"
@@ -57,10 +62,31 @@ def load_module(name: str, path: str) -> ModuleType:
 entrypoint = load_module("trading_entrypoint", "main.py")
 iron_condor = load_module("iron_condor_under_test", "strategies/iron_condor.py")
 market_data_hub = load_module("market_data_hub_under_test", "strategies/market_data_hub.py")
-incubator = load_module("incubator_under_test", "strategies/incubator.py")
+# Collection may already have imported the real strategy through SDK contracts.
+# Keep this harness bound to its own strategy double regardless of test ordering.
+with patch.dict("sys.modules", {"strategies.iron_condor": iron_condor}):
+    incubator = load_module("incubator_under_test", "strategies/incubator.py")
 
 
 class BrokerSelectionTests(unittest.TestCase):
+    def test_variant_constructor_error_does_not_retry_with_default_credentials(self) -> None:
+        constructor = Mock(side_effect=TypeError("invalid constructor state"))
+        constructor.parameters = dict(iron_condor.SPXIronCondor.parameters)
+        with patch.object(incubator, "SPXIronCondor", constructor):
+            with self.assertRaisesRegex(TypeError, "invalid constructor state"):
+                incubator.build_strategy_variant(
+                    broker=SimpleNamespace(data_source=object()), spec={"strategy_name": "variant"},
+                )
+        constructor.assert_called_once()
+
+    def test_single_constructor_error_does_not_retry_with_default_credentials(self) -> None:
+        constructor = Mock(side_effect=TypeError("invalid constructor state"))
+        constructor.parameters = dict(iron_condor.SPXIronCondor.parameters)
+        with patch.dict("sys.modules", {"strategies.iron_condor": SimpleNamespace(SPXIronCondor=constructor)}):
+            with self.assertRaisesRegex(TypeError, "invalid constructor state"):
+                entrypoint.build_strategies_for_mode(SimpleNamespace(data_source=object()), mode="single")
+        constructor.assert_called_once()
+
     def get_broker(self, env: dict[str, str]) -> object:
         brokers = entrypoint._test_brokers
         brokers.Tradier.reset_mock()
@@ -311,7 +337,7 @@ class IronCondorTests(unittest.TestCase):
         self.addCleanup(self.environment.stop)
         self.strategy = iron_condor.SPXIronCondor()
         self.strategy.parameters = dict(iron_condor.SPXIronCondor.parameters)
-        self.strategy.broker = SimpleNamespace(name="Tradier")
+        self.strategy.broker = SimpleNamespace(name="Tradier", data_source=Mock())
         self.strategy.initialize()
         self.strategy.portfolio_value = 100_000.0
         self.strategy.get_datetime = Mock(return_value=datetime(2026, 10, 23, 14, tzinfo=timezone.utc))
@@ -325,6 +351,15 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.submit_order = Mock()
         self.strategy.cancel_order = Mock()
         self.strategy._position_open = False
+
+    def test_synthetic_fills_keep_inventory_without_reporting_evidence(self) -> None:
+        self.open_filled_position()
+        ledger = self.strategy._position_ledger
+        baskets = ledger.open_baskets(self.strategy._strategy_id())
+        self.assertTrue(baskets)
+        for basket in baskets:
+            self.assertFalse(ledger.realization_evidence(f"{basket.package_id}:ENTRY"))
+        self.assertTrue(ledger.owned_quantities(self.strategy._strategy_id()))
 
     def open_filled_position(
         self,
@@ -348,7 +383,8 @@ class IronCondorTests(unittest.TestCase):
             self.strategy._asset_registry[key] = asset
             legs.append(iron_condor.LedgerLeg(f"{package_id}:{index}", key, signed_quantity))
         self.strategy._position_ledger.record_submission(
-            package_id, self.strategy._strategy_id(), "open", legs, limit_price=limit_price
+            package_id, self.strategy._strategy_id(), "open", legs, limit_price=limit_price,
+            created_at=self.strategy.get_datetime(),
         )
         for leg, price in zip(legs, prices):
             self.strategy._position_ledger.record_fill(
@@ -431,11 +467,11 @@ class IronCondorTests(unittest.TestCase):
         position.settings["wing_width"] = 5
         package_id = self.record_pending_close()
         self.strategy._position_ledger.record_terminal_status(package_id, "canceled")
-        with patch.object(self.strategy, "_package_price", return_value=1.94), \
+        with patch.object(self.strategy, "_package_price", return_value=1.34), \
              patch.object(self.strategy, "_submit_package", return_value=[]) as submit, \
              patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
             self.strategy._close_all_options(exit_reason="PROFIT_TARGET", position_id=position.position_id)
-        self.assertEqual(submit.call_args.kwargs["price"], 1.96)
+        self.assertEqual(submit.call_args.kwargs["price"], 1.36)
         self.assertEqual(submit.call_args.kwargs["reprice_count"], 1)
 
     def test_pending_profit_target_does_not_cap_or_withdraw_eod_close(self) -> None:
@@ -478,7 +514,7 @@ class IronCondorTests(unittest.TestCase):
         self.assertEqual(position.pending_exit_reason, "STOP_LOSS")
         self.assertEqual(self.strategy._position_ledger.get_position(position.position_id).exit_reason, "STOP_LOSS")
 
-    def test_pending_profit_target_does_not_cap_or_withdraw_abrupt_close(self) -> None:
+    def test_abrupt_close_preserves_pending_profit_target_without_submission(self) -> None:
         self.open_filled_position()
         position = self.strategy._runtime()
         position.settings["wing_width"] = 5.0
@@ -491,11 +527,10 @@ class IronCondorTests(unittest.TestCase):
              patch.object(self.strategy, "_submit_package", return_value=[]) as submit, \
              patch.object(iron_condor, "option_fee_per_contract", return_value=0.4):
             self.strategy.on_abrupt_closing()
-        submit.assert_called_once()
-        self.assertAlmostEqual(submit.call_args.kwargs["price"], 2.55)
+        submit.assert_not_called()
         self.assertTrue(position.exit_requested)
-        self.assertEqual(position.pending_exit_reason, "ABRUPT_CLOSE")
-        self.assertEqual(self.strategy._position_ledger.get_position(position.position_id).exit_reason, "ABRUPT_CLOSE")
+        self.assertEqual(position.pending_exit_reason, "PROFIT_TARGET")
+        self.assertEqual(self.strategy._position_ledger.get_position(position.position_id).exit_reason, "PROFIT_TARGET")
 
     def test_missing_profit_ceiling_withdraws(self) -> None:
         self.open_filled_position()
@@ -578,6 +613,7 @@ class IronCondorTests(unittest.TestCase):
         ledger.record_submission(
             "pending-close", self.strategy._strategy_id(), "close", legs,
             broker_tag="pending-close-tag", limit_price=2.0,
+            created_at=self.strategy.get_datetime(),
         )
         basket = ledger.get_basket("pending-close")
         created = datetime.fromisoformat(basket.created_at)
@@ -608,6 +644,77 @@ class IronCondorTests(unittest.TestCase):
             self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
         self.strategy.submit_order.assert_not_called()
         self.assertTrue(self.strategy._position_open)
+        self.assertTrue(self.strategy._exit_requested)
+
+    def test_rejected_close_cancel_is_not_repeated_on_each_tick(self) -> None:
+        self.open_filled_position()
+        owned = self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id())
+        package_id = self.record_pending_close()
+        ledger = self.strategy._position_ledger
+        parent = SimpleNamespace(identifier="broker-close", status="pending", is_active=lambda: True)
+        ledger.bind_broker_submission(package_id, parent)
+        self.strategy.get_orders.return_value = [parent]
+        self.strategy.cancel_order.side_effect = RuntimeError(
+            "Broker storage or adapter failure: Error: 400 - order not available to be canceled"
+        )
+        for _ in range(2):
+            self.strategy._close_all_options()
+        self.strategy.cancel_order.assert_called_once_with(parent)
+        self.strategy.submit_order.assert_not_called()
+        self.assertTrue(ledger.is_inflight(ledger.get_basket(package_id)))
+        self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
+        self.assertTrue(self.strategy._position_open)
+        self.assertTrue(self.strategy._exit_requested)
+
+    def test_close_package_pricing_requires_fresh_broker_reads(self) -> None:
+        self.open_filled_position()
+        observed_freshness = []
+        def price(*args, **kwargs):
+            observed_freshness.append(_fresh.get())
+            return 2.0
+        self.strategy._package_price = Mock(side_effect=price)
+        self.assertFalse(_fresh.get())
+        self.strategy._close_all_options(exit_reason="STOP_LOSS")
+        self.strategy._package_price.assert_called_once()
+        self.assertEqual(observed_freshness, [True])
+        self.strategy.submit_order.assert_called_once()
+        self.assertFalse(_fresh.get())
+
+    def test_rejected_close_cancel_backs_off_and_status_change_retries_immediately(self) -> None:
+        self.open_filled_position()
+        package_id = self.record_pending_close()
+        parent = SimpleNamespace(identifier="broker-close", status="pending", is_active=lambda: True)
+        self.strategy._position_ledger.bind_broker_submission(package_id, parent)
+        self.strategy.get_orders.return_value = [parent]
+        self.strategy.cancel_order.side_effect = RuntimeError(
+            "Error: 400 - order not available to be canceled"
+        )
+        start = self.strategy.get_datetime.return_value
+        for seconds, count in (
+            (0, 1), (59, 1), (60, 2), (179, 2), (180, 3), (419, 3),
+            (420, 4), (899, 4), (900, 5), (1799, 5), (1800, 6), (2699, 6),
+        ):
+            self.strategy.get_datetime.return_value = start + timedelta(seconds=seconds)
+            self.strategy._close_all_options()
+            self.assertEqual(self.strategy.cancel_order.call_count, count)
+        parent.status = "open"
+        self.strategy.cancel_order.side_effect = None
+        self.strategy._close_all_options()
+        self.assertEqual(self.strategy.cancel_order.call_count, 7)
+        self.strategy.submit_order.assert_not_called()
+
+    def test_rejected_entry_cancel_preserves_the_exit_barrier(self) -> None:
+        self.open_filled_position()
+        ledger = self.strategy._position_ledger
+        owned = ledger.owned_quantities(self.strategy._strategy_id())
+        entry = SimpleNamespace(identifier="entry-order", status="pending", is_active=lambda: True)
+        self.strategy._entry_orders = [entry]
+        self.strategy.cancel_order.side_effect = RuntimeError("cancel rejected")
+        for _ in range(2):
+            self.strategy._close_all_options()
+        self.strategy.cancel_order.assert_called_once_with(entry)
+        self.strategy.submit_order.assert_not_called()
+        self.assertEqual(ledger.owned_quantities(self.strategy._strategy_id()), owned)
         self.assertTrue(self.strategy._exit_requested)
 
     def test_confirmed_close_cancellation_allows_replacement(self) -> None:
@@ -1059,8 +1166,9 @@ class IronCondorTests(unittest.TestCase):
         from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
         settlement = SettlementValue(date(2026, 10, 23), Decimal("105.0"), "cboe.com", datetime.now(timezone.utc), "hash", "official")
         broker_cash = BrokerCashEvidence("test_account", "act-exp-1", date(2026, 10, 23), 0, True)
-        self.strategy._position_ledger.record_settlement_value(settlement)
-        self.strategy._position_ledger.record_broker_cash_evidence(broker_cash)
+        from trade_history_fixtures import retain_settlement
+        [basket] = self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())
+        retain_settlement(self.strategy._position_ledger,basket.position_id,settlement,broker_cash)
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
         self.assertEqual(self.strategy._position_ledger.owned_quantities(self.strategy._strategy_id()), {})
@@ -1140,6 +1248,9 @@ class IronCondorTests(unittest.TestCase):
             "official",
         )
         broker_cash = BrokerCashEvidence("test_account", "act-reg-1", date(2026, 10, 26), 0, True)
+        from trade_history_fixtures import retain_settlement
+        [basket] = self.strategy._position_ledger.open_baskets(self.strategy._strategy_id())
+        retain_settlement(self.strategy._position_ledger,basket.position_id,settlement,broker_cash)
         self.strategy._position_ledger.expire_strategy_positions(
             self.strategy._strategy_id(),
             self.strategy.get_datetime().date(),
@@ -1151,8 +1262,8 @@ class IronCondorTests(unittest.TestCase):
         self.strategy.on_trading_iteration()
         self.assertFalse(self.strategy._position_open)
 
-        # 3. Open Trade #2
-        self.open_filled_position(quantity=1)
+        # 3. Open Trade #2 with an expiry after the advanced strategy clock.
+        self.open_filled_position(quantity=1, expiration="2026-10-28")
         self.assertTrue(self.strategy._position_open)
 
         # 4. Close Trade #2
@@ -1177,15 +1288,15 @@ class IronCondorTests(unittest.TestCase):
         self.assertEqual(self.strategy._pending_fees, 6.40)
         self.assertEqual(self.strategy._pending_net_pnl, -256.40)
 
-        # Retry with no arguments (e.g. before_market_closes or on_abrupt_closing)
+        # Expiry close takes precedence while retaining the original P&L evidence.
         self.strategy.before_market_closes()
-        self.assertEqual(self.strategy._pending_exit_reason, "STOP_LOSS")
+        self.assertEqual(self.strategy._pending_exit_reason, "EOD_CLOSE")
         self.assertEqual(self.strategy._pending_gross_pnl, -250.0)
         self.assertEqual(self.strategy._pending_fees, 6.40)
         self.assertEqual(self.strategy._pending_net_pnl, -256.40)
 
         self.strategy.on_abrupt_closing()
-        self.assertEqual(self.strategy._pending_exit_reason, "STOP_LOSS")
+        self.assertEqual(self.strategy._pending_exit_reason, "EOD_CLOSE")
 
 
 class OrderRoutingRegressionTests(unittest.TestCase):
@@ -1410,7 +1521,9 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
     def test_incubator_defines_20_distinct_strategy_variants(self) -> None:
         hub = market_data_hub.MarketDataHub(ttl_seconds=240)
         with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid", "STRATEGYBRO_ENABLED": "false", "DYNAMIC_STRATEGIES_ENABLED": "false", "NEURAL_STRATEGY_ENABLED": "false"}):
-            strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
+            strategies = incubator.build_incubator_strategies(
+                broker=SimpleNamespace(name="Tradier", data_source=Mock()), market_data_hub=hub, limit=20,
+            )
         self.assertEqual(len(strategies), 20)
         names = {s.name for s in strategies}
         self.assertEqual(len(names), 20)
@@ -1426,7 +1539,9 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
     def test_market_data_hub_deduplicates_chains_and_prices_across_20_strategies(self) -> None:
         hub = market_data_hub.MarketDataHub(ttl_seconds=240)
         with patch.dict(os.environ, {"INCUBATOR_PROFILE": "full_grid", "STRATEGYBRO_ENABLED": "false", "DYNAMIC_STRATEGIES_ENABLED": "false", "NEURAL_STRATEGY_ENABLED": "false"}):
-            strategies = incubator.build_incubator_strategies(broker=Mock(), market_data_hub=hub, limit=20)
+            strategies = incubator.build_incubator_strategies(
+                broker=SimpleNamespace(name="Tradier", data_source=Mock()), market_data_hub=hub, limit=20,
+            )
         fixed_dt = datetime(2026, 10, 26, 14, 0, tzinfo=timezone.utc)
         chain_call_count = 0
         price_call_count = 0
@@ -1473,6 +1588,7 @@ class IncubatorAndMarketDataHubTests(unittest.TestCase):
         strat_a.parameters = {**iron_condor.SPXIronCondor.parameters, "position_ledger": ledger}
         strat_a.broker = broker
         strat_a.initialize()
+        strat_a.get_datetime = Mock(return_value=datetime(2026, 10, 23, 14, tzinfo=timezone.utc))
 
         strat_b = iron_condor.SPXIronCondor()
         strat_b.name = "Strategy_B"

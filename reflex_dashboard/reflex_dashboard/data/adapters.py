@@ -10,9 +10,9 @@ import sys
 import json
 import re
 import sqlite3
-from datetime import datetime, timezone, time, date, timedelta
+from datetime import datetime, timezone, time, timedelta
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import dotenv_values, load_dotenv
-from dashboard.presentation import finite_number, format_numeric, option_mark
+from dashboard.presentation import finite_number, format_numeric
 from dashboard.positions import build_positions, quote_symbols, read_packages
 
 
@@ -57,29 +57,29 @@ def money(value: Any) -> str:
 
 def get_market_clock() -> dict[str, Any]:
     """Calculate US Eastern market session state."""
+    from strategies.order_sessions import session_bounds
+
     et = datetime.now(EASTERN_TZ)
 
-    is_weekday = et.weekday() < 5
     current_time = et.time()
+    bounds = session_bounds(et.date())
 
     pre_market_start = time(4, 0)
-    market_open = time(9, 30)
-    market_close = time(16, 0)
     post_market_end = time(20, 0)
 
-    if not is_weekday:
-        status = "MARKET CLOSED (WEEKEND)"
+    if bounds is None:
+        status = "MARKET CLOSED (WEEKEND)" if et.weekday() >= 5 else "MARKET CLOSED (HOLIDAY)"
         is_open = False
         badge_color = "gray"
-    elif market_open <= current_time < market_close:
+    elif bounds[0] <= et < bounds[1]:
         status = "REGULAR TRADING HOURS"
         is_open = True
         badge_color = "jade"
-    elif pre_market_start <= current_time < market_open:
+    elif current_time >= pre_market_start and et < bounds[0]:
         status = "PRE-MARKET"
         is_open = False
         badge_color = "amber"
-    elif market_close <= current_time < post_market_end:
+    elif et >= bounds[1] and current_time < post_market_end:
         status = "POST-MARKET"
         is_open = False
         badge_color = "indigo"
@@ -128,6 +128,21 @@ def get_bot_status_from_log(log_path: str = "logs/trading.log") -> dict[str, str
         # Extract timestamp
         ts_match = re.match(r"^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})", last_line)
         timestamp = ts_match.group(1) if ts_match else "Recent"
+        last_action = last_line[-160:]
+        if "{" in last_line:
+            try:
+                payload = json.loads(last_line[last_line.index("{"):])
+                if isinstance(payload, dict) and "broker_snapshot" in payload:
+                    last_action = "Broker telemetry received for " + format_strategy_label(str(payload.get("strategy_name") or "the engine"))
+            except ValueError:
+                pass
+
+        observed = (datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=EASTERN_TZ)
+                    if ts_match else None)
+        age = (datetime.now(EASTERN_TZ) - observed).total_seconds() if observed else None
+        if age is None or age > 900 or age < -60:
+            return {"state": "STALE / UNCONFIRMED", "last_action": last_action,
+                    "timestamp": timestamp, "badge_color": "amber"}
 
         # Check for key states
         combined = " ".join(last_lines).lower()
@@ -141,21 +156,21 @@ def get_bot_status_from_log(log_path: str = "logs/trading.log") -> dict[str, str
         elif "error" in combined[-300:]:
             return {
                 "state": "WARNING / CHECK LOGS",
-                "last_action": last_line[-80:],
+                "last_action": last_action,
                 "timestamp": timestamp,
                 "badge_color": "amber",
             }
         elif "placed" in combined or "monitoring" in combined or "cycle" in combined:
             return {
                 "state": "ACTIVE & MONITORING",
-                "last_action": last_line[-80:],
+                "last_action": last_action,
                 "timestamp": timestamp,
                 "badge_color": "cyan",
             }
         else:
             return {
-                "state": "RUNNING",
-                "last_action": last_line[-80:],
+                "state": "RECENT LOG ACTIVITY",
+                "last_action": last_action,
                 "timestamp": timestamp,
                 "badge_color": "jade",
             }
@@ -218,12 +233,20 @@ def get_broker_telemetry() -> dict[str, Any]:
         res["ledger_error"] = ""
         try:
             ledger = PositionLedger(ledger_path, read_only=True)
-            risk_snap = ledger.risk_snapshot()
-            res["strategy_risk"] = risk_snap.get("strategy_risk", {})
-            res["portfolio_risk"] = risk_snap.get("portfolio_risk")
-        except Exception:
-            res["strategy_risk"] = {}
+            try:
+                risk_snap = ledger.risk_snapshot()
+                res["strategy_risk"] = risk_snap.get("strategy_risk", {})
+                res["portfolio_risk"] = risk_snap.get("portfolio_risk")
+                if res["portfolio_risk"] is None:
+                    res["ledger_error"] = "Ledger exposure cannot be confirmed; risk values may be unavailable."
+                    if not res["strategy_risk"]:
+                        res["strategy_risk"] = None
+            finally:
+                ledger.close()
+        except (OSError, ValueError, sqlite3.Error):
+            res["strategy_risk"] = None
             res["portfolio_risk"] = None
+            res["ledger_error"] = "Ledger risk unavailable; exposure cannot be confirmed."
     except (OSError, ValueError, sqlite3.Error):
         res["ledger_packages"] = []
         res["ledger_error"] = "Ownership ledger unavailable; broker inventory remains unattributed."
@@ -237,7 +260,7 @@ def get_broker_telemetry() -> dict[str, Any]:
             # Cache maintenance must not hide readable inventory or abort the
             # independent strategy roster when a deployment has a read-only mount.
             _apply_broker_snapshot(res, reads.display())
-            reads.demand(quote_symbols(res["ledger_packages"]))
+            reads.demand(quote_symbols(res["ledger_packages"]) | {str(env.get("IC_SYMBOL") or "XSP"), "VIX", "VIX9D"})
             reads.start()
         except (OSError, sqlite3.Error) as error:
             readonly = getattr(error, "sqlite_errorcode", 0) & 0xff == sqlite3.SQLITE_READONLY
@@ -266,6 +289,7 @@ def _apply_broker_snapshot(res: dict[str, Any], snapshots: dict[str, Any]) -> No
     res["historical_raw_positions"] = bundle["historical_raw_positions"]
     res["historical_orders"] = bundle["historical_orders"]
     res["raw_orders"] = bundle["raw_orders"]
+    res["quote_snapshots"] = {key[6:]: value for key, value in snapshots.items() if key.startswith("quote:")}
 
     if bundle["equity"] is not None:
         res["equity"] = bundle["equity"]
@@ -279,7 +303,7 @@ def _apply_broker_snapshot(res: dict[str, Any], snapshots: dict[str, Any]) -> No
     res["balances_status"] = bundle["balances_status"]
 
     quotes = {key[6:]: snapshots[key].get("data") for key in snapshots if key.startswith("quote:") and isinstance(snapshots[key].get("data"), dict)}
-    res["quotes"] = {sym: {"mark": option_mark(q.get("bid"), q.get("ask"), q.get("last")),
+    res["quotes"] = {sym: {"mark": bundle["marks"].get(sym),
                            "delta": number((q.get("greeks") or {}).get("delta")),
                            "theta": number((q.get("greeks") or {}).get("theta")),
                            "timestamp": _quote_timestamp(q)} for sym, q in quotes.items()}
@@ -296,8 +320,13 @@ def _apply_broker_snapshot(res: dict[str, Any], snapshots: dict[str, Any]) -> No
         res["orders_synced_at"] = snapshots["orders"].get("synced_at")
         res["orders"] = bundle["orders"]
 
-    sources = [(key, value) for key, value in res["freshness"].items()]
-    res["sync_status"] = "loading" if not sources else "ready" if all(v["status"] == "ready" for _, v in sources) else "stale"
+    # Account freshness describes the same resources named in its message.
+    # Market input health is displayed separately; unused old quote rows must
+    # not keep a successfully refreshed account permanently marked stale.
+    sources = [(key, value) for key, value in res["freshness"].items() if key in {"balances", "positions", "orders"}]
+    res["sync_status"] = ("loading" if not sources else "ready" if
+                          {"balances", "positions", "orders"}.issubset(res["freshness"]) and
+                          all(v["status"] == "ready" for _, v in sources) else "stale")
     res["sync_message"] = " | ".join(f"{key}: {v['status']}, {int(v['age']) if v['age'] is not None else '?'}s old"
         + (f", {v['error']}" if v["error"] else "") for key, v in sources if not key.startswith("quote:")) or "Waiting for the first broker snapshot"
     old_balance = snapshots.get("balances", {})
@@ -319,7 +348,8 @@ def _quote_timestamp(quote: dict[str, Any]) -> str:
 def get_position_workspace(telemetry: dict[str, Any]) -> dict[str, Any]:
     """Use the same ledger and quote snapshot for all position views."""
     fee_events: dict[str, list[dict[str, Any]]] = {}
-    path = PROJECT_ROOT / "logs/trades.jsonl"
+    from strategies.runtime_records import resolve_record_path
+    path = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl")
     if path.exists():
         seen = set()
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -365,7 +395,8 @@ def get_position_workspace(telemetry: dict[str, Any]) -> dict[str, Any]:
             fee_contracts[trade_id] = contracts
     env = dotenv_values(PROJECT_ROOT / ".env")
     rate = number(env.get("OPTION_FEE_PER_CONTRACT"))
-    rows, issues = build_positions(telemetry.get("ledger_packages", []), telemetry.get("raw_positions"),
+    rows, issues = build_positions(telemetry.get("ledger_packages", []),
+                                   telemetry.get("raw_positions") if telemetry.get("positions_status") in {"ready", "stale"} else None,
                                    telemetry.get("quotes", {}), fee_rate=rate if rate is not None and rate >= 0 else .40,
                                    reported_fees=fees, reported_fee_contracts=fee_contracts,
                                    as_of=datetime.now(EASTERN_TZ).date())
@@ -476,29 +507,29 @@ def format_strikes(strikes: dict[str, Any] | None, structure: str) -> str:
         return f"{lp}/{sp} | {sc}/{lc}"
 
 
-def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+def get_reconciled_trades(fee_per_contract: float = 0.40, *, journal_path: Path | None = None,
+                          ledger_path: Path | None = None, expected_scope: Any = None,
+                          as_of_date: str | None = None) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Parses logs/trades.jsonl and unifies lifecycle events by trade_id.
-    Calculates exact fees (2 legs for verticals = $1.60/ct, 4 legs for IC = $3.20/ct),
-    Gross P&L, Net P&L, Capital at Risk, Credit Received, and Net ROI % (RoR and RoC).
+    Preserves journal-reported amounts and existing financial aggregation.
+    Eligibility and actual-fee labels require retained scoped evidence.
     Returns (trades_by_id, closed_trades, open_trades).
     """
-    import sqlite3
-    from strategies.position_ledger import resolve_ledger_path
     from strategies.runtime_records import (
         RecordScope,
         classify_trade,
-        is_fixture_trade,
-        is_protected_runtime_path,
-        is_test_mode_active,
+        journal_event_conflicts,
         load_ledger_execution_evidence,
         resolve_record_path,
     )
 
-    trades_path = resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl", RecordScope.from_env())
+    scope = expected_scope or RecordScope.from_env()
+    trades_path = Path(journal_path) if journal_path is not None else resolve_record_path("TRADE_LOG_PATH", "logs/trades.jsonl", scope)
     trades_by_id: dict[str, dict[str, Any]] = {}
+    events_by_trade: dict[str, list[dict[str, Any]]] = {}
 
-    ledger_ev = load_ledger_execution_evidence()
+    ledger_ev = load_ledger_execution_evidence(ledger_path, expected_scope=scope, as_of_date=as_of_date)
 
     if trades_path.exists():
         try:
@@ -511,6 +542,7 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
                     tid = r.get("trade_id")
                     if not tid:
                         continue
+                    events_by_trade.setdefault(tid, []).append(r)
                     event = str(r.get("event", "")).upper()
                     if tid not in trades_by_id or event == "ENTRY":
                         trade = dict(r)
@@ -537,7 +569,7 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
                         if "timestamp" in r:
                             trade["exit_timestamp"] = r["timestamp"]
                         for key, value in r.items():
-                            if key not in {"gross_pnl", "fees", "net_pnl", "opening_credit_cash", "quantity", "timestamp", "entry_fees"} and value is not None:
+                            if key not in {"gross_pnl", "fees", "net_pnl", "opening_credit_cash", "quantity", "timestamp", "entry_fees", "execution_evidence"} and value is not None:
                                 trade[key] = value
                     else:
                         trade.update({key: value for key, value in r.items() if value is not None})
@@ -547,7 +579,8 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
     closed_trades: list[dict[str, Any]] = []
     open_trades: list[dict[str, Any]] = []
 
-    today_utc = datetime.now(timezone.utc).date()
+    today_utc = datetime.strptime(as_of_date, "%Y-%m-%d").date() if as_of_date else datetime.now(timezone.utc).date()
+    ledger_ev["conflicting_event_ids"] = journal_event_conflicts([event for sequence in events_by_trade.values() for event in sequence])
 
     for tid, t in trades_by_id.items():
         status = str(t.get("status", "")).upper()
@@ -578,14 +611,17 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
         strikes = t.get("strikes") or {}
 
         # Attribution & Partitioning via shared classifier
-        classification = classify_trade(t, ledger_ev)
+        classification = classify_trade(events_by_trade[tid], ledger_ev, expected_scope=scope, as_of_date=as_of_date)
         t["partition"] = classification["partition"]
         t["source"] = classification["source"]
         t["reconciliation_status"] = classification["reconciliation_status"]
         t["is_eligible"] = classification["is_eligible"]
+        t["provenance_reasons"] = classification["reason_codes"]
+        t["evidence_references"] = classification["evidence_refs"]
 
-        t["fee_source"] = "exact" if t.get("has_broker_fees") else "estimated"
-        t["fee_label"] = "$0.40/leg (Estimated)" if t["fee_source"] == "estimated" else "Broker Confirmed"
+        t["classifier_version"] = classification["classifier_version"]
+        t["fee_source"] = "retained_actual" if classification["reconciliation_status"] == "VERIFIED" else "unavailable"
+        t["fee_label"] = "Actual fee evidence retained" if t["fee_source"] == "retained_actual" else "Actual fee coverage incomplete"
 
         # Separate verified closed executions from unresolved/open
         if status == "CLOSED" or evt == "EXIT":
@@ -628,6 +664,11 @@ def get_reconciled_trades(fee_per_contract: float = 0.40) -> tuple[dict[str, dic
             t["time_str"] = format_trade_time_et(t.get("entry_timestamp") or t.get("timestamp", ""))
             t["exit_time_str"] = format_trade_time_et(t.get("exit_timestamp", ""))
 
+            if any(("fees" in event and event["fees"] is None) or ("entry_fees" in event and event["entry_fees"] is None) for event in events_by_trade[tid]):
+                t["fees"] = None
+                t["fees_str"] = "UNAVAILABLE"
+            if t.get("fees") is None or any("net_pnl" in event and event["net_pnl"] is None for event in events_by_trade[tid]):
+                t.update(net_pnl=None,net_pnl_str="UNAVAILABLE",net_pnl_color="gray",net_ror_pct=None,net_roc_pct=None,net_ror_str="-")
             closed_trades.append(t)
         elif is_expired:
             # Unsupported expiration without confirmed fill or verified settlement remains unresolved
@@ -755,7 +796,7 @@ def get_incubator_data() -> dict[str, Any]:
         is_orb_dynamic = bool(spec.get("is_orb_dynamic_variant", False))
         struct = str(spec.get("structure", "iron_condor")).lower()
         if is_neural:
-            short_id = f"IC_V22 (Neural Pure)"
+            short_id = "IC_V22 (Neural Pure)"
         elif is_testing:
             short_id = f"IC_V21 ({spec.get('dte', 25)}DTE Test)"
         elif struct == "bull_put":
@@ -776,7 +817,7 @@ def get_incubator_data() -> dict[str, Any]:
             short_id = spec_tag
 
         v_closed = [t for t in closed_all if t.get("strategy") == name or extract_variant_tag(str(t.get("strategy", ""))) == spec_tag]
-        v_eligible_closed = [t for t in v_closed if t.get("is_eligible", True)]
+        v_eligible_closed = [t for t in v_closed if t.get("is_eligible") is True]
         v_open = [t for t in open_all if t.get("strategy") == name or extract_variant_tag(str(t.get("strategy", ""))) == spec_tag]
 
         gross_pnl = sum(t.get("gross_pnl", 0.0) for t in v_eligible_closed)
@@ -801,8 +842,8 @@ def get_incubator_data() -> dict[str, Any]:
         else:
             win_rate_color = "#EF4444"
 
-        total_risk = sum(t.get("max_risk", spec["wing_width"] * 100.0) for t in v_closed)
-        total_credit = sum(t.get("credit_cash", 0.0) for t in v_closed)
+        total_risk = sum(t.get("max_risk", 0.0) or 0.0 for t in v_eligible_closed)
+        total_credit = sum(t.get("credit_cash", 0.0) or 0.0 for t in v_eligible_closed)
 
         net_ror_pct = (net_pnl / total_risk * 100.0) if total_risk > 0 else 0.0
         net_roc_pct = (net_pnl / total_credit * 100.0) if total_credit > 0 else 0.0
@@ -876,9 +917,9 @@ def get_incubator_data() -> dict[str, Any]:
             "fees_str": money(fees),
             "net_pnl": net_pnl,
             "net_pnl_str": money(net_pnl),
-            "net_ror_pct": f"{net_ror_pct:+.2f}%" if v_closed else "-",
+            "net_ror_pct": f"{net_ror_pct:+.2f}%" if v_eligible_closed and total_risk > 0 else "N/A",
             "net_ror_num": net_ror_pct,
-            "net_roc_pct": f"{net_roc_pct:+.1f}%" if v_closed else "-",
+            "net_roc_pct": f"{net_roc_pct:+.1f}%" if v_eligible_closed and total_credit > 0 else "N/A",
             "status": status,
             "status_color": status_color,
             "scan_status": scan_status,
@@ -1010,9 +1051,10 @@ def get_incubator_data() -> dict[str, Any]:
     }
 
     # Per-Trade Highlight data: past 50 visible closed trades
-    visible_trades_50 = closed_all[:50]
+    audit_closed = [t for t in closed_all if t.get("partition") != "quarantined" and t.get("reconciliation_status") != "QUARANTINED"]
+    visible_trades_50 = audit_closed[:50]
     all_combined_trades = open_all + closed_all
-    eligible_closed = [t for t in closed_all if t.get("is_eligible", True)]
+    eligible_closed = [t for t in closed_all if t.get("is_eligible") is True]
 
     return {
         "all_rows": all_rows,
@@ -1032,10 +1074,10 @@ def get_incubator_data() -> dict[str, Any]:
         "active_variants": len(traded_rows),
         "monitored_variants": len(monitored_rows),
         "total_trades": total_trades_count,
-        "total_closed_trades_count": len(closed_all),
+        "total_closed_trades_count": len(audit_closed),
         "visible_closed_trades_count": len(visible_trades_50),
         "eligible_closed_trades_count": len(eligible_closed),
-        "unattributed_trades_count": len([t for t in closed_all if not t.get("is_eligible", True) and t.get("reconciliation_status") != "QUARANTINED"]),
+        "unattributed_trades_count": len([t for t in closed_all if t.get("is_eligible") is not True and t.get("reconciliation_status") != "QUARANTINED"]),
         "quarantined_trades_count": len([t for t in closed_all if t.get("reconciliation_status") == "QUARANTINED"]),
         "total_gross_pnl": total_gross_pnl,
         "total_gross_pnl_str": money(total_gross_pnl),
@@ -1053,6 +1095,10 @@ def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
     import io
     import csv
     from strategies.runtime_records import is_fixture_trade
+
+    def csv_number(value: Any, suffix: str = "") -> str:
+        parsed = number(value)
+        return f"{parsed:.2f}{suffix}" if parsed is not None else ""
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -1096,11 +1142,11 @@ def generate_trades_csv(trades: list[dict[str, Any]]) -> str:
             t.get("quantity", 1),
             f"{t.get('credit', 0.0):.2f}",
             t.get("exit_reason", ""),
-            f"{t.get('gross_pnl', 0.0):.2f}",
-            f"{t.get('fees', 0.0):.2f}",
-            t.get("fee_label", "$0.40/leg (Estimated)"),
-            f"{t.get('net_pnl', 0.0):.2f}",
-            f"{t.get('net_ror_pct', 0.0):.2f}%",
+            csv_number(t.get("gross_pnl")),
+            csv_number(t.get("fees")),
+            t.get("fee_label", "Actual fee coverage unavailable"),
+            csv_number(t.get("net_pnl")),
+            csv_number(t.get("net_ror_pct"), "%"),
             t.get("status", "CLOSED"),
             t.get("source", "unattributed"),
             t.get("reconciliation_status", "UNATTRIBUTED"),
@@ -1172,16 +1218,22 @@ def get_ab_lab_data() -> dict[str, Any]:
 
 def get_neural_policy_data() -> dict[str, Any]:
     """Load neural policy recommendations, data readiness, and dynamic strategy switching evaluation."""
-    model_path = PROJECT_ROOT / "logs/models/policy.json"
-    traj_path = PROJECT_ROOT / "logs/trajectories.jsonl"
+    from strategies.runtime_records import resolve_record_path
+    model_path = Path(os.getenv("ML_MODEL_PATH") or PROJECT_ROOT / "logs/models/policy.json")
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
+    traj_path = resolve_record_path("TRAJECTORY_LOG_PATH", "logs/trajectories.jsonl")
     lineage_path = PROJECT_ROOT / "logs/models/model_lineage.json"
 
     required_ticks = 12
+    model_valid = False
+    ctrl = None
     if model_path.exists():
         try:
-            with open(model_path, "r", encoding="utf-8") as f:
-                p_data = json.load(f)
-                required_ticks = int(p_data.get("sequence_length", 12))
+            from ml.inference import LivePolicyController
+            ctrl = LivePolicyController(model_path)
+            required_ticks = ctrl.sequence_length
+            model_valid = True
         except Exception:
             pass
 
@@ -1189,6 +1241,8 @@ def get_neural_policy_data() -> dict[str, Any]:
     today_session = datetime.now(EASTERN_TZ).date().isoformat()
     latest_market: dict[str, Any] | None = None
     all_snapshots: list[dict[str, Any]] = []
+    seen_ticks = set()
+    latest_snapshot: dict[str, Any] = {}
 
     if traj_path.exists():
         try:
@@ -1200,11 +1254,17 @@ def get_neural_policy_data() -> dict[str, Any]:
                     try:
                         record = json.loads(line_str)
                         if record.get("event") == "SNAPSHOT":
-                            if record.get("complete"):
+                            identity = record.get("record_id") or record.get("timestamp")
+                            if not identity or identity in seen_ticks:
+                                continue
+                            seen_ticks.add(identity)
+                            latest_snapshot = record
+                            if record.get("complete") is True:
                                 all_snapshots.append(record)
                             rec_session = record.get("session")
                             if rec_session == today_session:
-                                current_ticks += 1
+                                if record.get("complete") is True:
+                                    current_ticks += 1
                                 if record.get("market"):
                                     latest_market = record.get("market")
                     except Exception:
@@ -1214,40 +1274,40 @@ def get_neural_policy_data() -> dict[str, Any]:
         except Exception:
             pass
 
-    has_sufficient_data = current_ticks >= required_ticks
+    has_sufficient_data = model_valid and current_ticks >= required_ticks
     readiness_pct = min(100, int((current_ticks / max(required_ticks, 1)) * 100))
-    readiness_str = f"READY ({current_ticks}/{required_ticks} Ticks)" if has_sufficient_data else f"WARMING UP ({current_ticks}/{required_ticks} Ticks)"
+    readiness_str = (f"WARMUP COMPLETE ({current_ticks}/{required_ticks} Ticks)" if has_sufficient_data else
+                     f"WARMING UP ({current_ticks}/{required_ticks} Ticks)" if model_valid else
+                     f"MODEL UNAVAILABLE ({current_ticks} complete ticks observed)")
 
-    market_regime = "Low-Vol Pinning"
+    market_regime = "Unavailable"
     try:
         from ml.evaluator import classify_market_regime
-        if latest_market:
+        if latest_market and number(latest_market.get("vix")) is not None:
             market_regime = classify_market_regime(latest_market)
     except Exception:
         pass
 
-    action = "HOLD"
+    action = "Unavailable"
     action_probs = {
-        "HOLD": 68.4,
-        "ADD": 12.1,
-        "TRIM": 14.5,
-        "FLATTEN": 5.0,
+        "HOLD": None,
+        "ADD": None,
+        "TRIM": None,
+        "FLATTEN": None,
     }
-    dynamic_pt = "40.0%"
-    contextual_selector = "IC_V05 (15Δ, $5 Wing, 7DTE)"
-    active_profile = "IC_V05_7DTE_D12_W3_PT35_T1015"
+    dynamic_pt = "N/A"
+    contextual_selector = "Unavailable"
+    active_profile = "Unavailable"
     inference_status = "unavailable"
 
-    if model_path.exists() and all_snapshots:
+    if ctrl is not None and all_snapshots:
         try:
-            from ml.inference import LivePolicyController
-            ctrl = LivePolicyController(model_path)
             current_session_snapshots = [s for s in all_snapshots if str(s.get("session") or "") == today_session]
             if current_session_snapshots:
                 for snap in current_session_snapshots:
                     ctrl.on_snapshot(snap)
                 rec = ctrl.last_recommendation
-                inference_status = "live"
+                inference_status = "replayed current session"
             else:
                 for snap in all_snapshots:
                     ctrl.on_snapshot(snap)
@@ -1264,7 +1324,7 @@ def get_neural_policy_data() -> dict[str, Any]:
                     "FLATTEN": round(rec.action_probabilities.get("FLATTEN_NOW", 0.0) * 100, 1),
                 }
                 dynamic_pt = f"{rec.profit_target * 100:.1f}%"
-                if inference_status == "live":
+                if inference_status == "replayed current session":
                     contextual_selector = rec.strategy_name
                     active_profile = rec.strategy_name
                 else:
@@ -1273,8 +1333,8 @@ def get_neural_policy_data() -> dict[str, Any]:
         except Exception:
             pass
 
-    regret_score = "+$18.40 vs Hindsight Best"
-    capture_efficiency = "84.2% MFE Capture"
+    regret_score = "N/A"
+    capture_efficiency = "N/A"
     try:
         from ml.evaluator import evaluate_counterfactual_regret
         if traj_path.exists():
@@ -1287,7 +1347,7 @@ def get_neural_policy_data() -> dict[str, Any]:
     except Exception:
         pass
 
-    model_version = "v1"
+    model_version = "Unknown" if model_valid else "Unavailable"
     if lineage_path.exists():
         try:
             with open(lineage_path, "r", encoding="utf-8") as f:
@@ -1297,14 +1357,14 @@ def get_neural_policy_data() -> dict[str, Any]:
             pass
 
     return {
-        "model_loaded": model_path.exists(),
+        "model_loaded": model_valid,
         "model_version": model_version,
         "inference_status": inference_status,
         "market_regime": market_regime,
         "dynamic_pt": dynamic_pt,
         "contextual_selector": contextual_selector,
         "active_switched_profile": active_profile,
-        "dynamic_switching_status": "AUTO-ADAPTING TO MARKET REGIME",
+        "dynamic_switching_status": f"Dashboard inference: {inference_status}",
         "has_sufficient_data": has_sufficient_data,
         "current_ticks": current_ticks,
         "required_ticks": required_ticks,
@@ -1315,6 +1375,7 @@ def get_neural_policy_data() -> dict[str, Any]:
         "regret_score": regret_score,
         "capture_efficiency": capture_efficiency,
         "ticks_count": current_ticks,
+        "latest_snapshot": latest_snapshot,
     }
 
 

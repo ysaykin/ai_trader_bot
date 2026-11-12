@@ -163,6 +163,42 @@ Run the independent-position regressions without broker writes:
 RUN_TRADIER_SANDBOX_WRITE_TEST=0 python3 -m pytest -q tests/test_concurrent_positions.py tests/test_tradier_order_routing.py
 ```
 
+## Exit and runtime safeguards
+
+P&L exits require complete option quotes and two distinct readings, at least
+30 seconds and at most ten minutes apart. The normal five-minute loop confirms
+on its next iteration. A leg's bid/ask gap cannot exceed
+the smaller of $1.00 and the larger of $0.25 or 50% of its midpoint. Marks
+outside the covered wings' payoff bounds are unavailable and cannot update MFE.
+Non-expiry positions defer P&L exits until 15 minutes after the session opens.
+An expiry close can override that hold and a pending stop.
+
+Stop limits use validated package quotes. Missing or rejected quotes retain
+the stop intent for a later attempt. Explicit liquidation and expiry closes
+retain bounded emergency pricing. Profit limits preserve the target after
+round-trip fees. The breakeven exit is disabled; the optional positive-profit
+trailing exit remains available. Paper entries keep the quoted credit unless
+`SANDBOX_CREDIT_DISCOUNT_PCT` is explicitly set.
+
+`IC_STOP_COOLDOWN_MINUTES` defaults to `60`. Stops block that strategy's entries
+and additions through the cooldown, which survives restarts and extends after
+confirmed stop fills. `IC_MIN_CREDIT_TO_WIDTH` defaults to `0.10`, requiring at
+least $0.50 per share for a $5 wing. `IC_MIN_CREDIT` can require a higher credit.
+
+Process failures retain positions and existing exit intents. Legacy
+`ABRUPT_CLOSE` intents expire after their session; submitted orders retain their
+reservations until broker reconciliation confirms a terminal outcome. The
+independent iteration watchdog emits `TRADING_ITERATION_STALLED` at critical
+level after ten minutes without a completed market-hours iteration. It logs
+once per stall and does not restart the process or send external notifications.
+
+Run the exit and runtime checks in an isolated container with broker networking
+disabled and no live records or credentials mounted:
+
+```bash
+python3 tools/verify_exit_safeguards.py
+```
+
 ## License
 
 MIT License

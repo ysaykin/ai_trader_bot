@@ -18,6 +18,7 @@ try:
 except ImportError:
     SPXIronCondor = Any  # type: ignore[misc, assignment]
 from strategies.market_data_hub import MarketDataHub, get_shared_market_data_hub
+from strategies.manual_positions import MANUAL_OWNER
 
 logger = logging.getLogger(__name__)
 
@@ -490,7 +491,7 @@ def _get_management_specs(
 ) -> list[dict[str, Any]]:
     """Restore excluded active owners, including disabled strategy families."""
     entry_names = {spec["strategy_name"] for spec in entry_specs}
-    retired_names = sorted({basket.strategy_id for basket in position_ledger.open_baskets()} - entry_names)
+    retired_names = sorted({basket.strategy_id for basket in position_ledger.open_baskets()} - entry_names - {MANUAL_OWNER})
     if not retired_names:
         return []
     catalog = [
@@ -596,16 +597,13 @@ def build_strategy_variant(
         strategy = object.__new__(SPXIronCondor)
         bind_follower_to_host(strategy, host_strategy)
     else:
-        try:
-            strategy = SPXIronCondor(
-                broker=broker,
-                budget=budget,
-                name=strategy_name,
-                parameters=dict(merged_params),
-            )
-        except TypeError:
-            # Support lightweight test doubles whose Strategy.__init__ accepts no kwargs
-            strategy = SPXIronCondor()
+        strategy = SPXIronCondor(
+            broker=broker,
+            data_source=broker.data_source,
+            budget=budget,
+            name=strategy_name,
+            parameters=dict(merged_params),
+        )
 
     try:
         strategy.name = strategy_name

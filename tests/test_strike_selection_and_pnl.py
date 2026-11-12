@@ -161,10 +161,10 @@ class TestPositionLedgerPartialFillCash(unittest.TestCase):
 
 class TestClosingPackagePrices(unittest.TestCase):
     CASES = [
-        ({"bid": 0.0, "ask": 0.0}, {"bid": 0.0, "ask": 0.0}, 0.01),
+        ({"bid": 0.0, "ask": 0.0}, {"bid": 0.0, "ask": 0.0}, None),
         ({"bid": 0.1, "ask": 0.3}, {"bid": 0.1, "ask": 0.3}, 0.2),
-        ({"bid": 0.0, "ask": 0.1}, {"bid": 0.2, "ask": 0.3}, 0.01),
-        ({"bid": 0.0, "ask": 0.2}, {"bid": 0.05, "ask": 0.25}, 0.15),
+        ({"bid": 0.0, "ask": 0.1}, {"bid": 0.2, "ask": 0.3}, None),
+        ({"bid": 0.0, "ask": 0.2}, {"bid": 0.05, "ask": 0.25}, None),
         ({"bid": 1.0, "ask": 1.2}, {"bid": 0.1, "ask": 0.3}, 1.8),
         (None, {"bid": 0.1, "ask": 0.3}, None),
         ({"bid": 0.3, "ask": 0.1}, {"bid": 0.1, "ask": 0.3}, None),
@@ -177,7 +177,9 @@ class TestClosingPackagePrices(unittest.TestCase):
             for short_quote, long_quote, expected in self.CASES:
                 strategy = iron_condor.SPXIronCondor()
                 strategy._fetch_quote = Mock(side_effect=[short_quote, long_quote, short_quote, long_quote])
-                legs = [(Mock(), signed * quantity) for signed in (1, -1, 1, -1)]
+                legs = [(SimpleNamespace(symbol="XSP", expiration="2026-11-20", strike=strike, right=right), signed * quantity)
+                        for strike, right, signed in ((95, "put", 1), (90, "put", -1),
+                                                      (110, "call", 1), (115, "call", -1))]
                 price = strategy._package_price(legs, order_type="debit")
                 if expected is None:
                     self.assertIsNone(price)

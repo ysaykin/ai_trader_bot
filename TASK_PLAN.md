@@ -1,5 +1,414 @@
 # Implementation task plan
 
+## Activate exit and runtime safeguards, 2026-11-12
+
+The user requested restart and live verification of the implemented safeguards.
+
+1. Verify the running bot's image, mounted source, paper mode and session state.
+   Save process/configuration fingerprints and a consistent ledger backup.
+2. Restart only lumibot-bot using its current image and environment. Preserve
+   the dashboard and recovery services, private configuration and broker orders.
+3. Verify source identity, health, broker reconciliation and completed trading
+   iterations. Inspect active safeguards, quotes, reservations and holdings with
+   read-only diagnostics; distinguish retained recovery issues from new errors.
+
+Restarted only lumibot-bot at 12:52:23 PM EST. It retained its container identity,
+image and environment; the dashboard's process and start time are unchanged.
+Eight deployed source hashes match the workspace. The main process is running
+and healthy. The 12:53 and 12:58 management cycles completed without new errors,
+with all seven entry-enabled strategies recorded in the 12:58 snapshot.
+Broker telemetry shows polling continuing without order errors or unprocessed
+events. The deployed code rejects the reported junk quote and disables the
+breakeven signal; fresh quotes produce bounded marks for all seven currently
+managed positions.
+
+Fresh broker comparisons preserve all 28 reported contracts and 28 held quotes,
+the existing unfilled V27 order and $11,105 reserved risk. All 900 requested/fill
+leg rows and 264 package lifecycle rows match the pre-restart backup, with no
+emergency submissions. Eight expired contract discrepancies remain unchanged.
+The explicit SANDBOX_CREDIT_DISCOUNT_PCT=0.10 override remains configured.
+
+The consistent backup passed SQLite integrity checking:
+`logs/backups/exit-safeguards-before-restart-20261112T175124Z.sqlite3`.
+Sanitized logs, source checks, before/after snapshots and the final report are
+in `/private/tmp/lumibot-activation-20261112-6fac6eno/verification.json`.
+
+## Repair exit and runtime safeguards, 2026-11-12
+
+Implement the mechanical fixes in the supplied loss review. Preserve existing
+uncommitted work, broker records, holdings, and private configuration.
+
+1. Reproduce unsafe quote exits, closing limits, crash liquidation, and polling
+   budget exhaustion with deterministic offline regressions.
+2. Validate and bound package marks, confirm P&L triggers on distinct readings,
+   defer non-expiry P&L exits during the opening 15 minutes, and constrain close
+   limits to validated quotes. Disable the breakeven ratchet.
+3. Handle transient polling budget failures without reporting empty inventory,
+   retain positions on process failures, expire legacy abrupt-close intents,
+   and detect missing market-hours iterations with a watchdog.
+4. Add stop-entry cooldown and minimum credit checks where the existing entry
+   path supports them. Verify execution/recovery regressions and inspect the
+   final diff. No broker writes, configuration edits, or activation are needed.
+
+Implemented complete quote validation and per-wing/joint payoff bounds for
+marks and orders. P&L exits require two distinct readings and defer during the
+first 15 session minutes for non-expiry positions. Stops require validated
+package pricing, profit limits preserve their threshold after fees, and expiry
+closes can override blocked stops. Disabled breakeven signals and retired their
+legacy intents. Crashes preserve positions, prior-session abrupt intents retire
+only after submitted orders are resolved, and polling read failures abort the
+SDK cycle without reporting empty inventory.
+
+Added an independent ten-minute iteration watchdog with one critical log per
+stall. Stop cooldown defaults to 60 minutes, survives database reopen, and
+extends after confirmed fills. Minimum credit defaults to 10% of wing width;
+additions use the original position's settings after strategy switches. Removed
+the implicit paper-entry discount. Runtime defaults and the isolated verification
+command are documented in README.md. The running services were not restarted.
+
+Verification: `python3 tools/verify_exit_safeguards.py` passes 347 tests and 67
+subtests, with four optional image/UI checks skipped. The container has networking
+disabled and mounts only an isolated source copy. Regression coverage includes
+actual SDK polling/reconciliation, cached quotes, maximum payoff, opening holds,
+expiry overrides, legacy intent cancellation, stop fills, database reopen and
+strategy switches. Source parsing and whitespace checks pass. Focused Ruff F/E9
+passes with pre-existing ledger/recovery-fixture warnings excluded. A broader
+settlement assertion still fails identically against the saved pre-change source
+and is outside this task. Before-source snapshots are retained under
+`/private/tmp/lumibot-exit-safety-before/` and
+`/private/tmp/lumibot-exit-safety-check/`.
+
+## Reconcile a confirmed manual position, 2026-11-10
+
+The user confirmed order 41547656 was placed manually. Its four filled XSP
+contracts are absent from the ledger and engage the account ownership lock.
+
+1. Preserve existing changes, configuration, strategy holdings and settlements.
+   Capture fresh paper order/position evidence and back up the ledger.
+2. Reproduce the manual-position entry lock with offline regression coverage.
+   Add an atomic, repeatable import for explicitly confirmed filled manual
+   packages. Require exact broker/ledger quantities and retain provider evidence.
+3. Keep manual ownership separate from strategy management and research. Include
+   its defined risk in account limits, and retain locks for other discrepancies.
+4. Verify validation, rollback, duplicate handling, management exclusion and the
+   real reconciliation path. Replay against a ledger copy, then apply this one
+   confirmed manual order and verify the live bot resumes normal entry checks.
+
+Implemented the explicit manual-order import and activated the callback guard
+with a bot-only restart at 14:40:53 ET. The user-confirmed order is recorded as
+MANUAL and excluded from automatic management and the strategy roster. Its
+$2,041 defined risk remains included in the $4,298 account total. The repair tool used only broker GETs and changed no private configuration;
+normal strategy execution resumed afterward.
+
+Verification: 188 execution checks and 54 subtests pass, plus 69 dashboard checks.
+Three broader failures reproduce against the saved pre-change source. The
+full-ledger rehearsal and live application preserve every prior row, adding
+exactly one package, one position, four fills and one retained evidence record.
+A duplicate application makes no changes. Live fresh inventory has no unowned
+current contracts, and the real reconciliation method clears the recovery lock.
+The 14:46 ET live cycle submitted StrategyBro order 41589206 and TrendFlow
+order 41589218. Fresh broker GETs confirm both filled. The 14:51 ET cycle
+reconciles both ledger positions as open under V25 and V26, manages their P&L,
+and completes without ownership recovery locks. Neural Pure still reports its
+existing disabled-policy configuration; that opt-in setting is unchanged.
+The two expired positions remain awaiting settlement. Evidence and isolated
+sources are in `/private/tmp/lumibot-manual-position-20261110/`; the durable
+backup is `logs/backups/manual-41547656-before-import-20261110.sqlite3`.
+
+## Restore missing market inputs, 2026-11-10
+
+1. Replay captured Tradier XSP minute bars against the feature calculation.
+   Preserve all existing changes, runtime records and private configuration.
+2. Compute momentum from observed bar timestamps and report its actual age.
+   Require complete minute coverage for the 15-minute window.
+3. Resolve VWAP's source explicitly. XSP's captured volume is zero; a SPY
+   proxy must use SPY prices and volume together and identify its source.
+4. Add collector-to-dashboard regressions for delayed data, gaps, unavailable
+   volume and source provenance. Verify with an isolated deployed-image run
+   and fresh read-only provider observations before activating the changes.
+
+Implemented and activated at 10:29 ET. Captured XSP bars reproduce the two-minute
+momentum freshness rejection and contain zero volume. Momentum now requires 16
+consecutive observed minutes. VWAP uses SPY's own prices and volume through its
+latest completed bar, with explicit SPY proxy provenance. Per-feature provider
+timestamps distinguish data age from snapshot collection time, including VIX
+and the older timestamp of the VIX9D/VIX pair.
+
+Verification: 73 bot checks plus 17 subtests and 66 dashboard checks pass in
+isolated source copies without credentials, network or production records.
+Reflex dry compilation and whitespace checks pass. A read-only live SDK probe
+verifies the collector-to-dashboard path. The actual 10:30 strategy snapshot
+shows VWAP distance 0.0025 and momentum -0.0007, both displayed as Delayed with
+14-minute bar ages. The ledger matches its pre-reload backup across all tables.
+Existing images, paper mode and risk controls were retained. Evidence and the
+backup are in `/private/tmp/lumibot-market-inputs-20261110/`.
+
+## Resolve expired DAY order reservations, 2026-11-10
+
+The user confirmed the 22 ended-session orders are canceled. The current
+dashboard still requests review because missing broker identity or an absent
+order snapshot retains each reservation indefinitely.
+
+1. Reproduce the false review and retained reservation through fixed-clock
+   dashboard and execution regressions. Preserve all existing uncommitted work.
+2. Resolve the unfilled remainder of ended DAY orders when fresh broker orders
+   and matching contract inventory establish no remaining working exposure.
+   Preserve confirmed fills, current/GTC orders and settlement evidence.
+3. Keep canceled orders in history, release obsolete reservation capacity, and
+   retain genuine broker/inventory conflicts for review.
+4. Run isolated execution and dashboard regressions, replay the actual 22
+   records, and verify the running dashboard after activation.
+
+Implemented and applied at 08:45 ET. Fresh individual-order GETs confirm the
+five identified parents canceled with zero executions. All 22 requested contract
+sets match broker inventory. The cleanup changes exactly 22 package lifecycle
+rows, preserves all fills, positions and evidence tables, and releases $9,200
+of obsolete reservation risk. The live dashboard shows zero orders requiring
+reconciliation, with the 22 canceled DAY orders retained in history. Both
+services were reloaded and the bot remains in its pre-market wait.
+
+Verification: 198 tests and 15 subtests pass, including 12 new DAY-expiry
+regressions. One settlement fixture fails identically against the pre-change
+source. Reflex dry compilation passes. Focused Ruff F/E9 passes with the
+pre-existing unused settlement variable excluded and reproduced in the saved
+baseline. The full-record replay preserves every non-package table and its
+second application makes no changes. Evidence, a ledger backup and the live
+screenshot are in `/private/tmp/lumibot-day-expiry-20261110/`. Settlement,
+unattributed contract quantities and missing strategy inputs remain unresolved.
+
+## Clear pending DAY orders at session close, 2026-11-09
+
+1. Reproduce DAY orders remaining in the pending view after their session and
+   the missing end-of-day cancellation hook in isolated, fixed-clock tests.
+2. Cancel only this strategy's identified active DAY orders at the configured
+   session close, with the existing retry discipline and broker reconciliation.
+   Catch up after missed closes. Preserve fills, ownership and reservations
+   until broker evidence resolves them; leave GTC and other strategies alone.
+3. Clear ended DAY sessions from the dashboard pending count and default view.
+   Keep broker-active exceptions and unidentified records in a separate
+   reconciliation view with honest status and retained risk warnings.
+4. Use the exchange calendar for holidays, early closes and Eastern dates.
+   Run isolated execution/dashboard regressions, compile and verify the live
+   dashboard before reporting completion. Preserve private configuration.
+
+Implemented and activated close handling in the bot and dashboard. The isolated
+execution/dashboard gate passes 173 checks plus 15 subtests; Reflex compilation,
+image-level calendar checks and Ruff F/E9 pass. A broader run has three existing
+fixture failures, reproduced unchanged with the new execution block removed.
+Live verification shows 0 current pending orders and 22 ended-session records
+in reconciliation, including five still reported pending by Tradier. The bot
+is sleeping until the next session, when catch-up reconciliation can request
+cancellation. All holdings, recorded fills and 22 reservations match the
+before-reload snapshot. No cancellation or settlement was invented.
+
+## Dashboard monitoring and trust, 2026-11-09
+
+Make orders, positions, strategy results and missing inputs easy to inspect.
+Preserve the existing uncommitted work and all runtime records.
+
+1. Reproduce expired quote valuation, stale engine status and fabricated neural
+   metrics in isolated offline tests before changing their calculation paths.
+2. Keep broker snapshots, the ownership ledger and reconciled trade evidence as
+   their existing sources of truth. Add a read-only monitoring presentation that
+   joins those sources once per refresh, with source ages and explicit unknowns.
+   A separate dashboard database was considered and rejected because it would
+   create another set of financial totals to reconcile.
+3. Use Overview, Positions, Orders, Strategies, System health and Settings as
+   primary navigation. Keep research details under System health. Hide A/B,
+   benchmark and feature-catalog flows from the primary dashboard.
+4. Show verified closed results separately from marked open P&L, expose excluded
+   records, and show unresolved ledger orders even when absent from broker lists.
+5. Report VIX/VIX9D receipt and provider timestamps. Alpaca's current official
+   docs explicitly exclude spot index data, so do not add an invalid fallback.
+6. Run regression tests, compile and exercise the actual dashboard in isolation.
+   Reload only the dashboard after verification; preserve the trading process,
+   private configuration and all broker orders.
+
+Implemented the six-view dashboard and verified its actual paper-account views.
+Expired quotes no longer feed position marks. Missing or invalid models have no
+invented recommendations, probabilities or performance. Warmup counts unique
+complete snapshots. Engine status checks log age and describes structured
+telemetry. Orders retain unresolved reservations, show ownership/fill evidence,
+put working broker orders first and omit average fills when execution is zero.
+Scoped journals supply fee and strategy observations. Overview separates
+attributed positions, unattributed contracts, settlement and verified closes.
+
+The broader isolated gate passed 234 checks. After the final display corrections,
+all 77 dashboard/accounting checks, Ruff F/E9, whitespace checks and Reflex dry
+compilation pass. Browser checks use the running dashboard at localhost:8501.
+Reloaded only the dashboard; bot start time remains 2026-11-06T17:37:41Z.
+Actual records show 17 orders requiring review, four contract quantity
+differences, two pending settlements and eight excluded historical trade
+records, with no verified closed results. These remain visible and unresolved.
+VIX/VIX9D quotes are present; provider timestamps are shown independently of
+receipt age. No Alpaca spot-index fallback was added because it is unsupported.
+
+## Trace quote gaps and entry recovery locks, 2026-11-06
+
+Continue after activation. Preserve the running paper bot, current risk limits,
+all records, and the already verified execution fixes.
+
+1. Capture a repeatable read-only comparison of requested quotes, raw broker
+   responses, cache outcomes and ledger ownership at the recovery boundary.
+2. Reproduce any application fault offline before changing behavior. Separate
+   provider gaps from cache errors and genuine ownership uncertainty.
+3. Fix demonstrated application faults with regression coverage. Never clear
+   ownership locks, discard reservations or invent settlement from elapsed time.
+4. Verify in an isolated deployed-image snapshot and report the actual remaining
+   conditions. No private configuration or manual broker orders are authorized
+   by this investigation.
+
+Reproduced six failures in the deployed-image offline loop. A symbol cooling
+down during lease acquisition stopped the entire collector request and could
+copy its Missing quote error onto healthy symbols already claimed. A partial
+first chunk also skipped later healthy chunks. Isolated per-symbol claims and
+deferred incomplete-request failure until all healthy chunks refresh. Complete
+execution requests still require every requested quote. Added a seventh check
+that cooling symbols keep their original cooldown without another HTTP call.
+
+The final offline gate passes 212 tests with two skips. Ruff F/E9 and whitespace
+checks pass. Direct paper GETs return XSP/VIX/VIX9D even when cached rows report
+Missing quote. The provider trade timestamps are approximately fifteen minutes
+behind receipt, so successful refresh does not establish real-time market data.
+
+Fresh broker orders contain no unique parent-tag match for the 17 reservations
+without stored broker identity. V19's October 30 package is among them. Retain
+all reservations and ownership locks. Clarified the strategy log to name its
+owner and describe unresolved ownership or order recovery. Activate through a
+bot-only restart using the existing image/environment, then compare records and
+observe collector refreshes. Keep the dashboard process unchanged.
+
+Activated at 12:37:41 EST. The first management cycle completed at 12:38:07
+without Missing quote or routing errors. Twelve passive samples across 55
+seconds show nine successful generation advances for each of XSP, VIX and
+VIX9D, no quote errors, and at most 6.15 seconds since receipt. Provider trade
+timestamps remain about 900 seconds delayed. The actual new recovery log names
+V19. All eight held contracts, eight held quotes, 23 unresolved reservations,
+position slots, reserved risk, known expired inventory differences and controls
+match before reload. V20 remains pending, V28 remains open and unfilled.
+Dashboard start time remains unchanged. The repeatable evidence comparison,
+passive sampler, raw quote/tag probes and passing report are saved in
+`/var/folders/5s/d46mkw0n35vfqn9q5kss4bs80000gn/T/lumibot-read-health-20261106-kdip27jw/`.
+
+## Activate verified execution fixes, 2026-11-06
+
+The user requested continuation after the verified fixes were reported as
+awaiting a bot restart. Restart only lumibot-bot using the existing image and
+environment. Confirm paper mode, mounted-source identity, unchanged limits,
+startup broker count, existing inventory and reserved orders, and the first
+management iterations. Preserve the dashboard process and all runtime records.
+Do not manually submit, cancel, replace or repair broker orders.
+
+Activated at 11:50:52 EST on November 6 by restarting only lumibot-bot. The
+container retained its existing image and environment. Mounted execution source
+matched the tested snapshot. Dashboard start time remained 10:51:33 EST.
+
+Observed completed management cycles at 11:51 and 11:56. Startup and the next
+five-minute telemetry interval contain one distinct host-owned broker stream;
+there is no second anonymous stream. Duplicate console handlers print each SDK
+telemetry event twice, with identical event timestamps. No missing-subscriber
+or aggregate-parent-fill warnings appeared during this observation window.
+The bot logs V20 cancellation failure with order ID 40910663, raw pending state,
+and increasing retry delays of 60 then 120 seconds. The ordinary management
+cadence remains five minutes, so retry delays are minimum waits, not timers
+that execute cancellations between management cycles.
+
+Fresh before/after checks preserve all eight broker contract rows, eight fresh
+held quotes, 23 unresolved reservations, strategy slots, reserved risk, and all
+configured limits. The eight broker/ledger differences remain the same expired
+V07/V29 contracts awaiting settlement. The conservative runtime diagnostic still
+exits nonzero for those known differences; current unexpired holdings match.
+V26 retains its two confirmed legs and $68 opening credit. V20 close 40910663 is
+still pending with zero fills; V28 entry 41270265 remains open and unfilled.
+
+Remaining logs include the existing entry recovery lock and missing VIX, VIX9D,
+and occasional XSP quotes. These are unresolved, not claimed repaired by this
+activation. No private configuration or manual broker orders were changed.
+Evidence and the passing comparison report are in
+`/private/tmp/lumibot-activation-20261106-p76hfej1/verification.json`.
+
+## Investigate cancellation and fill routing, 2026-11-06
+
+Continue from the supplied 10:51–11:07 logs. Preserve existing uncommitted
+expiry, dashboard, accounting and runtime-record changes.
+
+1. Reproduce repeated rejected cancellation in an isolated offline regression.
+2. Compare fresh read-only broker evidence and deployed SDK routing with the
+   recorded failure; distinguish broker restrictions from application errors.
+3. Fix reproduced cancellation/routing behavior without releasing unresolved
+   orders, inventing fills, or changing ownership without broker evidence.
+4. Run targeted execution, broker-routing and import tests, inspect the final
+   diff, and report any remaining broker restriction. No broker writes or
+   service restarts are part of this investigation.
+
+Implemented and verified locally. The cancellation regression first failed on
+two requests for two ticks. Requests now use per-order exponential backoff from
+60 to 900 seconds, preserve reservations and exit intent, and retry when the
+observed raw broker status changes. Raw status matters because LumiBot maps
+Tradier pending and open to the same normalized status. Terminal reconciliation
+still controls replacement orders.
+
+The real-SDK construction regression reproduced default data-source resolution
+with DATA_SOURCE=tradier. Single, A/B and incubator hosts now reuse the explicit
+broker's instrumented data source. Removed constructor TypeError fallbacks that
+retried without a broker; both failure-path regressions failed before removal.
+Offline fixtures now implement the constructor contract or bypass broker
+construction explicitly. Aggregate multileg fill callbacks no longer enter leg
+accounting; the regression verifies that parent repeats cannot add inventory.
+
+Final isolated deployed-image gate: 205 passed, 2 skipped, networking disabled,
+source mounted read-only. The nine changed Python files match the tested source
+snapshot; parsing, focused Ruff F/E9 checks and git diff --check pass. Existing
+expiry changes are preserved. The initial wider in-place check was abandoned
+because SDK fixture construction retried blocked reads and running services
+changed the protected-record inventory; final verification used a separate
+source copy without runtime records or credentials.
+
+Final review also caught a misplaced fresh-read decorator introduced while
+extracting the cancellation helper. Restored the existing closing boundary. The
+new pricing-context regression passes with it and fails in a separate source
+copy when it is removed; the full gate above includes this regression.
+
+Read-only broker evidence still reports V20 close 40910663 pending with zero
+fills. The live ledger records TrendFlow 41270254 open with two confirmed legs
+and $68 opening credit; VolCrush 41270265 is submitted with no fills. Expired V07
+and V29 inventory remains retained pending settlement evidence. No broker orders,
+private configuration, or service lifecycle were changed. Activation is pending
+a bot restart; this does not claim the broker's stuck order is repaired.
+
+## Expired positions shown as closing, 2026-11-06
+
+Reproduced the eight-contract warning with fresh read-only broker diagnostics.
+V07 and V29 have expired inventory absent from the broker, unresolved pending
+close orders, and no stored settlement evidence. A two-package V07 replay still
+reports Closing at -2 DTE. Preserve existing accounting edits and all records.
+
+1. Add deterministic regressions for expired retained inventory, open-position
+   totals, missing broker data, genuine mismatches and pending close management.
+2. Distinguish awaiting settlement from current holdings in the read-only position
+   model. Keep final lifecycle results unknown and retain the expired trade rows.
+3. Stop attempting expired closes without releasing inventory or order locks.
+4. Run isolated regressions, compile Reflex, reload the relevant services and
+   verify the actual dashboard and fresh broker evidence.
+
+No date-only settlement, fabricated fills, broker order changes, journal rebuild
+activation, or configuration changes are part of this correction.
+
+Verified and applied. The focused gate passes 213 tests, plus 25 execution and
+routing tests against deployed LumiBot 4.6.31. The updated UI assertions pass,
+Reflex dry compilation succeeds, and isolated tests preserve protected records.
+Pinned existing execution fixture clocks so repricing tests stay before expiry.
+Reloaded the dashboard and bot. Browser verification shows all four retained
+trades, two valued current positions, two awaiting settlement, and available
+open P&L. Final net remains unavailable. Screenshot is saved at
+`/private/tmp/lumibot-expiry-fixed-20261106.jpg`.
+
+The first management tick after restart logs settlement waits for V07 and V29
+without retrying their expired closes. V20's unexpired close still receives
+Tradier HTTP 400, "order not available to be canceled". Entry recovery locks and
+unverified settlement accounting remain unresolved; this is not a claim of full
+broker reconciliation or restored trading availability.
+
 ## Strategy dashboard integrity backlog, 2026-11-04
 
 Scope: update the task list from the strategy dashboard audit and the XSP
@@ -677,3 +1086,485 @@ and unmanaged position locks, prioritized them, and registered them into the tas
    - Symptoms: Dual `LUMIBOT_TELEMETRY` outputs (one with `strategy_name: null` and polls > 5,000, and one with host strategy and polls ~ 1,900).
    - Root Cause: An auxiliary unmanaged broker instance runs background polling threads, consuming API quota and cluttering logs.
    - Task: `duplicate-broker-instance-cleanup`
+
+## Purge retired strategy records, 2026-11-06
+
+User requested removal of legacy strategies and their trades. Prepare a repeatable,
+backed-up cleanup before changing runtime records. Clarification is pending on
+whether V19 remains a control and whether broker liquidation is included.
+
+1. Inventory the current seven-strategy roster, ledger positions, and root/scoped
+   trade journals. Treat runtime ownership separately from historical results.
+2. Implement a dry-run/apply tool that removes only explicitly selected retired
+   history and terminal position chains. Retain unresolved orders, nonzero owned
+   quantities, settlement records still needed for management, and current owners.
+3. Test backup recovery, idempotence, foreign keys, current-owner preservation,
+   and refusal of unresolved or ambiguous destructive changes on isolated records.
+4. Present exact counts. Once scope is resolved, pause affected writers, take
+   backups, apply the selected cleanup, restart them, and verify records and
+   management against before-state evidence. No broker order mutations without
+   authorization for that scope.
+
+Prepared tools/purge_legacy_records.py with explicit variant selection, dry-run
+source fingerprints, complete SQLite/journal backups, stopped-writer requirement,
+foreign-key checks, inventory invariants, and rollback on interrupted writes.
+Eight isolated tests passed; focused Ruff and diff checks passed. A disposable
+copy of the actual records removed 104 terminal packages, 76 position records,
+and 32 journal events. Open positions, open baskets, owned quantities and
+$11,726 reserved risk were identical afterward. Re-running removed nothing;
+backup restoration succeeded and the original runtime records stayed unchanged.
+
+Plans and actual-copy verification are in
+/private/tmp/lumibot-legacy-purge-20261106-9nqmd3_o. Seventeen legacy position
+groups remain unresolved with the current seven strategies preserved. Fresh
+broker detail still reports V07 order 40862870 and V20 order 40910663 pending.
+No runtime records were purged and no broker orders were changed. Awaiting user
+scope choices on V19 and liquidation versus retention of unresolved management.
+
+## Strict trade history provenance implementation, 2026-11-06
+
+Execute the approved six milestones sequentially, editing only their listed files.
+Preserve the existing worktree changes and lifecycle financial reducers.
+
+1. Empty isolated snapshot stores, complete protected inventory, additive immutable
+   evidence tables and scoped ownership links. Compile and run storage/isolation tests.
+2. Retain provider responses during existing fill reads and callbacks, attach stable
+   realization references, validate attributable settlement evidence, preserve outbox fields.
+3. Verify all seven provenance dimensions for every realization, require actual fee
+   coverage for eligibility, and keep legacy records recoverable and unattributed.
+4. Import scoped evidence offline, freeze a full SQLite snapshot, use deterministic
+   manifest v2 verification, and lock/recheck stopped-writer activation and rollback.
+5. Apply explicit eligibility and evidence labels to Reflex history and CSV exports,
+   then compile and browser-check an isolated dataset under Reflex skill prerequisites.
+6. Run the disposable rebuild/recovery rehearsal and record verified results in ADR-23
+   and only the target ticket. No runtime activation is authorized by this implementation.
+
+Use Python 3.12+ and targeted tests after each milestone. The user's implementation
+turn directive excludes the monolithic full test suite, including the full-suite
+command in the pasted plan. Existing virtualenv interpreter links are Linux-only;
+a temporary environment under /private/tmp is used for this Mac.
+
+### Verification and recovery record
+
+Implemented the six planned stages in order. The user's follow-up also authorizes
+`reflex_dashboard/reflex_dashboard/reflex_dashboard.py`: A/B Lab and Benchmark
+navigation, content, and automatic calculations are disabled by
+`ANALYSIS_LABS_ENABLED = False`. Their components and calculations remain in the
+code. No comparison formulas or lifecycle financial reducers were redesigned.
+
+The final implementation provides immutable scoped provider payloads, signed
+realization allocations, attributable settlement allocations, actual-fee evidence,
+read-only legacy diagnostics, classifier version 2, and rebuild manifest version 2.
+Every journal realization requires matching broker, account, environment, package,
+contract, side, and quantity evidence. Unsupported history remains recoverable.
+An empty actual-fee list cannot establish eligible performance.
+
+Verification used Python 3.12.14 from `/private/tmp/lumibot-provenance-env` and a
+controlled source copy at `/private/tmp/lumibot-provenance-check`. The repository's
+existing virtualenv links point to unavailable Linux interpreters. The temporary
+environment uses the pinned LumiBot 4.6.31 SDK and Reflex 0.10.1. No repository
+requirements were changed.
+
+- Milestone 1: 22 isolation and storage checks passed before fill capture began.
+- Milestone 2: 133 storage, callback, SDK routing, and settlement checks passed.
+- Milestone 3: 71 classifier, logger, settlement, and isolation checks passed.
+- Milestone 4: 45 rebuild and provenance checks passed, including the full rehearsal.
+- Milestone 5: Reflex tests ran without skips. `reflex compile --dry` passed.
+  A production-mode server on localhost:8317 passed browser checks with verified,
+  fee-incomplete, unattributed, quarantined, and awaiting-settlement examples.
+- Final targeted verification: 249 tests passed across the ten affected test files.
+  Protected-record inventories stayed unchanged in the controlled copy.
+- The standalone full rebuild rehearsal passed. It imports evidence twice, builds
+  twice, compares partition bytes, classifications, and reported totals, verifies,
+  activates a disposable journal, and restores its original bytes through rollback.
+- All modified Python files pass `py_compile`; `git diff --check` passes.
+
+The initial test run against the active workspace detected changes to
+`logs/scopes/tradier_paper_VA21359019/broker_snapshots.sqlite3`. That run did not
+certify runtime integrity. Snapshot files, sidecars, and trading logs now remain
+in the complete inventory. Concurrent writer changes produce an unsuccessful
+integrity result. The subsequent controlled-copy runs have no concurrent writers.
+The monolithic repository suite was not run, as directed by the user.
+
+Reproduce the targeted run from the controlled copy with this command:
+
+```bash
+/private/tmp/lumibot-provenance-env/bin/python3 tools/run_offline_tests.py \
+  tests/test_runtime_record_isolation.py \
+  tests/test_trade_history_evidence_storage.py \
+  tests/test_regressions.py tests/test_tradier_order_routing.py \
+  tests/test_xsp_settlement_lifecycle.py tests/test_trade_history_provenance.py \
+  tests/test_reconcile_activation_gate.py tests/test_reflex_dashboard.py \
+  tests/test_comparison_dashboard.py tests/test_trade_logger_win_rate.py
+```
+
+Browser downloads contain three visible audit rows and one row in each eligible
+export. The audit CSV retains `UNATTRIBUTED` and `FEE_INCOMPLETE` rows. Unknown
+fee and net values are blank. The two eligible CSVs contain only `verified`.
+Quarantined and awaiting-settlement examples do not enter these closed-trade
+exports. A/B Lab and Benchmark tabs are absent. Final dashboard polling has no
+`Error in load_all` messages.
+
+Verification artifacts are local:
+
+- `/private/tmp/lumibot-final-targeted.log`
+- `/private/tmp/lumibot-final-rehearsal.log`
+- `/private/tmp/lumibot-reflex-compile-final.log`
+- `/private/tmp/lumibot-browser-verification.json`
+- `/private/tmp/lumibot-provenance-history-final.png`
+- `/private/tmp/.playwright-cli/lumibot-visible-trades-past-50.csv`
+- `/private/tmp/.playwright-cli/lumibot-eligible-trades-journal.csv`
+- `/private/tmp/.playwright-cli/lumibot-eligible-trades-archive.csv`
+
+For a later runtime rebuild, stop the journal and ledger writers. Import retained
+exports into the intended scoped ledger. Use the exact broker, account, environment,
+and as-of date for report and build. Never infer ownership from a strategy name.
+
+```bash
+python3 tools/reconcile_trade_history.py import-evidence \
+  --export "$PROVIDER_EXPORT" --ledger "$LEDGER" \
+  --broker "$BROKER" --account-id "$ACCOUNT_ID" --environment "$RECORD_ENV"
+python3 tools/reconcile_trade_history.py build \
+  --journal "$JOURNAL" --ledger "$LEDGER" \
+  --backup-dir "$BACKUP_DIR" --rebuild-dir "$REBUILD_DIR" \
+  --broker "$BROKER" --account-id "$ACCOUNT_ID" --environment "$RECORD_ENV" \
+  --as-of-date "$AS_OF_DATE"
+python3 tools/reconcile_trade_history.py verify --rebuild-dir "$REBUILD_DIR"
+```
+
+Review accepted, unattributed, quarantined, and parse-error counts before activation.
+Verification rejects malformed input, unsupported manifests, missing evidence, and
+an empty accepted replacement over nonempty history. It uses the frozen evidence
+snapshot and fixed manifest date. Version 1 manifests cannot activate. There is no
+`--force` override.
+
+After verification, activation requires `--writers-stopped`. The command rechecks
+the source identity and hash under the journal lock before atomic replacement.
+Interrupted activation keeps a recoverable `activating` manifest state. Use the
+manifest's original paths for recovery:
+
+```bash
+python3 tools/reconcile_trade_history.py activate \
+  --rebuild-dir "$REBUILD_DIR" --journal "$JOURNAL" --writers-stopped
+python3 tools/reconcile_trade_history.py rollback \
+  --rebuild-dir "$REBUILD_DIR" --journal "$JOURNAL"
+```
+
+Rollback refuses to overwrite post-activation appends. If new events exist, retain
+both histories and reconcile forward. Leave additive evidence tables in place when
+reverting code. Restore an old SQLite backup only with writers stopped and after
+confirming that no subsequent fill would be lost.
+
+No runtime journal was activated, and no runtime evidence was imported in this turn.
+The target ticket remains `in_progress` for controlled historical activation.
+There are no milestone commit hashes: the starting worktree contains overlapping
+uncommitted work. No unrelated changes were staged or committed. The base commit
+is `e9bbaa94cef1b39cc60b276f7f76bb6f0b9c7dea`. A task-only reverse patch is retained at
+`/private/tmp/lumibot-provenance-task.patch`; its reverse application is checked
+without changing files. For later isolated task commits, revert newest first.
+Do not reset the shared worktree or restore whole overlapping files.
+
+## Review repairs, 2026-11-08
+
+Apply only the five confirmed provenance defects from the independent review:
+
+1. Share strict raw cash validation between settlement persistence, allocation,
+   reconciliation, and classification. Verify rejected evidence retains risk.
+2. Retain already observed provider parent responses for SDK child callbacks,
+   without additional polling. Verify cumulative replay and attribution.
+3. Replay legacy pending outbox payloads with stable identities and explicit
+   scope while preserving their missing provenance.
+4. Determine current fee coverage from retained actual fee evidence rather than
+   an immutable journal's historical incomplete declaration.
+5. Preserve unknown financial amounts and exclude those rows from performance.
+
+Run focused regression checks after each repair group in the controlled copy,
+then syntax compilation and the affected component suites. Preserve all prior
+work and do not activate runtime history or run the monolithic suite.
+
+All five repairs are complete. Raw activity disposition is now required in the
+settlement fixture as well as production validation. Previously persisted links
+are revalidated before inventory retirement. The regression test retains real
+contradictory payloads and hashes, inserts the older local allocation rows, and
+confirms that inventory and defined risk remain reserved.
+
+Callback tests use the installed SDK parser and cover both tracked provider
+parents and scoped retained snapshots, duplicate partial/full callbacks, and
+reconciliation after callback completion. Legacy outbox replay covers mixed old
+and current payloads plus the append-before-dispatch crash window. Fee import
+tests retain the journal's original incomplete declarations and require complete
+actual evidence for every event before eligibility is restored.
+
+Explicit unknown fee/net values retain their blank audit/export cells. Complete
+provenance can remain `VERIFIED` while `is_eligible` is false with reason
+`JOURNAL_AMOUNTS_INCOMPLETE`. Fee-source labels continue to describe retained
+actual evidence independently of whether journal amounts support performance.
+
+Verification used Python 3.12.14 and the disposable controlled copy:
+
+```bash
+/private/tmp/lumibot-provenance-env/bin/python3 tools/run_offline_tests.py \
+  tests/test_runtime_record_isolation.py \
+  tests/test_trade_history_evidence_storage.py tests/test_regressions.py \
+  tests/test_tradier_order_routing.py tests/test_xsp_settlement_lifecycle.py \
+  tests/test_trade_history_provenance.py tests/test_reconcile_activation_gate.py \
+  tests/test_reflex_dashboard.py tests/test_comparison_dashboard.py \
+  tests/test_trade_logger_win_rate.py
+```
+
+Result: 268 passed, no skips, in 5.74 seconds. Protected-record integrity passed.
+All 12 Python files changed during repair passed `python3 -m py_compile`.
+Reflex 0.10.1 `compile --dry` passed in 0.541 seconds using the existing temporary
+Reflex runtime and isolated records. No server or runtime history was activated.
+The monolithic repository suite was not run.
+
+Logs and the repair-only reverse patch are retained locally:
+
+- `/private/tmp/lumibot-repair-final-targeted.log`
+- `/private/tmp/lumibot-repair-reflex-compile.log`
+- `/private/tmp/lumibot-review-repairs.patch`
+
+`git diff --check` and reverse-application checks pass. The task-only patch at
+`/private/tmp/lumibot-provenance-task.patch` includes the repairs. Unrelated
+pre-existing work and adjacent ticket records were preserved.
+
+## Second review repairs, 2026-11-09
+
+Repair only the two current review findings. Share raw fee amount, scope, and
+ownership validation between persistence, classification, and live settlement.
+Require caller-supplied fees to match retained records before certifying coverage;
+otherwise preserve unavailable fees/net while allowing valid cash settlement.
+Verify contradictory raw fees and supplied-amount substitution with focused tests.
+
+Keep execution scans restricted to execution evidence. Validate execution payload
+and leg shapes at import/read boundaries, diagnose invalid retained rows, and
+verify malformed or unrelated fee metadata cannot suppress other trade history.
+
+Modify only the runtime evidence helper, ledger, reconciliation CLI, their three
+planned test modules, and this plan. Compile modified Python files, run focused
+tests between repair groups, then run the affected suites in the controlled copy.
+Do not activate runtime history or run the monolithic suite.
+
+Both second-review repairs are complete. Fee persistence, live reconciliation,
+and history classification share provider amount/scope/ownership checks. Live
+reconciliation uses validated stored amounts and compares supplied fee records
+before declaring coverage complete. Regression cases cover contradictory amounts,
+unrelated activities, wrong raw scope, and one-cent substitution for an actual
+80-cent fee. Valid settlement still retires inventory with incomplete fees/net
+when fee evidence is insufficient.
+
+Execution scans now select execution evidence before reading legs. Imports reject
+invalid execution containers atomically. Read-only loading records invalid older
+execution rows in `invalid_evidence`, retains healthy history, and makes linked
+unsupported realizations unattributed. Activation verification rejects such an
+invalid evidence store. Fee metadata remains retained without being interpreted
+as executions. Tests exercise import, report, core loading, and activation gates.
+
+Verification on 2026-11-09 used Python 3.12.14 in the controlled copy. The first
+fee group passed 108 tests; the second group passed 119 tests. Final verification
+passed 285 targeted tests with no skips in 7.24 seconds, including SDK callbacks,
+settlement, provenance, import/build/activation/rollback, core loading, and Reflex
+adapters/CSV exports. Protected-record integrity passed. All six modified Python
+files passed `python3 -m py_compile`; `git diff --check` passed. No runtime history
+was activated and the monolithic suite was not run.
+
+Final test log: `/private/tmp/lumibot-review2-repair-targeted.log`.
+Repair baseline: `/private/tmp/lumibot-review2-repair-baseline`.
+
+## Third review repairs, 2026-11-09
+
+Fix only the two confirmed current blockers, in order:
+
+1. Reject explicit provider scope contradictions throughout retained execution
+   responses and conflicting signed/executed quantities in a provider leg.
+   Preserve SDK responses that omit scope fields. Add import, classification,
+   and frozen rebuild verification regressions before changing validation.
+2. Validate historical journal leg shapes before traversal. Keep malformed
+   records unattributed with deterministic reasons and preserve healthy history.
+   Cover core loading, reporting, raw partition retention, and verification.
+
+Modify only `strategies/runtime_records.py`, the two planned provenance and
+activation test modules, and this plan. Verify each repair with focused tests,
+then compile the modified Python files and run the affected component suites in
+the controlled copy. Preserve all prior work and runtime records.
+
+Both third-review repairs are complete. Execution verification now checks every
+explicit scope field on raw responses, parent responses, and their children.
+Every supplied signed/executed quantity must agree with the normalized leg;
+zero, negative executed quantities, booleans, missing values, fractional values,
+and nonfinite values cannot override a contradictory field. Absent SDK scope
+fields remain supported. Imports reject contradictory exports atomically, and
+already retained contradictory content remains unattributed even with valid
+storage hashes. Frozen verification refuses to certify an empty accepted result.
+
+Journal leg validation now checks element and scalar shapes before traversing
+them. Malformed legs produce `JOURNAL_LEGS_INVALID` without changing the source
+record. Mixed-history regressions retain the healthy verified trade, report
+deterministic reasons, preserve exact unattributed bytes, and verify the rebuilt
+partitions successfully.
+
+The new tests reproduced 28 P1 failures and six malformed-history failures before
+their fixes. Intermediate checks passed 129 and 130 targeted tests respectively.
+Final verification passed 323 targeted tests and 42 subtests, with no skips, in
+9.92 seconds using Python 3.12.14 in the controlled copy. Protected-record
+integrity passed. All three modified Python files passed `python3 -m py_compile`.
+Only the four files listed above changed during this repair. No runtime history
+was activated and the monolithic suite was not run.
+
+Final test log: `/private/tmp/lumibot-review3-repair-targeted.log`.
+Repair baseline: `/private/tmp/lumibot-review3-repair-baseline`.
+
+## Fourth review repairs, 2026-11-09
+
+Repair the two remaining reproduced defects in order:
+
+1. Reject ambiguous provider child identities and contradictory supplied parent
+   or child fields before accepting execution evidence. Preserve independently
+   observed cumulative SDK fills and optional provider fields. Add import,
+   classification, and frozen verification regressions before the production fix.
+2. Validate nested journal contract scalars, scope, and reference shapes before
+   traversal. Keep damaged records unattributed with deterministic reasons while
+   preserving healthy history and exact raw partition bytes.
+
+Modify only `strategies/runtime_records.py`, the two planned provenance and
+activation test modules, and this plan. Compile and run focused checks after each
+repair, then run the affected component suites in the controlled copy. Preserve
+unrelated work and all runtime records. Do not activate history or run the full
+repository suite.
+
+Repair baseline: `/private/tmp/lumibot-review4-repair-baseline`.
+
+Both fourth-review repairs are complete. Provider responses require unique child
+identities, consistent identity aliases, and matching supplied parent ownership,
+contracts, sides, and quantities. An earlier cached parent count remains valid
+when its own fields agree and its count does not exceed the later child fill.
+The regressions cover atomic import rejection, older retained evidence with valid
+hashes, classification, frozen verification, and actual SDK callback replay.
+
+Contract parsing now rejects nonscalar identities and numeric overflow before
+inventory hashing. Fixture detection tolerates malformed scope and strike shapes
+without claiming synthetic provenance. Journal scope and reference shapes produce
+deterministic reasons without raising. Mixed-history tests use two genuine scoped
+ownership/evidence bundles and confirm that the healthy trade stays eligible,
+damaged records stay visible as unattributed, and rebuild partitions retain the
+exact original bytes.
+
+The new tests first reproduced 24 provider failures and 11 nested-journal failures.
+After each repair, syntax compilation and focused checks passed: 161 tests plus
+five subtests for provider/SDK paths, then 167 tests for provenance and rebuilding.
+Final verification passed 368 targeted tests and 42 subtests, with no skips, in
+13.69 seconds using Python 3.12.14 in the controlled copy. This covers isolation,
+evidence storage, fill callbacks, SDK routing, settlement, classification,
+import/build/activation/rollback, core loading, Reflex adapters, and CSV exports.
+Protected-record integrity passed. The three modified Python files passed
+`python3 -m py_compile`; whitespace, task patch, and unrelated-file checks passed.
+Only the four planned files changed in this repair. No runtime history was
+activated and the monolithic suite was not run.
+
+Final test log: `/private/tmp/lumibot-review4-repair-targeted.log`.
+
+## Neural picker readiness, 2026-11-10
+
+The running paper bot leaves ML policy inference disabled. The existing model
+loads, but today's offline replay selected unavailable strategies in 53 of 57
+recommendations. Prepare the picker before changing runtime configuration.
+
+1. Restrict Neural Pure selection to model outputs represented by the active
+   entry roster, exclude Neural Pure itself, and route its actions only to the
+   neural owner. Keep non-neural policy use working as before.
+2. Apply and clear the selected variant's entry settings when switching, and
+   block neural entries if a selected variant cannot be resolved.
+3. Add focused regressions and a read-only readiness/replay command. Replay real
+   saved snapshots against dummy strategies and run isolated component tests.
+4. Preserve all existing work, runtime records, models, risk limits, and broker
+   state. Configuration activation requires the final review required by the
+   parent AGENTS.md instruction about existing configuration files.
+
+Code preparation is complete. The four initial regressions reproduced the
+unavailable-choice, peer-routing, stale-settings, and unresolved-switch failures.
+The final isolated runs passed 28 neural/roster tests and 98 broader regressions.
+The combined run exposed two existing import-order SDK mock collisions, both of
+which pass when the regression module runs in its own process. All test runs
+passed protected-record integrity checks, and syntax and whitespace checks pass.
+
+The final read-only replay used 69 complete November 10 snapshots and produced
+58 applicable selections across six active candidates, with peer strategies
+untouched. The chosen strategies were ORB 56 times and TrendFlow twice. This
+checks execution wiring, and does not establish model profitability. The artifact
+still has 142 training examples; no model or training history was changed.
+
+Recheck with `python tools/check_neural_picker.py`, or add `--require-enabled`
+after activation. The isolated test copy and logs are in the bot container under
+`/tmp/lumibot-neural-readiness`, `/tmp/lumibot-neural-focused-tests.log`, and
+`/tmp/lumibot-neural-regressions.log`.
+
+Activation remains pending: set `ML_POLICY_ENABLED=true`, retain
+`ML_MODEL_PATH=logs/models/policy.json` and `ML_SEQUENCE_LENGTH=12`, then recreate
+only `lumibot-bot` so Docker reads the updated environment. A simple restart does
+not reload an env_file. Expect roughly one hour of fresh snapshots after startup
+or a session change. No runtime configuration, broker inventory, or risk limits
+were changed during this work.
+
+### Approved neural activation, 2026-11-10
+
+The user approved enabling the repaired picker for the Tradier paper account.
+Set the three ML settings, verify paper mode and model compatibility, recreate
+only the bot container, then inspect its effective configuration and startup
+logs for controller warmup or recommendations. Preserve risk limits, positions,
+and the existing model. Report actual startup status and any remaining blocker.
+
+Activation completed at 16:16 ET. The recreated container confirms
+`TRADIER_PAPER=true`, `ML_POLICY_ENABLED=true`, the existing policy model path,
+sequence length 12, and enabled snapshot logging. The real startup log confirms
+one neural owner, six active candidates, and a 12-tick sequence. The bot remains
+running and is sleeping until the market opens. Live warmup will begin next
+session. The enabled offline replay passed with 77 complete snapshots and 66
+applicable recommendations, leaving peer strategies untouched. Added a startup
+log message so future controller attachment can be verified directly. Syntax
+compilation and whitespace checks pass; no risk limits or models changed.
+
+
+## Diagnose continuing paper losses, 2026-11-12
+
+1. Build a read-only replay of the scoped journal and confirmed ledger fills,
+   separating realized cash, estimated fees, open marks, and unresolved history.
+2. Reproduce the negative realized result, then compare exit triggers and fills,
+   strategy inputs, active settings, and neural training evidence.
+3. Report confirmed causes with dates and amounts, distinguish uncertain causes,
+   and preserve existing source edits, trading configuration, and runtime records.
+
+Diagnosis complete against a frozen 10:05 ET cutoff. Seventeen scoped closes
+from November 5 total -$1,019 gross, and every journal gross amount agrees with
+the flat ledger's independent leg cash reconstruction. This is a limited close
+sample, not a certified account return; fee evidence and expired positions remain
+incomplete. Five wins total $90 and 12 losses total $1,109. StrategyBro is +$26
+gross in two closes; the assertion that every strategy loses is too broad.
+
+Confirmed current faults: today's 30-DTE stop used -$988 gross on a $70-credit,
+$5-wide condor, with a short-call quote of $0.50/$20.00. The bot submitted a $5
+close limit and paid $4, realizing -$330 gross. Complete quote valuation lacks
+package consistency and spread checks, and quote timestamps are acquisition time
+rather than provider time. Five November 11 ABRUPT_CLOSE realizations total
+-$430 gross; their first close requests date to November 10 at 15:59 ET, and
+the shutdown callback closes multi-day inventory. The specific originating
+process signal is not retained in the scoped log and remains unconfirmed.
+
+ORB's historical reference includes the current unfinished daily bar. Replaying
+the saved 10:02 ET input returns +0.00395% and iron_condor, versus +0.62510%
+from the captured session open and bull_put under its existing threshold. This
+proves the anchor defect, not that the alternate trade would make money.
+
+The effective paper credit discount is 10%, and estimated fees are $0.40 per
+executed contract. Neural inference is enabled; November 11 replay makes 20
+recommendations, all HOLD, across three variants. The artifact has 142 examples,
+and training labels use cost-free estimated basket marks; wiring checks do not
+establish profitability. Tradier documentation confirms 15-minute sandbox data.
+
+Added read-only tools/audit_losses.py. Frozen inputs and identical repeated JSON
+outputs are in /private/tmp/lumibot-loss-audit-20261112/. A separate replay there
+executes the unchanged strategy methods with saved inputs and mocked I/O,
+reproducing the bad stop and anchor. Running/local strategy SHA-256 hashes agree.
+The audit --check exits 1 on the reproduced losses, and the single-trade replay
+reduces the case to the $330 stop. Syntax compilation and whitespace checks pass.
+No trading strategy, runtime setting, order, model, or runtime record was changed
+by this investigation. The live bot continues to update its own records.

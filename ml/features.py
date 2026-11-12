@@ -23,17 +23,10 @@ def finite_number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def market_features(
-    bars: Iterable[Mapping[str, Any]],
-    as_of: datetime,
-    vix: float | None = None,
-    vix9d: float | None = None,
-) -> dict[str, float | None]:
-    """Use completed one-minute OHLCV bars from this regular NY session only.
-
-    Bar timestamps identify the start of each minute. ATR and RSI use the
-    trailing 14 changes (simple rolling averages); VWAP uses typical price.
-    """
+def completed_session_bars(
+    bars: Iterable[Mapping[str, Any]], as_of: datetime,
+) -> dict[datetime, dict[str, Any]]:
+    """Validate, deduplicate and order completed bars in this regular session."""
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
     now = as_of.astimezone(MARKET_TZ)
@@ -58,7 +51,26 @@ def market_features(
         if values["high"] < values["low"]:
             continue
         observed[stamp] = values
-    stamps = sorted(observed)
+    return dict(sorted(observed.items()))
+
+
+def market_features(
+    bars: Iterable[Mapping[str, Any]],
+    as_of: datetime,
+    vix: float | None = None,
+    vix9d: float | None = None,
+) -> dict[str, float | None]:
+    """Calculate features at the latest completed provider bar, even if delayed.
+
+    Bar timestamps identify minute starts. Callers must carry the provider's
+    observation time separately from collection time. ATR and RSI use trailing
+    14 changes; VWAP requires every minute from the open through that bar.
+    """
+    observed = completed_session_bars(bars, as_of)
+    now = as_of.astimezone(MARKET_TZ)
+    opening = datetime.combine(now.date(), time(9, 30), MARKET_TZ)
+    closing = datetime.combine(now.date(), time(16), MARKET_TZ)
+    stamps = list(observed)
     rows = [observed[stamp] for stamp in stamps]
     result: dict[str, float | None] = dict.fromkeys((
         "vix", "vix_term_ratio", "vwap_distance", "orb_30m_range",
@@ -74,8 +86,8 @@ def market_features(
         return result
     price = rows[-1]["close"]
     # A partial-volume history would silently bias VWAP, so require full coverage.
-    expected_minutes = int((min(now, closing) - opening).total_seconds() // 60)
-    complete_history = len(rows) == expected_minutes
+    expected_minutes = int((stamps[-1] - opening).total_seconds() // 60) + 1
+    complete_history = list(observed) == [opening + timedelta(minutes=i) for i in range(expected_minutes)]
     if complete_history and all(row["volume"] is not None and row["volume"] >= 0 for row in rows):
         volume = sum(row["volume"] for row in rows)
         if volume > 0:
@@ -102,7 +114,7 @@ def market_features(
         ]
         result["atr_pct"] = sum(ranges) / 14 / price
     previous = observed.get(stamps[-1] - timedelta(minutes=15))
-    if previous is not None and now - stamps[-1] <= timedelta(minutes=2):
+    if previous is not None and all(stamps[-1] - timedelta(minutes=i) in observed for i in range(16)):
         result["price_velocity_15m"] = price / previous["close"] - 1
     return result
 

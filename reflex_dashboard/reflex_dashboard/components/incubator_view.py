@@ -60,9 +60,9 @@ def incubator_view() -> rx.Component:
             # Metric 4: Contract Fees Paid
             rx.box(
                 rx.vstack(
-                    rx.text("FEES ($0.40/LEG)", size="1", color=TEXT_MUTED, weight="bold"),
+                    rx.text("REPORTED FEES", size="1", color=TEXT_MUTED, weight="bold"),
                     rx.heading(numeric_text(DashboardState.total_fees_str), size={"initial": "5", "sm": "6"}, color=numeric_color(DashboardState.total_fees_str), class_name="tabular-nums"),
-                    rx.text("Deducted from cash", size="1", color=TEXT_MUTED),
+                    rx.text("Eligible records", size="1", color=TEXT_MUTED),
                     spacing="1",
                 ),
                 style=KPI_CARD_STYLE,
@@ -269,7 +269,7 @@ def incubator_view() -> rx.Component:
                                 rx.table.column_header_cell("Closed", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Win Rate", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Gross P&L", style=TABLE_HEADER_STYLE, class_name="nowrap"),
-                                rx.table.column_header_cell("Fees ($0.40/leg)", style=TABLE_HEADER_STYLE, class_name="nowrap"),
+                                rx.table.column_header_cell("Reported Fees", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Realized Net P&L", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Net RoR %", style=TABLE_HEADER_STYLE, class_name="nowrap"),
                                 rx.table.column_header_cell("Status", style=TABLE_HEADER_STYLE, class_name="nowrap"),
@@ -325,7 +325,7 @@ def incubator_view() -> rx.Component:
                     ),
                     rx.hstack(
                         rx.button(
-                            rx.hstack(rx.icon("download", size=14), rx.text("Export Visible (50) CSV"), align="center", spacing="1"),
+                            rx.hstack(rx.icon("download", size=14), rx.text(f"Export Visible ({DashboardState.visible_closed_trades_count}) Audit CSV"), align="center", spacing="1"),
                             on_click=DashboardState.download_visible_trades_csv,
                             size="1",
                             color_scheme="cyan",
@@ -350,7 +350,7 @@ def incubator_view() -> rx.Component:
                     gap="2",
                 ),
                 rx.text(
-                    "Individual closed roundtrip executions with reconciliation status, estimated contract fees ($0.40/leg), and net returns:",
+                    "Closed journal records with attribution status, fee coverage, and reported returns:",
                     size="2",
                     color=TEXT_MUTED,
                 ),
@@ -388,7 +388,7 @@ def incubator_view() -> rx.Component:
                                     rx.table.cell(rx.text(t["credit_str"], class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.badge(t["exit_reason"], color_scheme=t["net_pnl_color"], size="1")),
                                     rx.table.cell(rx.text(numeric_text(t["gross_pnl_str"]), class_name="tabular-nums nowrap")),
-                                    rx.table.cell(rx.text(numeric_text(t["fees_str"]), color=numeric_color(t["fees_str"]), class_name="tabular-nums nowrap")),
+                                    rx.table.cell(rx.vstack(rx.text(numeric_text(t["fees_str"]), color=numeric_color(t["fees_str"]), class_name="tabular-nums nowrap"), rx.text(t["fee_label"], size="1", color=TEXT_MUTED), spacing="0")),
                                     rx.table.cell(rx.text(numeric_text(t["net_pnl_str"]), weight="bold", color=numeric_color(t["net_pnl_str"]), class_name="tabular-nums nowrap")),
                                     rx.table.cell(rx.text(numeric_text(t["net_ror_str"]), weight="bold", color=numeric_color(t["net_ror_str"]), class_name="tabular-nums nowrap")),
                                     style=TABLE_ROW_STYLE,
@@ -407,15 +407,14 @@ def incubator_view() -> rx.Component:
                             rx.icon("archive", size=20, color=INDIGO),
                             rx.vstack(
                                 rx.text(
-                                    f"Showing {DashboardState.visible_closed_trades_count} visible trades of {DashboardState.total_closed_trades_count} reconciled trades ({DashboardState.eligible_closed_trades_count} verified broker executions, {DashboardState.unattributed_trades_count} unattributed/unresolved).",
+                                    f"Showing {DashboardState.visible_closed_trades_count} visible audit rows of {DashboardState.total_closed_trades_count} matching closed records. Eligible export: {DashboardState.eligible_closed_trades_count}. Incomplete or unresolved: {DashboardState.unattributed_trades_count}.",
                                     size="2",
                                     weight="bold",
                                     color=TEXT_PRIMARY,
                                 ),
                                 rx.text(
-                                    "Historical trades display confirmed broker executions and estimated contract fees ($0.40/leg). "
-                                    "Quarantined fixture records are strictly excluded from strategy metrics and rankings. "
-                                    "Click below to download the complete archive in CSV format.",
+                                    "Visible audit rows include unattributed history and incomplete fee coverage. "
+                                    "Performance and eligible exports require retained execution and actual-fee evidence.",
                                     size="1",
                                     color=TEXT_MUTED,
                                 ),
@@ -430,7 +429,7 @@ def incubator_view() -> rx.Component:
                                 rx.button(
                                     rx.hstack(
                                         rx.icon("download", size=16),
-                                        rx.text("Load More (Download Full CSV Archive)"),
+                                        rx.text("Download Eligible History"),
                                         align="center",
                                         spacing="1",
                                     ),
@@ -442,10 +441,10 @@ def incubator_view() -> rx.Component:
                                 ),
                             ),
                             rx.alert_dialog.content(
-                                rx.alert_dialog.title("📥 Complete Trade Ledger Archive Export"),
+                                rx.alert_dialog.title("Eligible Trade History Export"),
                                 rx.alert_dialog.description(
-                                    f"The interactive table is calibrated for the past 50 trades to maintain ultra-fast sub-millisecond dashboard rendering. "
-                                    f"To view and audit all {DashboardState.total_closed_trades_count} historical trades, download the full RFC-4180 compliant CSV export.",
+                                    f"Download {DashboardState.eligible_closed_trades_count} eligible closed records. "
+                                    "Use the visible audit export for unattributed and fee-incomplete rows shown in the table.",
                                     size="2",
                                 ),
                                 rx.hstack(
@@ -454,7 +453,7 @@ def incubator_view() -> rx.Component:
                                     ),
                                     rx.alert_dialog.action(
                                         rx.button(
-                                            "Download Complete Trade Archive",
+                                            "Download Eligible Trade History",
                                             color_scheme="indigo",
                                             on_click=DashboardState.load_more_and_export_csv,
                                         ),

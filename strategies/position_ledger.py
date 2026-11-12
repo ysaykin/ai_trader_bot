@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import fcntl
 from contextlib import contextmanager
 import math
@@ -10,6 +11,7 @@ import os
 import sqlite3
 import threading
 import uuid
+from decimal import Decimal
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -17,8 +19,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from strategies.iron_condor_math import max_defined_loss
-from strategies.runtime_records import RecordScope
+from strategies.option_payoff import covered_option_loss
+from strategies.runtime_records import RecordScope, fee_payload_matches, settlement_cash_matches
 
 ACTIVE_STATES = frozenset({"submitted", "partial", "open", "closing", "awaiting_settlement"})
 TERMINAL_STATES = frozenset({"closed", "canceled", "expired", "failed", "rejected"})
@@ -63,6 +65,7 @@ class BasketRecord:
     position_id: str | None = None
     terminal_status: str | None = None
     submission_started: int | None = None
+    terminal_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -357,6 +360,7 @@ class PositionLedger:
                     "reprice_count": "INTEGER NOT NULL DEFAULT 0",
                     "position_id": "TEXT",
                     "terminal_status": "TEXT",
+                    "terminal_reason": "TEXT",
                     "submission_started": "INTEGER",
                 },
             )
@@ -416,8 +420,225 @@ class PositionLedger:
                     ON outbox(status);
                 """
             )
+            self._connection.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS broker_evidence (
+                    evidence_id TEXT PRIMARY KEY,
+                    broker TEXT NOT NULL, account_id TEXT NOT NULL,
+                    environment TEXT NOT NULL, kind TEXT NOT NULL,
+                    provider_identity TEXT NOT NULL, acquisition_source TEXT NOT NULL,
+                    acquired_at TEXT NOT NULL, payload TEXT NOT NULL, sha256 TEXT NOT NULL,
+                    UNIQUE(broker, account_id, environment, kind, provider_identity)
+                );
+                CREATE TABLE IF NOT EXISTS realization_evidence_links (
+                    event_id TEXT NOT NULL, trade_id TEXT NOT NULL,
+                    position_id TEXT NOT NULL REFERENCES positions(position_id),
+                    package_id TEXT NOT NULL REFERENCES packages(package_id),
+                    leg_id TEXT NOT NULL REFERENCES legs(order_id),
+                    evidence_id TEXT NOT NULL REFERENCES broker_evidence(evidence_id),
+                    allocated_signed_quantity INTEGER NOT NULL CHECK(allocated_signed_quantity != 0),
+                    PRIMARY KEY(event_id, leg_id, evidence_id)
+                );
+                CREATE TABLE IF NOT EXISTS settlement_evidence_links (
+                    position_id TEXT PRIMARY KEY REFERENCES positions(position_id),
+                    event_id TEXT NOT NULL UNIQUE, trade_id TEXT NOT NULL,
+                    settlement_evidence_id TEXT NOT NULL REFERENCES broker_evidence(evidence_id),
+                    cash_evidence_id TEXT NOT NULL UNIQUE REFERENCES broker_evidence(evidence_id),
+                    allocated_cash_cents INTEGER NOT NULL
+                );
+                """
+            )
+            for table in ("settlement_values", "broker_cash_evidence", "fee_evidence"):
+                self._add_columns(table, {"raw_evidence_id": "TEXT REFERENCES broker_evidence(evidence_id)"})
+            self._add_columns("fee_evidence", {"event_id": "TEXT"})
+            for table in ("broker_evidence", "realization_evidence_links", "settlement_evidence_links"):
+                for operation in ("UPDATE", "DELETE"):
+                    self._connection.execute(
+                        f"CREATE TRIGGER IF NOT EXISTS immutable_{table}_{operation.lower()} "
+                        f"BEFORE {operation} ON {table} BEGIN "
+                        "SELECT RAISE(ABORT, 'immutable retained evidence'); END"
+                    )
             self._migrate_position_links()
             self._position_schema_ready = True
+
+    def record_broker_evidence(
+        self, evidence_id: str, *, scope: RecordScope, kind: str,
+        provider_identity: str, acquisition_source: str, acquired_at: str,
+        payload: Mapping[str, Any],
+    ) -> str:
+        """Retain immutable content. Its hash establishes integrity, not authenticity."""
+        if not all((evidence_id, kind, provider_identity, acquisition_source, acquired_at)):
+            raise ValueError("Evidence requires identity and acquisition context")
+        if kind not in {"execution", "settlement", "cash", "fee"}:
+            raise ValueError("Unsupported evidence kind")
+        acquired = datetime.fromisoformat(acquired_at.replace("Z", "+00:00"))
+        if acquired.utcoffset() is None:
+            raise ValueError("Evidence acquisition time requires a timezone")
+        encoded = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        values = (evidence_id, scope.broker, scope.account_id, scope.environment, kind,
+                  provider_identity, acquisition_source, acquired_at, encoded, digest)
+        with self._lock, self._connection:
+            bound = self._connection.execute("SELECT broker, account_id, environment FROM record_scope WHERE id=1").fetchone()
+            if tuple(bound) != (scope.broker, scope.account_id, scope.environment):
+                raise ValueError("Evidence scope does not match ledger")
+            previous = self._connection.execute(
+                "SELECT * FROM broker_evidence WHERE evidence_id=? OR "
+                "(broker=? AND account_id=? AND environment=? AND kind=? AND provider_identity=?)",
+                values[:6],
+            ).fetchone()
+            if previous is not None:
+                if tuple(previous) != values:
+                    raise ValueError("Conflicting evidence identity")
+                return evidence_id
+            self._connection.execute("INSERT INTO broker_evidence VALUES (?,?,?,?,?,?,?,?,?,?)", values)
+        return evidence_id
+
+    def get_broker_evidence(self, evidence_id: str) -> dict[str, Any] | None:
+        """Read retained evidence without altering its stored payload."""
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM broker_evidence WHERE evidence_id=?", (evidence_id,)).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        if hashlib.sha256(result["payload"].encode()).hexdigest() != result["sha256"]:
+            raise ValueError("Retained evidence hash mismatch")
+        result["payload"] = json.loads(result["payload"])
+        return result
+
+    def link_realization_evidence(
+        self, *, event_id: str, trade_id: str, position_id: str, package_id: str,
+        leg_id: str, evidence_id: str, allocated_signed_quantity: int,
+    ) -> None:
+        """Attach a signed allocation to durable package ownership, idempotently."""
+        if not event_id or not trade_id or not isinstance(allocated_signed_quantity, int) or not allocated_signed_quantity:
+            raise ValueError("Invalid realization allocation")
+        values = (event_id, trade_id, position_id, package_id, leg_id, evidence_id, allocated_signed_quantity)
+        with self._lock, self._connection:
+            owner = self._connection.execute(
+                "SELECT p.trade_id, p.position_id, l.package_id FROM packages p "
+                "JOIN legs l ON p.package_id=l.package_id WHERE l.order_id=?", (leg_id,)
+            ).fetchone()
+            if owner is None or tuple(owner) != (trade_id, position_id, package_id):
+                raise ValueError("Realization ownership mismatch")
+            if self.get_broker_evidence(evidence_id) is None:
+                raise ValueError("Missing retained evidence")
+            old = self._connection.execute(
+                "SELECT * FROM realization_evidence_links WHERE event_id=? AND leg_id=? AND evidence_id=?",
+                (event_id, leg_id, evidence_id),
+            ).fetchone()
+            if old is not None:
+                if tuple(old) != values:
+                    raise ValueError("Conflicting realization allocation")
+                return
+            self._connection.execute("INSERT INTO realization_evidence_links VALUES (?,?,?,?,?,?,?)", values)
+
+    def realization_evidence(self, event_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(row) for row in self._connection.execute(
+                "SELECT * FROM realization_evidence_links WHERE event_id=? ORDER BY leg_id,evidence_id", (event_id,)
+            )]
+
+    @property
+    def record_scope(self) -> RecordScope:
+        row = self._connection.execute("SELECT broker,account_id,environment FROM record_scope WHERE id=1").fetchone()
+        return RecordScope(broker=row[0], account_id=row[1], environment=row[2])
+
+    def capture_order_evidence(self, order: Any, leg: Mapping[str, Any], *, scope: RecordScope,
+                               parent_response: Mapping[str, Any] | None = None) -> str | None:
+        """Retain a provider observation already obtained by the execution path."""
+        raw = getattr(order, "_raw", None)
+        if not isinstance(raw, dict) or not raw:
+            return None
+        basket = self.get_basket(str(leg["package_id"]))
+        asset = getattr(order, "asset", None)
+        quantity = raw.get("exec_quantity")
+        if asset is None or quantity is None or isinstance(quantity, bool):
+            return None
+        amount = float(quantity)
+        if not math.isfinite(amount) or not amount.is_integer() or amount <= 0:
+            return None
+        side = str(raw.get("side") or getattr(order, "side", ""))
+        signed = int(amount) * (1 if side.startswith("buy") else -1)
+        contract = json.loads(asset_key(asset))
+        contract["multiplier"] = getattr(asset, "multiplier", None)
+        payload = dict(scope=scope.to_dict(), trade_id=basket.trade_id or basket.position_id, position_id=basket.position_id,
+                       package_id=basket.package_id, parent_order_id=basket.broker_parent_id,
+                       legs=[dict(leg_id=leg["order_id"], order_id=str(getattr(order, "identifier", "")),
+                                  parent_order_id=basket.broker_parent_id, contract=contract,
+                                  side=side, signed_quantity=signed)], raw_response=raw,
+                       parent_response=dict(parent_response) if parent_response else None)
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+        evidence_id = "execution:" + digest
+        # Content-addressed observations make replay stable even when acquisition repeats.
+        previous = self.get_broker_evidence(evidence_id)
+        acquired = previous["acquired_at"] if previous else datetime.now(timezone.utc).isoformat()
+        return self.record_broker_evidence(evidence_id, scope=scope, kind="execution",
+                                          provider_identity=digest, acquisition_source="broker-order-response",
+                                          acquired_at=acquired, payload=payload)
+
+    def attach_package_evidence(self, package_id: str, event_id: str, trade_id: str) -> dict[str, Any]:
+        """Link each leg once to the latest complete cumulative provider observation."""
+        basket = self.get_basket(package_id)
+        refs: set[str] = set()
+        journal_legs = []
+        for leg in basket.legs:
+            candidates = self._connection.execute(
+                "SELECT evidence_id FROM broker_evidence WHERE kind='execution' ORDER BY acquired_at DESC,evidence_id"
+            ).fetchall()
+            for row in candidates:
+                retained = self.get_broker_evidence(row[0])
+                payload = retained["payload"]
+                if payload.get("package_id") != package_id:
+                    continue
+                match = next((item for item in payload.get("legs", []) if item.get("leg_id") == leg["order_id"]
+                              and item.get("signed_quantity") == leg["filled_signed_quantity"]), None)
+                if match is None:
+                    continue
+                self.set_trade_id(package_id, trade_id)
+                self.link_realization_evidence(event_id=event_id, trade_id=trade_id, position_id=basket.position_id,
+                                              package_id=package_id, leg_id=leg["order_id"], evidence_id=row[0],
+                                              allocated_signed_quantity=int(leg["filled_signed_quantity"]))
+                refs.add(row[0])
+                journal_legs.append(match)
+                break
+        return dict(position_id=basket.position_id, package_id=package_id, legs=journal_legs,
+                    evidence_refs=sorted(refs), fee_provenance="unavailable", fees_complete=False)
+
+    def link_settlement_evidence(self, *, position_id: str, event_id: str, trade_id: str,
+                                 settlement_evidence_id: str, cash_evidence_id: str,
+                                 allocated_cash_cents: int) -> None:
+        """Reserve one attributable activity for one position, never aggregate cash."""
+        official = self.get_broker_evidence(settlement_evidence_id)
+        cash = self.get_broker_evidence(cash_evidence_id)
+        position = self.get_position(position_id)
+        if not official or not cash or official["kind"] != "settlement" or cash["kind"] != "cash":
+            raise ValueError("Missing retained settlement/cash evidence")
+        sp, cp = official["payload"], cash["payload"]
+        if (position.trade_id != trade_id or cp.get("trade_id") != trade_id
+                or cp.get("position_id") != position_id or cp.get("cash_cents") != allocated_cash_cents
+                or cp.get("scope") != self.record_scope.to_dict()
+                or not cp.get("raw_response") or not sp.get("raw_response")
+                or not settlement_cash_matches(cp, scope=self.record_scope, provider_identity=cash["provider_identity"])
+                or sp.get("scope") != self.record_scope.to_dict()
+                or any(sp["raw_response"].get(key) != sp.get(key) for key in ("symbol", "expiration", "value"))
+                or cp.get("expiration") != sp.get("expiration") or sp.get("symbol") != "XSP"
+                or cp.get("symbol") != "XSP" or cp.get("disposition_confirmed") is not True):
+            raise ValueError("Settlement attribution mismatch")
+        inventory = self.position_quantities(position_id)
+        expected = [
+            dict(contract={**json.loads(key), "multiplier":100}, signed_quantity=value)
+            for key, value in sorted(inventory.items()) if value]
+        if not expected or cp.get("legs") != expected or any(item["contract"]["expiration"] != sp["expiration"] for item in expected):
+            raise ValueError("Settlement contract/quantity mismatch")
+        values = (position_id,event_id,trade_id,settlement_evidence_id,cash_evidence_id,allocated_cash_cents)
+        with self._lock, self._connection:
+            old=self._connection.execute("SELECT * FROM settlement_evidence_links WHERE position_id=?", (position_id,)).fetchone()
+            if old is not None:
+                if tuple(old) != values:
+                    raise ValueError("Conflicting settlement allocation")
+                return
+            self._connection.execute("INSERT INTO settlement_evidence_links VALUES (?,?,?,?,?,?)", values)
 
     def _add_columns(self, table: str, definitions: Mapping[str, str]) -> None:
         existing = {
@@ -1103,6 +1324,8 @@ class PositionLedger:
         package_id: str,
         terminal_status: str,
         updated_at: datetime | str | None = None,
+        *,
+        terminal_reason: str | None = None,
     ) -> BasketRecord:
         """Resolve a partially filled package whose broker order reached terminal status."""
         normalized = terminal_status.strip().lower()
@@ -1116,7 +1339,8 @@ class PositionLedger:
                 raise KeyError(f"unknown package_id: {package_id}")
             intent = str(package["intent"])
             self._connection.execute(
-                "UPDATE packages SET terminal_status = ? WHERE package_id = ?", (normalized, package_id)
+                "UPDATE packages SET terminal_status = ?, terminal_reason = ? WHERE package_id = ?",
+                (normalized, terminal_reason, package_id),
             )
             now = (
                 datetime.now(timezone.utc).isoformat()
@@ -1163,6 +1387,50 @@ class PositionLedger:
                     (new_state, now, package_id),
                 )
             return self.get_basket(package_id)
+
+    def expire_day_order(self, package_id: str, *, now: datetime,
+                         broker_quantities: Mapping[str, int], market: str = "NYSE") -> BasketRecord | None:
+        """Cancel an absent DAY remainder after checking current contract inventory.
+
+        The caller must supply a successful current broker snapshot and establish
+        that the order is no longer active. Session expiry ends order validity;
+        matching inventory prevents missing executions from being discarded.
+        Filled contracts and their cash flows remain owned by the same position.
+        """
+        from strategies.order_sessions import day_session_ended
+
+        with self._lock:
+            basket = self.get_basket(package_id)
+            if (not self.is_inflight(basket) or (basket.duration or "").lower() != "day"
+                    or not day_session_ended(basket.created_at, now, market=market)):
+                return None
+            owned = self.all_owned_quantities()
+            if not basket.legs or any(
+                broker_quantities.get(str(leg["asset_key"]), 0) != owned.get(str(leg["asset_key"]), 0)
+                for leg in basket.legs
+            ):
+                return None
+            return self.resolve_partial_package(package_id, "canceled", updated_at=now,
+                                                terminal_reason="day_session_expired")
+
+    def block_entries_until(self, strategy_id: str, until: datetime) -> None:
+        """Extend a strategy's stop cooldown atomically across restarts and fills."""
+        until = until.replace(tzinfo=timezone.utc) if until.tzinfo is None else until
+        with self._lock, self._connection:
+            self._connection.execute(
+                """INSERT INTO system_state(key,value,updated_at) VALUES(?,?,?)
+                   ON CONFLICT(key) DO UPDATE SET
+                   value = MAX(CAST(system_state.value AS REAL), CAST(excluded.value AS REAL)),
+                   updated_at = excluded.updated_at""",
+                (f"entry_cooldown:{strategy_id}", str(until.timestamp()), datetime.now(timezone.utc).isoformat()),
+            )
+
+    def entry_cooldown_until(self, strategy_id: str) -> datetime | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM system_state WHERE key=?", (f"entry_cooldown:{strategy_id}",)
+            ).fetchone()
+            return datetime.fromtimestamp(float(row[0]), timezone.utc) if row is not None else None
 
     def set_panic_halt(self, halted: bool = True, reason: str = "panic_liquidation") -> None:
         """Persist a durable panic halt to block subsequent entries and trading iterations."""
@@ -1475,9 +1743,22 @@ class PositionLedger:
             row = self._connection.execute(query, tuple(parameters)).fetchone()
             return self._basket_from_row(row) if row is not None else None
 
-    def record_settlement_value(self, settlement: Any) -> None:
+    def _validate_raw_reference(self, evidence_id: str | None, kind: str) -> None:
+        if evidence_id is not None:
+            evidence = self.get_broker_evidence(evidence_id)
+            if evidence is None or evidence["kind"] != kind:
+                raise ValueError("Invalid raw evidence reference")
+
+    def record_settlement_value(self, settlement: Any, *, raw_evidence_id: str | None = None) -> None:
         """Store verified index settlement value in SQLite transaction."""
         from decimal import Decimal
+        self._validate_raw_reference(raw_evidence_id, "settlement")
+        if raw_evidence_id is not None:
+            payload=self.get_broker_evidence(raw_evidence_id)["payload"]
+            if (payload.get("expiration")!=str(settlement.expiration)[:10] or payload.get("symbol")!="XSP"
+                    or str(payload.get("value"))!=str(settlement.value)
+                    or payload.get("raw_response",{}).get("value")!=str(settlement.value)):
+                raise ValueError("Settlement value differs from retained payload")
         exp_str = str(settlement.expiration)[:10]
         val = (
             float(settlement.value)
@@ -1490,8 +1771,8 @@ class PositionLedger:
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT OR REPLACE INTO settlement_values
-                   (expiration, symbol, value, source_url, retrieved_at, response_hash, category)
-                   VALUES (?, 'XSP', ?, ?, ?, ?, ?)""",
+                   (expiration, symbol, value, source_url, retrieved_at, response_hash, category, raw_evidence_id)
+                   VALUES (?, 'XSP', ?, ?, ?, ?, ?, ?)""",
                 (
                     exp_str,
                     val,
@@ -1499,18 +1780,28 @@ class PositionLedger:
                     retrieved,
                     str(getattr(settlement, "response_hash", "")),
                     str(getattr(settlement, "category", "official")),
+                    raw_evidence_id,
                 ),
             )
 
-    def record_broker_cash_evidence(self, evidence: Any) -> None:
+    def record_broker_cash_evidence(self, evidence: Any, *, raw_evidence_id: str | None = None) -> None:
         """Store broker cash evidence in SQLite transaction."""
+        self._validate_raw_reference(raw_evidence_id, "cash")
+        if raw_evidence_id is not None:
+            retained=self.get_broker_evidence(raw_evidence_id)
+            payload=retained["payload"]
+            if (evidence.account_scope!=self.record_scope.account_id or retained["provider_identity"]!=str(evidence.activity_id)
+                    or payload.get("expiration")!=str(evidence.expiration)[:10] or payload.get("cash_cents")!=evidence.cash_cents
+                    or payload.get("disposition_confirmed") is not evidence.disposition_confirmed
+                    or not settlement_cash_matches(payload, scope=self.record_scope, provider_identity=retained["provider_identity"])):
+                raise ValueError("Cash activity differs from retained scope/payload")
         exp_str = str(evidence.expiration)[:10]
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT OR REPLACE INTO broker_cash_evidence
-                   (activity_id, account_scope, expiration, symbol, cash_cents, disposition_confirmed, description, created_at)
-                   VALUES (?, ?, ?, 'XSP', ?, ?, ?, ?)""",
+                   (activity_id, account_scope, expiration, symbol, cash_cents, disposition_confirmed, description, created_at, raw_evidence_id)
+                   VALUES (?, ?, ?, 'XSP', ?, ?, ?, ?, ?)""",
                 (
                     str(evidence.activity_id),
                     str(evidence.account_scope),
@@ -1519,8 +1810,38 @@ class PositionLedger:
                     1 if getattr(evidence, "disposition_confirmed", True) else 0,
                     str(getattr(evidence, "description", "")),
                     now,
+                    raw_evidence_id,
                 ),
             )
+
+    def _fee_record_has_retained_provenance(self, record: Mapping[str, Any]) -> bool:
+        """Validate a stored fee against its retained provider amount and owner."""
+        try:
+            retained = self.get_broker_evidence(record.get("raw_evidence_id"))
+        except ValueError:
+            return False
+        if not retained or retained["kind"] != "fee":
+            return False
+        payload = retained["payload"]
+        if (any(retained[key] != self.record_scope.to_dict()[key] for key in ("broker", "account_id", "environment"))
+                or any(payload.get(key) != record.get(key) for key in
+                       ("event_id", "trade_id", "position_id", "package_id", "amount_cents"))
+                or payload.get("complete") is not bool(record.get("complete"))):
+            return False
+        if record.get("package_id"):
+            package = self._connection.execute(
+                "SELECT broker_parent_id FROM packages WHERE package_id=? AND trade_id=? AND position_id=?",
+                (record["package_id"], record["trade_id"], record["position_id"]),
+            ).fetchone()
+            return bool(package) and fee_payload_matches(payload, scope=self.record_scope, order_id=package[0])
+        allocation = self._connection.execute(
+            "SELECT cash_evidence_id FROM settlement_evidence_links WHERE position_id=? AND event_id=? AND trade_id=?",
+            (record.get("position_id"), record.get("event_id"), record.get("trade_id")),
+        ).fetchone()
+        cash = self.get_broker_evidence(allocation[0]) if allocation else None
+        return bool(cash) and cash["kind"] == "cash" and fee_payload_matches(
+            payload, scope=self.record_scope, activity_id=cash["provider_identity"],
+        )
 
     def record_fee_evidence(
         self,
@@ -1529,14 +1850,22 @@ class PositionLedger:
         trade_id: str | None = None,
         package_id: str | None = None,
         position_id: str | None = None,
+        raw_evidence_id: str | None = None,
+        event_id: str | None = None,
     ) -> None:
         """Store fee evidence in SQLite transaction."""
+        self._validate_raw_reference(raw_evidence_id, "fee")
+        if raw_evidence_id is not None:
+            record = dict(event_id=event_id, trade_id=trade_id, position_id=position_id, package_id=package_id,
+                          amount_cents=fee.amount_cents, complete=fee.complete, raw_evidence_id=raw_evidence_id)
+            if not self._fee_record_has_retained_provenance(record):
+                raise ValueError("Fee record differs from retained payload")
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT OR REPLACE INTO fee_evidence
-                   (identity, trade_id, package_id, position_id, amount_cents, complete, category, provenance, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (identity, trade_id, package_id, position_id, amount_cents, complete, category, provenance, created_at, raw_evidence_id, event_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(fee.identity),
                     trade_id,
@@ -1547,6 +1876,8 @@ class PositionLedger:
                     str(getattr(fee, "category", "execution")),
                     str(getattr(fee, "provenance", "")),
                     now,
+                    raw_evidence_id,
+                    event_id,
                 ),
             )
 
@@ -1666,13 +1997,15 @@ class PositionLedger:
             reconcile_lifecycle,
         )
 
-        if settlement is not None:
+        if settlement is not None and self.get_settlement_value(settlement.expiration) is None:
             self.record_settlement_value(settlement)
-        if broker_cash is not None:
+        if broker_cash is not None and not self.get_broker_cash_evidence(broker_cash.expiration):
             self.record_broker_cash_evidence(broker_cash)
         if fees is not None:
+            fees = tuple(fees)
             for f in fees:
-                self.record_fee_evidence(f, position_id=position_id)
+                if not self._connection.execute("SELECT 1 FROM fee_evidence WHERE identity=?", (f.identity,)).fetchone():
+                    self.record_fee_evidence(f, position_id=position_id)
 
         now = datetime.now(timezone.utc).isoformat()
         results = []
@@ -1712,14 +2045,50 @@ class PositionLedger:
                 except Exception:
                     continue
 
-                active_settlement = settlement or self.get_settlement_value(exp_date)
+                active_settlement = self.get_settlement_value(exp_date)
                 cash_evidence_list = (
                     [broker_cash]
                     if broker_cash is not None
                     else self.get_broker_cash_evidence(exp_date)
                 )
 
-                if active_settlement is None or not cash_evidence_list:
+                allocation = self._connection.execute(
+                    "SELECT * FROM settlement_evidence_links WHERE position_id=?", (pid,)
+                ).fetchone()
+                attributable_cash = None
+                if allocation is not None:
+                    official = self.get_broker_evidence(allocation["settlement_evidence_id"])
+                    activity = self.get_broker_evidence(allocation["cash_evidence_id"])
+                    if (active_settlement is not None and official and activity
+                            and official["kind"] == "settlement" and activity["kind"] == "cash"
+                            and official["payload"].get("expiration") == str(exp_date)
+                            and official["payload"].get("scope") == self.record_scope.to_dict()
+                            and all(official["payload"].get("raw_response", {}).get(key) == official["payload"].get(key)
+                                    for key in ("symbol", "expiration", "value"))
+                            and activity["payload"].get("position_id") == pid
+                            and activity["payload"].get("trade_id") == allocation["trade_id"]
+                            and activity["payload"].get("cash_cents") == allocation["allocated_cash_cents"]
+                            and settlement_cash_matches(activity["payload"], scope=self.record_scope,
+                                                        provider_identity=activity["provider_identity"])):
+                        cash_row = self._connection.execute(
+                            "SELECT * FROM broker_cash_evidence WHERE raw_evidence_id=? AND expiration=?",
+                            (allocation["cash_evidence_id"], str(exp_date)),
+                        ).fetchall()
+                        settlement_row = self._connection.execute(
+                            "SELECT * FROM settlement_values WHERE raw_evidence_id=? AND expiration=?",
+                            (allocation["settlement_evidence_id"],str(exp_date)),
+                        ).fetchone()
+                        expected_legs=[dict(contract={**json.loads(key),"multiplier":100},signed_quantity=value)
+                                       for key,value in sorted(self.position_quantities(pid).items()) if value]
+                        if (len(cash_row) == 1 and settlement_row and cash_row[0]["account_scope"] == self.record_scope.account_id
+                                and activity["payload"].get("legs")==expected_legs and bool(expected_legs)
+                                and Decimal(str(official["payload"].get("value")))==active_settlement.value
+                                and activity["provider_identity"]==cash_row[0]["activity_id"]
+                                and activity["payload"].get("cash_cents")==cash_row[0]["cash_cents"]):
+                            from strategies.xsp_settlement import create_broker_cash_evidence
+                            r = cash_row[0]
+                            attributable_cash = create_broker_cash_evidence(r["account_scope"],r["activity_id"],r["expiration"],r["cash_cents"],bool(r["disposition_confirmed"]))
+                if active_settlement is None or attributable_cash is None:
                     for p_id in pkg_ids:
                         self._connection.execute(
                             "UPDATE packages SET state = 'awaiting_settlement', updated_at = ? WHERE package_id = ? AND state != 'awaiting_settlement'",
@@ -1727,7 +2096,7 @@ class PositionLedger:
                         )
                     continue
 
-                active_cash = cash_evidence_list[0]
+                active_cash = attributable_cash
 
                 leg_quantities: dict[str, int] = defaultdict(int)
                 for l in all_legs:
@@ -1746,7 +2115,15 @@ class PositionLedger:
                 closing_cash_cents = int(round(closing_cash_dollars * 100))
 
                 stored_fees = self.get_fee_evidence(trade_id=trade_id, position_id=pid)
-                active_fees = fees if fees is not None else stored_fees
+                fee_rows = {row["identity"]: dict(row) for row in self._connection.execute(
+                    "SELECT * FROM fee_evidence WHERE position_id=? AND trade_id IS ?", (pid, trade_id),
+                )}
+                active_fees = [fee for fee in stored_fees if fee.identity in fee_rows
+                               and self._fee_record_has_retained_provenance(fee_rows[fee.identity])]
+                supplied_fees_match = fees is None or (
+                    len(fees) == len(stored_fees) == len({fee.identity for fee in fees})
+                    and {fee.identity: fee for fee in fees} == {fee.identity: fee for fee in stored_fees}
+                )
 
                 lifecycle = reconcile_lifecycle(
                     opening_cash_cents=opening_cash_cents,
@@ -1755,7 +2132,8 @@ class PositionLedger:
                     settlement=active_settlement,
                     broker_cash=active_cash,
                     fees=active_fees,
-                    fee_coverage_complete=fee_coverage_complete,
+                    fee_coverage_complete=(fee_coverage_complete and supplied_fees_match and bool(active_fees)
+                                           and len(active_fees) == len(stored_fees)),
                     expiration_passed=True,
                 )
 
@@ -1788,12 +2166,16 @@ class PositionLedger:
                     )
                     outbox_payload = {
                         "event": "EXIT",
+                        "event_id": allocation["event_id"],
+                        "position_id": pid,
+                        "scope": self.record_scope.to_dict(),
+                        "evidence_refs": [allocation["settlement_evidence_id"], allocation["cash_evidence_id"]],
                         "trade_id": trade_id or pid,
                         "strategy": strategy_id,
                         "exit_reason": lifecycle.outcome,
                         "outcome": lifecycle.outcome,
                         "gross_pnl": (lifecycle.gross_cents / 100.0) if lifecycle.gross_cents is not None else None,
-                        "fees": (lifecycle.fees_cents / 100.0) if lifecycle.fees_cents is not None else (lifecycle.known_fees_cents / 100.0),
+                        "fees": (lifecycle.fees_cents / 100.0) if lifecycle.fees_cents is not None else None,
                         "net_pnl": (lifecycle.net_cents / 100.0) if lifecycle.net_cents is not None else None,
                         "known_fees": lifecycle.known_fees_cents / 100.0,
                         "fees_complete": lifecycle.fees_complete,
@@ -1872,6 +2254,11 @@ class PositionLedger:
                 oid = row["outbox_id"]
                 data = json.loads(row["payload"])
                 if row["event_type"] == "EXIT":
+                    legacy = "event_id" not in data
+                    event_id = data.get("event_id") or f"legacy-outbox:{oid}:{hashlib.sha256(row['payload'].encode()).hexdigest()}"
+                    event_scope = self.record_scope if legacy else RecordScope(
+                        **{key: data["scope"][key] for key in ("broker", "account_id", "environment")}
+                    )
                     record_trade_exit(
                         trade_id=data.get("trade_id", ""),
                         strategy_name=data.get("strategy", ""),
@@ -1886,7 +2273,10 @@ class PositionLedger:
                         fees=data.get("fees"),
                         net_pnl=data.get("net_pnl"),
                         log_path=target_path,
-                        source=data.get("source", "broker_verified"),
+                        event_id=event_id, scope=event_scope,
+                        position_id=data.get("position_id"), evidence_refs=data.get("evidence_refs", []),
+                        outcome=data.get("outcome"), fees_complete=data.get("fees_complete", False), known_fees=data.get("known_fees"),
+                        source="unattributed" if legacy else data.get("source", "broker_verified"),
                     )
                 with self._connection:
                     self._connection.execute(
@@ -1956,14 +2346,13 @@ class PositionLedger:
                 attributed[key] += quantity
             if quantities:
                 try:
-                    shape = self._package_width_and_quantity(
-                        [(json.loads(key), quantity) for key, quantity in quantities.items()]
-                    )
+                    risk = covered_option_loss(
+                        [(json.loads(key), quantity) for key, quantity in quantities.items()], -sum(costs.values()))
                 except (KeyError, TypeError, ValueError):
                     return None
-                if shape is None:
+                if risk is None:
                     return None
-                total += max_defined_loss(*shape, -sum(costs.values()))
+                total += risk
             for basket in self.position_baskets(position.position_id):
                 if self.is_inflight(basket) and basket.intent in {"open", "add"}:
                     remaining = []
@@ -2141,6 +2530,7 @@ class PositionLedger:
             position_id=row.get("position_id"),
             terminal_status=row.get("terminal_status"),
             submission_started=row.get("submission_started"),
+            terminal_reason=row.get("terminal_reason"),
         )
 
     @staticmethod

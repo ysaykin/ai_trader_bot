@@ -1,0 +1,565 @@
+{
+  "as_of_date": "2026-11-06",
+  "evidence_contract_version": "2",
+  "negative": [
+    {
+      "change": "scope.account_id",
+      "reason": "ACCOUNT_MISMATCH",
+      "value": "OTHER"
+    },
+    {
+      "change": "realization_links",
+      "reason": "MISSING_REALIZATION_LINKS",
+      "value": []
+    },
+    {
+      "change": "fee_records",
+      "reason": "FEE_EVIDENCE_INCOMPLETE",
+      "value": []
+    }
+  ],
+  "positive": {
+    "events": [
+      {
+        "event": "ENTRY",
+        "event_id": "retained-1-0:ENTRY",
+        "evidence_refs": [
+          "execution-retained-1-0"
+        ],
+        "expiry": "2026-11-05",
+        "fees": 0.8,
+        "gross_pnl": 10.0,
+        "legs": [
+          {
+            "contract": {
+              "expiration": "2026-11-05",
+              "multiplier": 100,
+              "right": "put",
+              "strike": 690.0,
+              "symbol": "XSP"
+            },
+            "leg_id": "retained-1-0-leg-0",
+            "order_id": "child-retained-1-0-0",
+            "parent_order_id": "parent-retained-1-0",
+            "side": "buy_to_open",
+            "signed_quantity": 1
+          },
+          {
+            "contract": {
+              "expiration": "2026-11-05",
+              "multiplier": 100,
+              "right": "put",
+              "strike": 695.0,
+              "symbol": "XSP"
+            },
+            "leg_id": "retained-1-0-leg-1",
+            "order_id": "child-retained-1-0-1",
+            "parent_order_id": "parent-retained-1-0",
+            "side": "sell_to_open",
+            "signed_quantity": -1
+          }
+        ],
+        "net_pnl": 9.2,
+        "package_id": "retained-1-0",
+        "position_id": "position-retained-1",
+        "quantity": 1,
+        "scope": {
+          "account_id": "REDACTED",
+          "broker": "tradier",
+          "environment": "paper",
+          "scope_key": "tradier_paper_REDACTED"
+        },
+        "strategy": "IronCondor_V31",
+        "strikes": {
+          "long_put": 690.0,
+          "short_put": 695.0
+        },
+        "symbol": "XSP",
+        "timestamp": "2026-11-05T18:00:00+00:00",
+        "trade_id": "retained-1"
+      },
+      {
+        "event": "EXIT",
+        "event_id": "retained-1-1:EXIT",
+        "evidence_refs": [
+          "execution-retained-1-1"
+        ],
+        "expiry": "2026-11-05",
+        "fees": 0.8,
+        "gross_pnl": 10.0,
+        "legs": [
+          {
+            "contract": {
+              "expiration": "2026-11-05",
+              "multiplier": 100,
+              "right": "put",
+              "strike": 690.0,
+              "symbol": "XSP"
+            },
+            "leg_id": "retained-1-1-leg-0",
+            "order_id": "child-retained-1-1-0",
+            "parent_order_id": "parent-retained-1-1",
+            "side": "sell_to_close",
+            "signed_quantity": -1
+          },
+          {
+            "contract": {
+              "expiration": "2026-11-05",
+              "multiplier": 100,
+              "right": "put",
+              "strike": 695.0,
+              "symbol": "XSP"
+            },
+            "leg_id": "retained-1-1-leg-1",
+            "order_id": "child-retained-1-1-1",
+            "parent_order_id": "parent-retained-1-1",
+            "side": "buy_to_close",
+            "signed_quantity": 1
+          }
+        ],
+        "net_pnl": 9.2,
+        "package_id": "retained-1-1",
+        "position_id": "position-retained-1",
+        "quantity": 1,
+        "scope": {
+          "account_id": "REDACTED",
+          "broker": "tradier",
+          "environment": "paper",
+          "scope_key": "tradier_paper_REDACTED"
+        },
+        "strategy": "IronCondor_V31",
+        "strikes": {
+          "long_put": 690.0,
+          "short_put": 695.0
+        },
+        "symbol": "XSP",
+        "timestamp": "2026-11-05T18:00:00+00:00",
+        "trade_id": "retained-1"
+      }
+    ],
+    "evidence": [
+      {
+        "account_id": "REDACTED",
+        "acquired_at": "2026-11-05T18:00:00+00:00",
+        "acquisition_source": "provider-export",
+        "broker": "tradier",
+        "environment": "paper",
+        "evidence_id": "execution-retained-1-0",
+        "kind": "execution",
+        "payload": {
+          "legs": [
+            {
+              "contract": {
+                "expiration": "2026-11-05",
+                "multiplier": 100,
+                "right": "put",
+                "strike": 690.0,
+                "symbol": "XSP"
+              },
+              "leg_id": "retained-1-0-leg-0",
+              "order_id": "child-retained-1-0-0",
+              "parent_order_id": "parent-retained-1-0",
+              "side": "buy_to_open",
+              "signed_quantity": 1
+            },
+            {
+              "contract": {
+                "expiration": "2026-11-05",
+                "multiplier": 100,
+                "right": "put",
+                "strike": 695.0,
+                "symbol": "XSP"
+              },
+              "leg_id": "retained-1-0-leg-1",
+              "order_id": "child-retained-1-0-1",
+              "parent_order_id": "parent-retained-1-0",
+              "side": "sell_to_open",
+              "signed_quantity": -1
+            }
+          ],
+          "package_id": "retained-1-0",
+          "parent_order_id": "parent-retained-1-0",
+          "position_id": "position-retained-1",
+          "raw_response": {
+            "id": "parent-retained-1-0",
+            "leg": [
+              {
+                "contract": {
+                  "expiration": "2026-11-05",
+                  "multiplier": 100,
+                  "right": "put",
+                  "strike": 690.0,
+                  "symbol": "XSP"
+                },
+                "leg_id": "retained-1-0-leg-0",
+                "order_id": "child-retained-1-0-0",
+                "parent_order_id": "parent-retained-1-0",
+                "side": "buy_to_open",
+                "signed_quantity": 1
+              },
+              {
+                "contract": {
+                  "expiration": "2026-11-05",
+                  "multiplier": 100,
+                  "right": "put",
+                  "strike": 695.0,
+                  "symbol": "XSP"
+                },
+                "leg_id": "retained-1-0-leg-1",
+                "order_id": "child-retained-1-0-1",
+                "parent_order_id": "parent-retained-1-0",
+                "side": "sell_to_open",
+                "signed_quantity": -1
+              }
+            ],
+            "status": "filled"
+          },
+          "scope": {
+            "account_id": "REDACTED",
+            "broker": "tradier",
+            "environment": "paper",
+            "scope_key": "tradier_paper_REDACTED"
+          },
+          "trade_id": "retained-1"
+        },
+        "provider_identity": "parent-retained-1-0:1",
+        "sha256": "6295e266ad961fe88905004cf1e3a5fda8025e673750b6712f3701be65a0a435"
+      },
+      {
+        "account_id": "REDACTED",
+        "acquired_at": "2026-11-05T18:00:00+00:00",
+        "acquisition_source": "provider-export",
+        "broker": "tradier",
+        "environment": "paper",
+        "evidence_id": "fee-retained-1-0",
+        "kind": "fee",
+        "payload": {
+          "amount_cents": 80,
+          "complete": true,
+          "event_id": "retained-1-0:ENTRY",
+          "package_id": "retained-1-0",
+          "position_id": "position-retained-1",
+          "raw_response": {
+            "commission": "0.80",
+            "order_id": "parent-retained-1-0"
+          },
+          "scope": {
+            "account_id": "REDACTED",
+            "broker": "tradier",
+            "environment": "paper",
+            "scope_key": "tradier_paper_REDACTED"
+          },
+          "trade_id": "retained-1"
+        },
+        "provider_identity": "fee-retained-1-0",
+        "sha256": "9fe5d0b2580c3628f0aa9b4a5970c28f8b61b6c53561d1528d3849c4c3d9779e"
+      },
+      {
+        "account_id": "REDACTED",
+        "acquired_at": "2026-11-05T18:00:00+00:00",
+        "acquisition_source": "provider-export",
+        "broker": "tradier",
+        "environment": "paper",
+        "evidence_id": "execution-retained-1-1",
+        "kind": "execution",
+        "payload": {
+          "legs": [
+            {
+              "contract": {
+                "expiration": "2026-11-05",
+                "multiplier": 100,
+                "right": "put",
+                "strike": 690.0,
+                "symbol": "XSP"
+              },
+              "leg_id": "retained-1-1-leg-0",
+              "order_id": "child-retained-1-1-0",
+              "parent_order_id": "parent-retained-1-1",
+              "side": "sell_to_close",
+              "signed_quantity": -1
+            },
+            {
+              "contract": {
+                "expiration": "2026-11-05",
+                "multiplier": 100,
+                "right": "put",
+                "strike": 695.0,
+                "symbol": "XSP"
+              },
+              "leg_id": "retained-1-1-leg-1",
+              "order_id": "child-retained-1-1-1",
+              "parent_order_id": "parent-retained-1-1",
+              "side": "buy_to_close",
+              "signed_quantity": 1
+            }
+          ],
+          "package_id": "retained-1-1",
+          "parent_order_id": "parent-retained-1-1",
+          "position_id": "position-retained-1",
+          "raw_response": {
+            "id": "parent-retained-1-1",
+            "leg": [
+              {
+                "contract": {
+                  "expiration": "2026-11-05",
+                  "multiplier": 100,
+                  "right": "put",
+                  "strike": 690.0,
+                  "symbol": "XSP"
+                },
+                "leg_id": "retained-1-1-leg-0",
+                "order_id": "child-retained-1-1-0",
+                "parent_order_id": "parent-retained-1-1",
+                "side": "sell_to_close",
+                "signed_quantity": -1
+              },
+              {
+                "contract": {
+                  "expiration": "2026-11-05",
+                  "multiplier": 100,
+                  "right": "put",
+                  "strike": 695.0,
+                  "symbol": "XSP"
+                },
+                "leg_id": "retained-1-1-leg-1",
+                "order_id": "child-retained-1-1-1",
+                "parent_order_id": "parent-retained-1-1",
+                "side": "buy_to_close",
+                "signed_quantity": 1
+              }
+            ],
+            "status": "filled"
+          },
+          "scope": {
+            "account_id": "REDACTED",
+            "broker": "tradier",
+            "environment": "paper",
+            "scope_key": "tradier_paper_REDACTED"
+          },
+          "trade_id": "retained-1"
+        },
+        "provider_identity": "parent-retained-1-1:1",
+        "sha256": "aeaefefadfb32908e4a1f65a7d131177c092e815f1a3e80490a8590cf2b780f3"
+      },
+      {
+        "account_id": "REDACTED",
+        "acquired_at": "2026-11-05T18:00:00+00:00",
+        "acquisition_source": "provider-export",
+        "broker": "tradier",
+        "environment": "paper",
+        "evidence_id": "fee-retained-1-1",
+        "kind": "fee",
+        "payload": {
+          "amount_cents": 80,
+          "complete": true,
+          "event_id": "retained-1-1:EXIT",
+          "package_id": "retained-1-1",
+          "position_id": "position-retained-1",
+          "raw_response": {
+            "commission": "0.80",
+            "order_id": "parent-retained-1-1"
+          },
+          "scope": {
+            "account_id": "REDACTED",
+            "broker": "tradier",
+            "environment": "paper",
+            "scope_key": "tradier_paper_REDACTED"
+          },
+          "trade_id": "retained-1"
+        },
+        "provider_identity": "fee-retained-1-1",
+        "sha256": "c4ee4e419e1015fda1a71976f4590657d3fb2463cba3d45dac3e0669901f7b95"
+      }
+    ],
+    "fee_records": [
+      {
+        "amount_cents": 80,
+        "category": "execution",
+        "complete": 1,
+        "created_at": "2026-11-05T18:00:00+00:00",
+        "event_id": "retained-1-0:ENTRY",
+        "identity": "fee-retained-1-0",
+        "package_id": "retained-1-0",
+        "position_id": "position-retained-1",
+        "provenance": "provider-export",
+        "raw_evidence_id": "fee-retained-1-0",
+        "trade_id": "retained-1"
+      },
+      {
+        "amount_cents": 80,
+        "category": "execution",
+        "complete": 1,
+        "created_at": "2026-11-05T18:00:00+00:00",
+        "event_id": "retained-1-1:EXIT",
+        "identity": "fee-retained-1-1",
+        "package_id": "retained-1-1",
+        "position_id": "position-retained-1",
+        "provenance": "provider-export",
+        "raw_evidence_id": "fee-retained-1-1",
+        "trade_id": "retained-1"
+      }
+    ],
+    "ownership": {
+      "legs": [
+        {
+          "asset_key": "{\"expiration\":\"2026-11-05\",\"right\":\"put\",\"strike\":690.0,\"symbol\":\"XSP\"}",
+          "broker_order_id": "child-retained-1-0-0",
+          "broker_parent_id": "parent-retained-1-0",
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "fill_price": 1.0,
+          "filled_signed_quantity": 1,
+          "local_order_id": "retained-1-0-leg-0",
+          "order_id": "retained-1-0-leg-0",
+          "package_id": "retained-1-0",
+          "requested_signed_quantity": 1,
+          "side": "buy_to_open",
+          "status": "filled",
+          "updated_at": "2026-11-05T18:00:00+00:00"
+        },
+        {
+          "asset_key": "{\"expiration\":\"2026-11-05\",\"right\":\"put\",\"strike\":695.0,\"symbol\":\"XSP\"}",
+          "broker_order_id": "child-retained-1-0-1",
+          "broker_parent_id": "parent-retained-1-0",
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "fill_price": 1.0,
+          "filled_signed_quantity": -1,
+          "local_order_id": "retained-1-0-leg-1",
+          "order_id": "retained-1-0-leg-1",
+          "package_id": "retained-1-0",
+          "requested_signed_quantity": -1,
+          "side": "sell_to_open",
+          "status": "filled",
+          "updated_at": "2026-11-05T18:00:00+00:00"
+        },
+        {
+          "asset_key": "{\"expiration\":\"2026-11-05\",\"right\":\"put\",\"strike\":690.0,\"symbol\":\"XSP\"}",
+          "broker_order_id": "child-retained-1-1-0",
+          "broker_parent_id": "parent-retained-1-1",
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "fill_price": 1.0,
+          "filled_signed_quantity": -1,
+          "local_order_id": "retained-1-1-leg-0",
+          "order_id": "retained-1-1-leg-0",
+          "package_id": "retained-1-1",
+          "requested_signed_quantity": -1,
+          "side": "sell_to_close",
+          "status": "filled",
+          "updated_at": "2026-11-05T18:00:00+00:00"
+        },
+        {
+          "asset_key": "{\"expiration\":\"2026-11-05\",\"right\":\"put\",\"strike\":695.0,\"symbol\":\"XSP\"}",
+          "broker_order_id": "child-retained-1-1-1",
+          "broker_parent_id": "parent-retained-1-1",
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "fill_price": 1.0,
+          "filled_signed_quantity": 1,
+          "local_order_id": "retained-1-1-leg-1",
+          "order_id": "retained-1-1-leg-1",
+          "package_id": "retained-1-1",
+          "requested_signed_quantity": 1,
+          "side": "buy_to_close",
+          "status": "filled",
+          "updated_at": "2026-11-05T18:00:00+00:00"
+        }
+      ],
+      "packages": [
+        {
+          "broker_parent_id": "parent-retained-1-0",
+          "broker_tag": null,
+          "closing_cash_flow": null,
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "duration": "day",
+          "intent": "open",
+          "limit_price": null,
+          "opening_cash_flow": 0.0,
+          "package_id": "retained-1-0",
+          "position_id": "position-retained-1",
+          "replacement_of": null,
+          "reprice_count": 0,
+          "state": "closed",
+          "strategy_id": "IronCondor_V31",
+          "submission_started": null,
+          "terminal_status": null,
+          "trade_id": "retained-1",
+          "updated_at": "2026-11-05T18:00:00+00:00"
+        },
+        {
+          "broker_parent_id": "parent-retained-1-1",
+          "broker_tag": null,
+          "closing_cash_flow": 0.0,
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "duration": "day",
+          "intent": "close",
+          "limit_price": null,
+          "opening_cash_flow": null,
+          "package_id": "retained-1-1",
+          "position_id": "position-retained-1",
+          "replacement_of": null,
+          "reprice_count": 0,
+          "state": "closed",
+          "strategy_id": "IronCondor_V31",
+          "submission_started": null,
+          "terminal_status": null,
+          "trade_id": "retained-1",
+          "updated_at": "2026-11-05T18:00:00+00:00"
+        }
+      ],
+      "positions": [
+        {
+          "created_at": "2026-11-05T18:00:00+00:00",
+          "exit_reason": null,
+          "mae_pnl": 0.0,
+          "mfe_pnl": 0.0,
+          "position_id": "position-retained-1",
+          "settings": "{}",
+          "strategy_id": "IronCondor_V31",
+          "trade_id": "retained-1"
+        }
+      ]
+    },
+    "realization_links": [
+      {
+        "allocated_signed_quantity": 1,
+        "event_id": "retained-1-0:ENTRY",
+        "evidence_id": "execution-retained-1-0",
+        "leg_id": "retained-1-0-leg-0",
+        "package_id": "retained-1-0",
+        "position_id": "position-retained-1",
+        "trade_id": "retained-1"
+      },
+      {
+        "allocated_signed_quantity": -1,
+        "event_id": "retained-1-0:ENTRY",
+        "evidence_id": "execution-retained-1-0",
+        "leg_id": "retained-1-0-leg-1",
+        "package_id": "retained-1-0",
+        "position_id": "position-retained-1",
+        "trade_id": "retained-1"
+      },
+      {
+        "allocated_signed_quantity": -1,
+        "event_id": "retained-1-1:EXIT",
+        "evidence_id": "execution-retained-1-1",
+        "leg_id": "retained-1-1-leg-0",
+        "package_id": "retained-1-1",
+        "position_id": "position-retained-1",
+        "trade_id": "retained-1"
+      },
+      {
+        "allocated_signed_quantity": 1,
+        "event_id": "retained-1-1:EXIT",
+        "evidence_id": "execution-retained-1-1",
+        "leg_id": "retained-1-1-leg-1",
+        "package_id": "retained-1-1",
+        "position_id": "position-retained-1",
+        "trade_id": "retained-1"
+      }
+    ]
+  },
+  "scope": {
+    "account_id": "REDACTED",
+    "broker": "tradier",
+    "environment": "paper",
+    "scope_key": "tradier_paper_REDACTED"
+  }
+}

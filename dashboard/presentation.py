@@ -109,7 +109,8 @@ def build_dashboard_presentation_bundle(snapshots: dict[str, Any]) -> dict[str, 
             sym = key[6:]
             q_data = value["data"]
             quotes[sym] = q_data
-            marks[sym] = option_mark(q_data.get("bid"), q_data.get("ask"), q_data.get("last"))
+            marks[sym] = (option_mark(q_data.get("bid"), q_data.get("ask"), q_data.get("last"))
+                          if value.get("status") in {"ready", "stale"} else None)
 
     # 3. Positions
     p_snap = snapshots.get("positions", {})
@@ -187,7 +188,8 @@ def build_dashboard_presentation_bundle(snapshots: dict[str, Any]) -> dict[str, 
             "type": str(row.get("strategy", row.get("type", ""))).upper(),
             "quantity": str(row.get("quantity", "")),
             "status": str(row.get("status", "")).upper(),
-            "price": format_numeric(price, currency=True) if price is not None else "MKT",
+            "price": format_numeric(price, currency=True) if price is not None else
+                     "MKT" if str(row.get("type", "")).lower() == "market" else "N/A",
             "is_expired": (o_status == "expired"),
         })
 

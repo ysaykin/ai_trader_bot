@@ -25,16 +25,56 @@ from .data.adapters import (
     get_config_settings,
     save_config_settings,
     generate_trades_csv,
+    format_strategy_label,
+    format_trade_time_et,
     money,
 )
 from dashboard.positions import display, payoff_bounds, payoff_figure, summarize
+from dashboard.monitoring import data_health, feature_health, order_activity, strategy_results
+
+
+# Hidden at the user's request. Keep the views and calculations for later use.
+ANALYSIS_LABS_ENABLED = False
 
 
 class DashboardState(rx.State):
     """Global reactive state for the Lumibot Quantitative Trading Dashboard."""
 
     # Navigation
-    current_tab: str = "positions"
+    current_tab: str = "overview"
+    refresh_error: str = ""
+    health_rows: list[dict[str, str]] = []
+    feature_rows: list[dict[str, str]] = []
+    execution_orders: list[dict[str, Any]] = []
+    order_view_mode: str = "Pending orders"
+    order_reconciliation_count: int = 0
+    strategy_result_rows: list[dict[str, Any]] = []
+    overview_metrics: list[dict[str, str]] = []
+    attention_items: list[str] = []
+    snapshot_time: str = "No strategy observation yet"
+    strategy_decisions: list[dict[str, str]] = []
+    performance_scope: str = "Waiting for verified trade evidence"
+    policy_available: bool = False
+    ledger_warning: str = ""
+
+    def set_order_view_mode(self, value: str):
+        self.order_view_mode = value
+
+    @rx.var
+    def visible_execution_orders(self) -> list[dict[str, Any]]:
+        return [order for order in self.execution_orders
+                if self.order_view_mode == "All recent orders"
+                or (order["needs_review"] if self.order_view_mode == "Needs reconciliation" else order["pending"])]
+
+    def inspect_order_position(self, position_id: str, strategy: str):
+        self.position_filter_mode = "custom"
+        self.position_strategy_filters = [strategy]
+        self.position_structure_filter = "All structures"
+        self.position_underlying_filter = "All underlyings"
+        self.position_expiry_filter = "All expiries"
+        self.selected_position_id = position_id
+        self.position_expanded = [position_id]
+        self.current_tab = "positions"
 
     # Market Clock & Lifecycle
     market_time: str = "--:--:-- ET"
@@ -162,21 +202,21 @@ class DashboardState(rx.State):
     benchmark_correlation: str = "0.08"
 
     # Neural Policy
-    model_version: str = "v1"
-    market_regime: str = "Low-Vol Pinning"
-    dynamic_pt: str = "40.0%"
-    contextual_selector: str = "IC_V05 (15Δ, $5 Wing)"
-    active_switched_profile: str = "IC_V05_7DTE_D12_W3_PT35_T1015"
-    dynamic_switching_status: str = "AUTO-ADAPTING TO MARKET REGIME"
-    data_readiness_str: str = "READY (12/12 Ticks)"
-    has_sufficient_data: bool = True
-    recommendation_action: str = "HOLD"
-    action_prob_hold: int = 68
-    action_prob_add: int = 12
-    action_prob_trim: int = 15
-    action_prob_flatten: int = 5
-    regret_score: str = "+$18.40 vs Hindsight Best"
-    capture_efficiency: str = "84.2% MFE Capture"
+    model_version: str = "Unavailable"
+    market_regime: str = "Unavailable"
+    dynamic_pt: str = "N/A"
+    contextual_selector: str = "Unavailable"
+    active_switched_profile: str = "Unavailable"
+    dynamic_switching_status: str = "Inference unavailable"
+    data_readiness_str: str = "Waiting for complete snapshots"
+    has_sufficient_data: bool = False
+    recommendation_action: str = "Unavailable"
+    action_prob_hold: int = 0
+    action_prob_add: int = 0
+    action_prob_trim: int = 0
+    action_prob_flatten: int = 0
+    regret_score: str = "N/A"
+    capture_efficiency: str = "N/A"
 
     # Positions & Orders
     positions: list[dict[str, Any]] = []
@@ -224,7 +264,8 @@ class DashboardState(rx.State):
             result[key + "_display"] = display(row[key], percent=key == "return_pct", currency=key != "delta")
         result["fees_display"] = display(-row["fees"] if row["fees"] is not None else None)
         result["fee_label"] = "Estimated fees" if row["estimated_fees"] else "Reported fees"
-        result["dte_label"] = f"{row['dte']} DTE" if row["dte"] is not None else "DTE unavailable"
+        result["dte_label"] = (f"Expired {abs(row['dte'])}d ago" if row.get("awaiting_settlement")
+                               else f"{row['dte']} DTE" if row["dte"] is not None else "DTE unavailable")
         result["leg_rows"] = [{"symbol": leg["symbol"], "quantity": str(leg["quantity"]),
                                "quantity_color": display(float(leg["quantity"]))["color"],
                                **{f"{key}_{attr}": value for key in ("cost", "mark", "pnl", "delta", "theta")
@@ -246,7 +287,8 @@ class DashboardState(rx.State):
         if self.position_data_status != "ready" and not self.filtered_position_records:
             summary.update(open_pnl=None, net_pnl=None)
         return {"count": f"{summary['count']} of {len(self.position_records)} positions",
-                "coverage": f"{summary['marked']} of {summary['count']} valued",
+                "coverage": (f"{summary['marked']} of {summary['open_count']} open positions valued"
+                             + (f" · {summary['awaiting_settlement']} awaiting settlement" if summary['awaiting_settlement'] else "")),
                 "open": display(summary["open_pnl"]), "net": display(summary["net_pnl"]),
                 "fee_note": "Includes estimated fees" if summary["estimated_fees"] else "Includes reported fees"}
 
@@ -518,50 +560,51 @@ class DashboardState(rx.State):
             self.unattributed_trades_count = inc.get("unattributed_trades_count", 0)
             self.quarantined_trades_count = inc.get("quarantined_trades_count", 0)
 
-            # 5. A/B Testing Lab
-            ab = get_ab_lab_data()
-            self.ab_all_strategies = ab.get("strategies", [])
-            self.ab_strategy_options = ab.get("strategy_options", [])
-            if (not self.ab_strategy_a or self.ab_strategy_a not in self.ab_strategy_options) and ab.get("default_a"):
-                self.ab_strategy_a = ab["default_a"]
-            if (not self.ab_strategy_b or self.ab_strategy_b not in self.ab_strategy_options) and ab.get("default_b"):
-                self.ab_strategy_b = ab["default_b"]
-            self._recompute_ab_comparison()
+            if ANALYSIS_LABS_ENABLED:
+                # 5. A/B Testing Lab
+                ab = get_ab_lab_data()
+                self.ab_all_strategies = ab.get("strategies", [])
+                self.ab_strategy_options = ab.get("strategy_options", [])
+                if (not self.ab_strategy_a or self.ab_strategy_a not in self.ab_strategy_options) and ab.get("default_a"):
+                    self.ab_strategy_a = ab["default_a"]
+                if (not self.ab_strategy_b or self.ab_strategy_b not in self.ab_strategy_options) and ab.get("default_b"):
+                    self.ab_strategy_b = ab["default_b"]
+                self._recompute_ab_comparison()
 
-            # Benchmark Lab computation from actual closed trades
-            closed_trades = inc.get("all_closed_trades", [])
-            total_net_pnl = sum(float(t.get("net_pnl", 0.0)) for t in closed_trades)
-            initial_cap = 100000.0
-            strat_return_pct = (total_net_pnl / initial_cap) * 100.0 if initial_cap > 0 else 0.0
-            spy_return_pct = 0.08
-            alpha_pct = strat_return_pct - spy_return_pct
-            self.benchmark_lumibot_return = f"{strat_return_pct:+.2f}%"
-            self.benchmark_closed_trades = f"{len(closed_trades)} Closed Trades"
-            self.benchmark_spy_return = f"{spy_return_pct:+.2f}%"
-            self.benchmark_alpha = f"{alpha_pct:+.2f}%"
-            self.benchmark_beta = "0.12"
-            if len(closed_trades) >= 2:
-                returns = [float(t.get("net_pnl", 0.0)) for t in closed_trades]
-                mean_r = sum(returns) / len(returns)
-                var_r = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
-                std_r = math.sqrt(var_r) if var_r > 0 else 1.0
-                downside_var = sum((min(r, 0.0)) ** 2 for r in returns) / len(returns)
-                downside_std = math.sqrt(downside_var) if downside_var > 0 else 1.0
-                self.benchmark_sharpe = f"{(mean_r / std_r * math.sqrt(252)):.2f}" if std_r > 0 else "0.00"
-                self.benchmark_sortino = f"{(mean_r / downside_std * math.sqrt(252)):.2f}" if downside_std > 0 else "0.00"
-                cum = 0.0
-                peak = 0.0
-                max_dd = 0.0
-                for r in returns:
-                    cum += r
-                    peak = max(peak, cum)
-                    max_dd = min(max_dd, cum - peak)
-                max_dd_pct = (max_dd / initial_cap) * 100.0
-                self.benchmark_max_strategy_dd = f"{max_dd_pct:.2f}%"
-            else:
-                self.benchmark_sharpe = "0.00"
-                self.benchmark_sortino = "0.00"
-                self.benchmark_max_strategy_dd = "0.00%"
+                # Benchmark Lab computation from actual closed trades
+                closed_trades = inc.get("all_closed_trades", [])
+                total_net_pnl = sum(float(t.get("net_pnl", 0.0)) for t in closed_trades)
+                initial_cap = 100000.0
+                strat_return_pct = (total_net_pnl / initial_cap) * 100.0 if initial_cap > 0 else 0.0
+                spy_return_pct = 0.08
+                alpha_pct = strat_return_pct - spy_return_pct
+                self.benchmark_lumibot_return = f"{strat_return_pct:+.2f}%"
+                self.benchmark_closed_trades = f"{len(closed_trades)} Closed Trades"
+                self.benchmark_spy_return = f"{spy_return_pct:+.2f}%"
+                self.benchmark_alpha = f"{alpha_pct:+.2f}%"
+                self.benchmark_beta = "0.12"
+                if len(closed_trades) >= 2:
+                    returns = [float(t.get("net_pnl", 0.0)) for t in closed_trades]
+                    mean_r = sum(returns) / len(returns)
+                    var_r = sum((r - mean_r) ** 2 for r in returns) / (len(returns) - 1)
+                    std_r = math.sqrt(var_r) if var_r > 0 else 1.0
+                    downside_var = sum((min(r, 0.0)) ** 2 for r in returns) / len(returns)
+                    downside_std = math.sqrt(downside_var) if downside_var > 0 else 1.0
+                    self.benchmark_sharpe = f"{(mean_r / std_r * math.sqrt(252)):.2f}" if std_r > 0 else "0.00"
+                    self.benchmark_sortino = f"{(mean_r / downside_std * math.sqrt(252)):.2f}" if downside_std > 0 else "0.00"
+                    cum = 0.0
+                    peak = 0.0
+                    max_dd = 0.0
+                    for r in returns:
+                        cum += r
+                        peak = max(peak, cum)
+                        max_dd = min(max_dd, cum - peak)
+                    max_dd_pct = (max_dd / initial_cap) * 100.0
+                    self.benchmark_max_strategy_dd = f"{max_dd_pct:.2f}%"
+                else:
+                    self.benchmark_sharpe = "0.00"
+                    self.benchmark_sortino = "0.00"
+                    self.benchmark_max_strategy_dd = "0.00%"
 
             # 6. Neural Policy
             ml = get_neural_policy_data()
@@ -569,17 +612,19 @@ class DashboardState(rx.State):
             self.market_regime = ml["market_regime"]
             self.dynamic_pt = ml["dynamic_pt"]
             self.contextual_selector = ml["contextual_selector"]
-            self.active_switched_profile = ml.get("active_switched_profile", "IC_V05_7DTE_D12_W3_PT35_T1015")
-            self.dynamic_switching_status = ml.get("dynamic_switching_status", "AUTO-ADAPTING TO MARKET REGIME")
-            self.data_readiness_str = ml.get("readiness_str", "READY (12/12 Ticks)")
-            self.has_sufficient_data = bool(ml.get("has_sufficient_data", True))
+            self.active_switched_profile = ml.get("active_switched_profile", "Unavailable")
+            self.dynamic_switching_status = ml.get("dynamic_switching_status", "Inference unavailable")
+            self.data_readiness_str = ml.get("readiness_str", "Waiting for complete snapshots")
+            self.has_sufficient_data = bool(ml.get("has_sufficient_data", False))
             self.recommendation_action = ml["recommendation_action"]
-            self.action_prob_hold = int(ml["action_probs"]["HOLD"])
-            self.action_prob_add = int(ml["action_probs"]["ADD"])
-            self.action_prob_trim = int(ml["action_probs"]["TRIM"])
-            self.action_prob_flatten = int(ml["action_probs"]["FLATTEN"])
+            self.policy_available = self.recommendation_action != "Unavailable"
+            self.action_prob_hold = int(ml["action_probs"]["HOLD"] or 0)
+            self.action_prob_add = int(ml["action_probs"]["ADD"] or 0)
+            self.action_prob_trim = int(ml["action_probs"]["TRIM"] or 0)
+            self.action_prob_flatten = int(ml["action_probs"]["FLATTEN"] or 0)
             self.regret_score = ml["regret_score"]
             self.capture_efficiency = ml["capture_efficiency"]
+            self._load_monitoring(tel, workspace, inc, ml, clk)
 
             # 7. Logs
             self.logs = get_recent_logs(max_lines=120, filter_query=self.log_filter)
@@ -606,9 +651,62 @@ class DashboardState(rx.State):
             self.cfg_neural_wing = cfg.get("neural_wing", "5.0")
             self.cfg_neural_entry = cfg.get("neural_entry", "10:00")
             self.cfg_verticals_enabled = cfg.get("verticals_enabled", "true")
+            self.refresh_error = ""
         except Exception as exc:
+            self.refresh_error = "Dashboard refresh failed. Displayed values are from the last successful refresh; their current status is unconfirmed."
             import logging
             logging.getLogger("reflex_dashboard").warning(f"Error in load_all: {exc}")
+
+    def _load_monitoring(self, tel, workspace, inc, ml, clock):
+        self.ledger_warning = tel.get("ledger_error", "")
+        self.execution_orders = order_activity(tel)
+        self.order_reconciliation_count = sum(order["needs_review"] for order in self.execution_orders)
+        for order in self.execution_orders:
+            order["strategy_label"] = format_strategy_label(order["strategy"])
+            order["updated"] = format_trade_time_et(order["updated"])
+        self.strategy_result_rows = strategy_results(inc, workspace["rows"], self.execution_orders,
+            inventory_known=tel.get("positions_status") == "ready" and not self.ledger_warning,
+            orders_known=tel.get("orders_status") == "ready" and not self.ledger_warning)
+        self.health_rows = data_health(tel, symbols=[os.getenv("IC_SYMBOL", "XSP"), "VIX", "VIX9D"], session_open=clock["is_open"])
+        self.feature_rows = feature_health(ml)
+        snapshot = ml.get("latest_snapshot", {})
+        self.snapshot_time = str(snapshot.get("timestamp") or "No strategy observation yet")
+        self.strategy_decisions = [{"name": name, "action": str(value.get("action") or "Unknown"),
+                                   "observed": str(value.get("observed_at") or self.snapshot_time)}
+                                  for name, value in (snapshot.get("strategies") or {}).items() if isinstance(value, dict)]
+        totals = summarize(workspace["rows"])
+        unattributed = sum(row["structure"] == "unattributed" for row in workspace["rows"] if not row.get("awaiting_settlement"))
+        attributed = totals["open_count"] - unattributed
+        closed = inc.get("eligible_closed_trades", [])
+        net = sum(t["net_pnl"] for t in closed) if closed else None
+        pending = sum(o["pending"] for o in self.execution_orders)
+        ended = sum(o["session_ended"] for o in self.execution_orders)
+        self.overview_metrics = [
+            {"label": "Attributed open positions", "value": str(attributed) if tel.get("positions_status") == "ready" and not self.ledger_warning else
+                f"{attributed} known" if attributed else "N/A",
+             "note": f"{unattributed} unattributed contract rows · {totals['awaiting_settlement']} awaiting settlement", "color": "#F8FAFC"},
+            {"label": "Marked open P&L", "value": display(totals["open_pnl"] if totals["open_count"] else None)["text"],
+             "note": f"{totals['marked']}/{totals['open_count']} position records valued; before fees", "color": display(totals["open_pnl"])["color"]},
+            {"label": "Verified closed P&L", "value": display(net)["text"],
+             "note": f"{len(closed)} closed trades; after recorded fees", "color": display(net)["color"]},
+            {"label": "Pending orders", "value": str(pending) if tel.get("orders_status") == "ready" and not self.ledger_warning else f"{pending} known" if pending else "N/A",
+             "note": f"{ended} ended-session orders in reconciliation; reservations retained" if ended else "Current-session DAY orders and active GTC orders", "color": "#F59E0B" if pending else "#94A3B8"},
+        ]
+        self.performance_scope = (f"All recorded strategies · {len(closed)} verified closed trades · "
+                                  f"{self.unattributed_trades_count} excluded / unresolved · {self.quarantined_trades_count} quarantined")
+        alerts = list(workspace["issues"])
+        review = sum(o["needs_review"] for o in self.execution_orders)
+        if review:
+            alerts.insert(0, f"{review} orders need review. Open Orders for broker identity, fill progress and retained reservations.")
+        for row in self.health_rows:
+            if row["color"] == "amber":
+                alerts.append(f"{row['name']}: {row['status']}. Received {row['received']} ago; provider age {row['provider_age']}.")
+        missing = [row["name"] for row in self.feature_rows if row["status"] == "Missing"]
+        if missing:
+            alerts.append("Missing strategy inputs in latest observation: " + ", ".join(missing) + ".")
+        if self.bot_badge_color in {"amber", "crimson", "gray"}:
+            alerts.append(f"Engine status: {self.bot_state}. {self.bot_last_action}")
+        self.attention_items = list(dict.fromkeys(alerts))
 
     def set_cfg_broker(self, val: str):
         self.cfg_broker = val
@@ -750,7 +848,9 @@ class DashboardState(rx.State):
         self.cfg_verticals_enabled = val
 
     def set_tab(self, tab: str):
-        self.current_tab = tab
+        self.current_tab = {"incubator": "strategies", "monitor": "system", "neural": "system", "logs": "system"}.get(tab, tab)
+        if self.current_tab not in {"overview", "positions", "orders", "strategies", "system", "config"}:
+            self.current_tab = "overview"
 
     def set_filter(self, query: str):
         self.log_filter = query
@@ -840,7 +940,8 @@ class DashboardState(rx.State):
         inc = get_incubator_data()
         trades = [
             t for t in inc.get("visible_trades_50", [])
-            if not is_fixture_trade(t.get("trade_id", ""), t)
+            if t.get("status") == "CLOSED"
+            and not is_fixture_trade(t.get("trade_id", ""), t)
             and t.get("partition") != "quarantined"
             and t.get("reconciliation_status") != "QUARANTINED"
             and t.get("source") != "synthetic"
@@ -853,12 +954,16 @@ class DashboardState(rx.State):
         )
 
     def download_all_trades_csv(self):
-        """Export eligible broker-verified historical trades to CSV archive."""
+        """Export explicitly eligible closed trades with retained execution and fees."""
         from strategies.runtime_records import is_fixture_trade
         inc = get_incubator_data()
         trades = [
             t for t in inc.get("eligible_closed_trades", [])
-            if not is_fixture_trade(t.get("trade_id", ""), t)
+            if t.get("is_eligible") is True
+            and t.get("partition") == "accepted"
+            and t.get("reconciliation_status") == "VERIFIED"
+            and t.get("status") == "CLOSED"
+            and not is_fixture_trade(t.get("trade_id", ""), t)
             and t.get("partition") != "quarantined"
             and t.get("reconciliation_status") != "QUARANTINED"
             and t.get("source") != "synthetic"
@@ -877,13 +982,17 @@ class DashboardState(rx.State):
         self.load_more_modal_open = False
 
     def load_more_and_export_csv(self):
-        """Forces the user to download the full CSV export to view/audit historical trades beyond the visible 50."""
+        """Download the eligible closed population beyond the visible audit rows."""
         self.load_more_modal_open = False
         from strategies.runtime_records import is_fixture_trade
         inc = get_incubator_data()
         trades = [
             t for t in inc.get("eligible_closed_trades", [])
-            if not is_fixture_trade(t.get("trade_id", ""), t)
+            if t.get("is_eligible") is True
+            and t.get("partition") == "accepted"
+            and t.get("reconciliation_status") == "VERIFIED"
+            and t.get("status") == "CLOSED"
+            and not is_fixture_trade(t.get("trade_id", ""), t)
             and t.get("partition") != "quarantined"
             and t.get("reconciliation_status") != "QUARANTINED"
             and t.get("source") != "synthetic"
@@ -891,6 +1000,6 @@ class DashboardState(rx.State):
         csv_content = generate_trades_csv(trades)
         return rx.download(
             data=csv_content,
-            filename="lumibot_complete_trades_archive.csv",
+            filename="lumibot_eligible_trades_archive.csv",
             mime_type="text/csv",
         )

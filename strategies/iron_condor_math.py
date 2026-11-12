@@ -385,26 +385,18 @@ def evaluate_mfe_ratchet(
     mfe_pnl: Real,
     current_net_pnl: Real,
     *,
-    breakeven_trigger_pct: Real = 0.30,
     trail_trigger_pct: Real = 0.45,
     trail_lock_fraction: Real = DEFAULT_MFE_TRAIL_LOCK_FRACTION,
 ) -> str | None:
-    """Evaluate dynamic MFE profit-ratchet exit to prevent winning trades from turning into losses:
-
-    - Once MFE reaches `trail_trigger_pct` (45%) of initial credit, locks in `trail_lock_fraction` (65%) of MFE.
-    - Once MFE reaches `breakeven_trigger_pct` (30%) of initial credit, prevents net loss (exits at <= $0.00).
-    """
+    """Trail positive profits only. A zero-P&L crossing is not an exit signal."""
     credit = _finite_positive(entry_credit_cash, "entry_credit_cash")
     mfe = _finite_number(mfe_pnl, "mfe_pnl")
     curr = _finite_number(current_net_pnl, "current_net_pnl")
-    be_trig = _finite_positive(breakeven_trigger_pct, "breakeven_trigger_pct")
     tr_trig = _finite_positive(trail_trigger_pct, "trail_trigger_pct")
     lock_frac = _finite_positive(trail_lock_fraction, "trail_lock_fraction")
 
-    if mfe >= credit * tr_trig and curr <= mfe * lock_frac and curr > 0:
+    if mfe <= credit and mfe >= credit * tr_trig and curr <= mfe * lock_frac and curr > 0:
         return "MFE_TRAIL_LOCK"
-    if mfe >= credit * be_trig and curr <= 0.0:
-        return "BREAKEVEN_RATCHET"
     return None
 
 

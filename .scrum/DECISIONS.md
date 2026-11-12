@@ -274,3 +274,68 @@
   5. **Multi-Event Journal Classification Retention (`trade_logger.py`, `reflex_dashboard/reflex_dashboard/data/adapters.py`)**: Retained complete raw event sequences for classification across all lifecycle events, and added optional `execution_evidence` parameter support to `record_trade_adjustment` and `record_trade_addition`.
 - **Trade-offs**: Retaining the SQLite evidence snapshot and classification report adds disk overhead during rebuilds, but provides auditable provenance proof. Activation of rebuilt history remains gated and forbidden until the strict 7-field classifier and durable raw broker evidence linkage are completed.
 
+
+## ADR-23 implementation supplement: strict retained evidence and manifest v2, 2026-11-06
+
+The version 1 activation gate is superseded by manifest version 2 and classifier
+version 2. Verification requires the manifest's explicit broker, account,
+environment, and as-of date. Every ENTRY, ADDITION, ADJUSTMENT, and EXIT must match
+retained provider content and durable position, package, parent, child, and leg
+ownership. Complete contracts include underlying, expiry, right, strike, and
+multiplier. Signed allocations cannot reuse cumulative execution quantity.
+
+`broker_evidence`, `realization_evidence_links`, and `settlement_evidence_links`
+are additive tables. Provider identities and acquisition context are retained.
+Identical insertion is idempotent; conflicting identity reuse fails. Update and
+delete triggers protect retained evidence and allocations. Existing settlement,
+cash, and fee tables have nullable raw-evidence references. Migration creates no
+broker attribution for old local fills.
+
+SHA-256 proves retained-content integrity. It does not authenticate a broker or
+provide non-repudiation. A journal assertion, local filled state, plausible order
+ID, strategy name, orphan settlement row, or `settlement_verified` boolean cannot
+establish execution provenance. The classifier checks every realization and
+requires actual retained fee coverage for performance eligibility. Execution with
+incomplete actual fees remains `accepted/FEE_INCOMPLETE` and is excluded from
+eligible exports. Unknown fee and net values remain unavailable. This decision
+does not certify lifecycle arithmetic, which remains owned by `bug-06`.
+
+Settlement retirement requires official retained settlement content and one
+attributable scoped broker cash activity allocated to the position's exact
+remaining contracts. The existing settlement math still computes intrinsic cash.
+Missing or ambiguous provenance retains inventory and risk reservations. Outbox
+replay preserves stable event IDs, scope, evidence references, outcome, known fees,
+and incomplete-fee status.
+
+An explicit synthetic source or test, demo, or backtest scope supports quarantine.
+The documented historical regression fingerprint requires both a `filled-*` ID
+and all four strikes: long 95 put, short 100 put, short 110 call, and long 115 call.
+A weak name match alone does not establish synthetic provenance.
+
+Offline evidence import validates scope and existing ownership before committing.
+Build preserves original journal bytes and freezes the full SQLite database.
+Partition files retain source order and duplicate occurrences. Verification
+recomputes reasons, references, assignments, and journal-reported terminal amounts.
+Malformed lines and missing identities are retained in the backup and error report
+but prevent activation. Nonempty history cannot activate an empty accepted file.
+
+Activation requires stopped writers, a matching destination, and a locked source
+identity and hash recheck. Atomic replacement records recoverable intermediate
+states. Rollback refuses post-activation appends. Neither old manifests nor a force
+flag bypass these checks.
+
+The protected-record inventory now includes all snapshot databases, sidecars, and
+trading logs. Test snapshots initialize empty. A concurrent runtime writer prevents
+integrity certification rather than disappearing through an inventory exclusion.
+The controlled-copy final run passed 249 targeted tests with unchanged protected
+files. The full repository suite was excluded by the user's implementation directive.
+The isolated rebuild, activation, and rollback rehearsal also passed.
+
+Reflex audit history retains unattributed rows with status. Both eligible CSV
+handlers require explicit eligibility, accepted partition, VERIFIED status, and a
+closed record. The visible audit export and eligible exports have separate counts.
+The browser's actual downloads contained three audit rows and one eligible row.
+The user's follow-up hides A/B Lab and Benchmark navigation, content, and automatic
+loads while retaining their code behind `ANALYSIS_LABS_ENABLED = False`.
+Runtime history has not been activated. Recovery commands and verification artifacts
+are recorded in `TASK_PLAN.md`.

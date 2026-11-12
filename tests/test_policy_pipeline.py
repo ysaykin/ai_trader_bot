@@ -101,6 +101,33 @@ class PolicyPipelineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             LivePolicyController(self.model, expected_sequence_length=12)
 
+    def test_neural_picker_uses_active_candidates_and_leaves_peers_untouched(self) -> None:
+        train_policy(self.trajectories, self.model, sequence_length=2, regime_size=4, epochs=1)
+        artifact = json.loads(self.model.read_text())
+        artifact["network"]["state_dict"]["strategy_bias"] = [100.0, -100.0]
+        self.model.write_text(json.dumps(artifact))
+        active = SimpleNamespace(parameters={})
+        neural = SimpleNamespace(parameters={"pure_neural_mode": True})
+        retired = SimpleNamespace(parameters={"management_only": True})
+        controller = LivePolicyController(
+            self.model, {"alpha": retired, "beta": active, "neural": neural}
+        )
+        controller.on_snapshot(self.snapshots[0])
+        recommendation = controller.on_snapshot(self.snapshots[1])
+        self.assertEqual(recommendation.strategy_name, "beta")
+        self.assertEqual(neural._queued_strategy_switch, "beta")
+        self.assertEqual(neural._queued_policy_action[0], recommendation.action)
+        self.assertFalse(hasattr(active, "_queued_policy_action"))
+        self.assertFalse(hasattr(retired, "_queued_policy_action"))
+
+    def test_neural_picker_refuses_model_without_active_candidates(self) -> None:
+        train_policy(self.trajectories, self.model, epochs=1)
+        with self.assertRaisesRegex(ValueError, "active.*strateg"):
+            LivePolicyController(self.model, {
+                "neural": SimpleNamespace(pure_neural_mode=True, parameters={}),
+                "untrained": SimpleNamespace(parameters={}),
+            })
+
     def test_trajectory_callback_and_profit_target_relabeling_feed_trainer(self) -> None:
         log_path = self.root / "live_trajectories.jsonl"
         observed: list[tuple[str, int]] = []

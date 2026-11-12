@@ -6,7 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.positions import build_positions, display, payoff_at, payoff_bounds, payoff_figure, read_packages, summarize
+from dashboard.positions import build_positions, display, payoff_at, payoff_bounds, payoff_figure, quote_symbols, read_packages, summarize
+
+
+@pytest.fixture(autouse=True)
+def pin_position_valuation_date(monkeypatch):
+    # These accounting fixtures expire Nov 6. Their valuation date must not
+    # advance with the machine clock; expiry tests pass their own as_of date.
+    class ValuationDate(date):
+        @classmethod
+        def today(cls):
+            return cls(2026, 11, 5)
+
+    monkeypatch.setattr("dashboard.positions.date", ValuationDate)
 
 
 def package(pid="open", trade="trade-1", strategy="IC_V23", qty=2, intent="open", legs=None):
@@ -207,6 +219,72 @@ def test_closed_and_unfilled_packages_are_not_open_positions():
     for leg in unfilled["legs"]:
         leg["filled_signed_quantity"] = 0
     assert rows_for([unfilled])[0] == []
+
+
+def test_expired_absent_inventory_awaits_settlement_without_poisoning_open_pnl():
+    expired = package("expired", "expired-trade", qty=1)
+    pending = package("close", "expired-trade", qty=1, intent="close")
+    pending["state"] = "submitted"
+    for leg in pending["legs"]:
+        leg["filled_signed_quantity"] = 0
+    live = package("live", "live-trade", "IC_V25", qty=1)
+    for leg in live["legs"]:
+        key = json.loads(leg["asset_key"])
+        key["expiration"] = "2026-11-20"
+        leg["asset_key"] = json.dumps(key)
+    from dashboard.positions import Contract
+    broker = [{"symbol": Contract.from_key(l["asset_key"]).symbol,
+               "quantity": l["filled_signed_quantity"]} for l in live["legs"]]
+    quotes = {p["symbol"]: {"mark": .4 if p["quantity"] > 0 else 1.4} for p in broker}
+    # Even a retained old quote cannot value a settled or expired contract.
+    quotes.update(snapshot([expired])[1])
+    rows, issues = build_positions([expired, pending, live], broker, quotes, as_of=date(2026, 11, 7))
+    past, current = rows
+    assert past["status"] == "Awaiting settlement"
+    assert past["quality"] == "Settlement unverified"
+    assert past["open_pnl"] is None and past["net_pnl"] is None
+    assert not past["reconciled"] and not past["payoff_eligible"]
+    assert all(leg["mark"] is None and leg["delta"] is None for leg in past["legs"])
+    assert current["open_pnl"] == pytest.approx(100)
+    totals = summarize(rows)
+    assert totals["open_pnl"] == pytest.approx(100)
+    assert totals["net_pnl"] is None
+    assert totals["awaiting_settlement"] == 1 and totals["open_count"] == 1
+    assert any("awaiting settlement" in issue for issue in issues)
+    assert not any("quantity mismatch" in issue for issue in issues)
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "reflex_dashboard"))
+    from reflex_dashboard.state import DashboardState
+    state = DashboardState(_reflex_internal_init=True)
+    state.position_records = rows
+    state.position_data_status = "ready"
+    assert state.position_summary["open"]["text"] == "$100.00"
+    assert state.position_summary["net"]["text"] == "N/A"
+    assert state.position_summary["coverage"] == "1 of 1 open positions valued · 1 awaiting settlement"
+    assert state._position_display_row(past)["dte_label"] == "Expired 1d ago"
+
+
+def test_missing_broker_and_unexpired_absence_remain_reconciliation_failures():
+    rows, issues = build_positions([package()], None, {}, as_of=date(2026, 11, 7))
+    assert rows[0]["open_pnl"] is None and summarize(rows)["open_pnl"] is None
+    assert any("Broker positions unavailable" in issue for issue in issues)
+    rows, issues = build_positions([package()], [], {}, as_of=date(2026, 11, 6))
+    assert rows[0]["status"] == "Open"
+    assert any("quantity mismatch" in issue for issue in issues)
+
+
+def test_expired_contract_still_at_broker_remains_a_quantity_mismatch():
+    p = package(qty=1)
+    broker, quotes = snapshot([p])
+    broker[0]["quantity"] = 2
+    rows, issues = build_positions([p], broker, quotes, as_of=date(2026, 11, 7))
+    assert any("quantity mismatch" in issue for issue in issues)
+    assert rows[0]["net_pnl"] is None
+
+
+def test_quote_demand_excludes_past_expiration_inventory():
+    assert quote_symbols([package()], as_of=date(2026, 11, 7)) == set()
+    assert "XSP" in quote_symbols([package()], as_of=date(2026, 11, 6))
 
 
 def test_expiration_payoff_requires_one_scope_and_normalizes_by_summed_risk():

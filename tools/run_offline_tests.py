@@ -3,7 +3,7 @@
 
 Ensures:
 - Unit tests run in strictly isolated temporary environments.
-- Zero mutations to production records (trades.jsonl, position_ledger.sqlite3, trajectories.jsonl).
+- Inventory all runtime files, including snapshots, logs, and SQLite sidecars.
 - External network requests to brokers fail closed.
 - Works across both pytest and unittest discovery.
 """
@@ -52,6 +52,7 @@ def main() -> None:
     env = dict(os.environ)
     env["LUMIBOT_TEST_RECORD_ROOT"] = str(root_path)
     env["LUMIBOT_OFFLINE_GUARD"] = "1"
+    env["LUMIBOT_LAZY_CREDENTIALS"] = "1"
     env["RUN_TRADIER_SANDBOX_WRITE_TEST"] = "0"
     env["TRADIER_ACCESS_TOKEN"] = "sanitized_test_token"
     env["TRADIER_TOKEN"] = "sanitized_test_token"
@@ -86,13 +87,13 @@ def main() -> None:
         mutated = [k for k in pre_inventory if k in post_inventory and pre_inventory[k] != post_inventory[k]]
         created = set(post_inventory.keys()) - set(pre_inventory.keys())
         if deleted or mutated or created:
-            print("CRITICAL ERROR: Protected records violated during test run!", file=sys.stderr)
+            print("PROTECTED RECORD INTEGRITY: UNSUCCESSFUL. Runtime files changed during the run; concurrent external writes cannot be excluded.", file=sys.stderr)
             if deleted:
-                print(f"  Deleted: {deleted}", file=sys.stderr)
+                print(f"  Deleted: {sorted(deleted)}", file=sys.stderr)
             if mutated:
                 print(f"  Mutated: {mutated}", file=sys.stderr)
             if created:
-                print(f"  Created: {created}", file=sys.stderr)
+                print(f"  Created: {sorted(created)}", file=sys.stderr)
             sys.exit(1)
         print("=" * 70)
         print("PROTECTED RECORD INTEGRITY: PASSED (Zero mutations to production records)")

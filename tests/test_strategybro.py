@@ -506,11 +506,9 @@ class DynamicSuiteStrategiesTests(unittest.TestCase):
         self.assertEqual(len(legs), 2)
         self.assertEqual([leg[0].right for leg in legs], ["put", "put"])
 
-    def test_mfe_ratchet_prevents_winners_turning_into_losers(self) -> None:
-        # Credit = $100.00. MFE reached $35.00 (35% >= 30% trigger), current net dropped to $0.00 -> BREAKEVEN_RATCHET
-        self.assertEqual(
+    def test_mfe_trails_positive_profit_without_breakeven_noise_exit(self) -> None:
+        self.assertIsNone(
             iron_condor_math.evaluate_mfe_ratchet(100.0, 35.0, 0.0),
-            "BREAKEVEN_RATCHET",
         )
         # Credit = $100.00. MFE reached $48.00 (48% >= 45% trigger), current net pulled back to $28.00 (<= 65% of 48 = 31.2) -> MFE_TRAIL_LOCK
         self.assertEqual(

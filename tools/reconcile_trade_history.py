@@ -24,6 +24,8 @@ import json
 import os
 import shutil
 import sqlite3
+import fcntl
+import uuid
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,8 @@ if str(ROOT) not in sys.path:
 
 from strategies.runtime_records import (
     RecordScope,
+    CLASSIFIER_VERSION, EVIDENCE_CONTRACT_VERSION,
+    journal_event_conflicts, _contract_identity, _raw_execution_matches, execution_payload_is_valid,
     classify_trade,
     is_fixture_trade,
     load_ledger_execution_evidence,
@@ -62,394 +66,374 @@ def sha256_file(path: Path) -> str:
 
 
 def get_verified_ledger_trades(ledger_path: Path) -> set[str]:
-    """Query position ledger in read-only mode to find trade IDs with confirmed broker parent orders or fills."""
-    evidence = load_ledger_execution_evidence(ledger_path)
-    return set(evidence.keys())
+    """Return no certified IDs without the journal events needed for classification."""
+    # A ledger alone cannot establish that each journal realization matches it.
+    return set()
 
 
-def partition_trade_journal(
-    journal_path: Path, ledger_path: Path
-) -> tuple[
-    dict[str, list[dict[str, Any]]],  # accepted events by trade_id
-    dict[str, list[dict[str, Any]]],  # unattributed events by trade_id
-    dict[str, list[dict[str, Any]]],  # quarantined events by trade_id
-]:
-    """Parse raw trade journal events and partition into accepted, unattributed, and quarantined using shared classifier."""
-    ledger_ev = load_ledger_execution_evidence(ledger_path)
+def _read_journal(path: Path) -> tuple[list[tuple[dict[str, Any], bytes]], list[dict[str, Any]]]:
+    """Keep raw bytes, ordering, and duplicate occurrences for audit and rebuild."""
+    records=[]
+    errors=[]
+    for number,line in enumerate(path.read_bytes().splitlines(keepends=True),1):
+        if not line.strip():
+            continue
+        try:
+            event=json.loads(line)
+            if not isinstance(event,dict) or not isinstance(event.get("trade_id"),str) or not event["trade_id"] or not isinstance(event.get("event_id"),str) or not event["event_id"] or event.get("event") not in {"ENTRY","ADDITION","ADJUSTMENT","EXIT"}:
+                raise ValueError("missing or invalid event identity")
+            records.append((event,line))
+        except (ValueError,TypeError,UnicodeError) as error:
+            errors.append(dict(line=number,error=str(error),raw_hex=line.hex()))
+    return records,errors
 
-    events_by_trade: dict[str, list[dict[str, Any]]] = {}
+
+def _classifications(records: list[tuple[dict[str, Any], bytes]], ledger_path: Path,
+                     scope: RecordScope, as_of_date: str) -> tuple[dict[str, list[dict[str, Any]]],dict[str,dict[str,Any]]]:
+    evidence=load_ledger_execution_evidence(ledger_path,expected_scope=scope,as_of_date=as_of_date)
+    evidence["conflicting_event_ids"]=journal_event_conflicts([event for event,_ in records])
+    grouped:dict[str,list[dict[str,Any]]]={}
+    for event,_ in records:
+        grouped.setdefault(event["trade_id"],[]).append(event)
+    return grouped,{tid:classify_trade(events,evidence,expected_scope=scope,as_of_date=as_of_date)
+                    for tid,events in grouped.items()}
+
+
+def partition_trade_journal(journal_path: Path, ledger_path: Path, *, expected_scope: RecordScope | None = None,
+                            as_of_date: str | None = None) -> tuple[dict[str,Any],dict[str,Any],dict[str,Any]]:
+    """Partition complete sequences while retaining unsupported history for audit."""
     if not journal_path.exists():
-        return {}, {}, {}
-
-    with open(journal_path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line_str = line.strip()
-            if not line_str:
-                continue
-            try:
-                r = json.loads(line_str)
-                tid = r.get("trade_id")
-                if tid:
-                    events_by_trade.setdefault(tid, []).append(r)
-            except json.JSONDecodeError:
-                continue
-
-    accepted: dict[str, list[dict[str, Any]]] = {}
-    unattributed: dict[str, list[dict[str, Any]]] = {}
-    quarantined: dict[str, list[dict[str, Any]]] = {}
-
-    for tid, events in events_by_trade.items():
-        classification = classify_trade(events, ledger_ev)
-        partition = classification["partition"]
-        if partition == "accepted":
-            accepted[tid] = events
-        elif partition == "quarantined":
-            quarantined[tid] = events
-        else:
-            unattributed[tid] = events
-
-    return accepted, unattributed, quarantined
+        return {},{},{}
+    scope=expected_scope or RecordScope.from_env()
+    as_of=as_of_date or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    records,_=_read_journal(journal_path)
+    grouped,classifications=_classifications(records,ledger_path,scope,as_of)
+    return tuple({tid:events for tid,events in grouped.items() if classifications[tid]["partition"]==name}
+                 for name in ("accepted","unattributed","quarantined"))
 
 
-def summarize_partition(trades: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
-    """Compute financial summary for a set of trade events."""
-    count = len(trades)
-    gross_pnl = 0.0
-    fees = 0.0
-    net_pnl = 0.0
-    closed_count = 0
-
-    for tid, events in trades.items():
-        exit_event = next((e for e in reversed(events) if e.get("event") == "EXIT"), None)
-        if exit_event:
-            closed_count += 1
-            g = float(exit_event.get("gross_pnl", exit_event.get("pnl", 0.0)) or 0.0)
-            f = float(exit_event.get("fees", 0.0) or 0.0)
-            n = float(exit_event.get("net_pnl", round(g - f, 2)) or 0.0)
-            gross_pnl += g
-            fees += f
-            net_pnl += n
-
-    return {
-        "trades_count": count,
-        "closed_count": closed_count,
-        "gross_pnl": round(gross_pnl, 2),
-        "fees": round(fees, 2),
-        "net_pnl": round(net_pnl, 2),
-    }
+def summarize_partition(trades: dict[str,list[dict[str,Any]]]) -> dict[str,Any]:
+    """Sum journal-reported terminal amounts, without certifying lifecycle arithmetic."""
+    exits=[next((event for event in reversed(events) if event.get("event")=="EXIT"),None) for events in trades.values()]
+    exits=[event for event in exits if event is not None]
+    summary:dict[str,Any]=dict(trades_count=len(trades),closed_count=len(exits),amount_basis="journal-reported terminal amounts")
+    for field in ("gross_pnl","fees","net_pnl"):
+        values=[event.get(field) for event in exits]
+        summary[field]=None if any(value is None for value in values) else round(sum(float(value) for value in values),2)
+    return summary
 
 
-def command_report(journal_path: Path, ledger_path: Path) -> dict[str, Any]:
-    accepted, unattributed, quarantined = partition_trade_journal(journal_path, ledger_path)
-    total_trades = len(accepted) + len(unattributed) + len(quarantined)
-
-    acc_sum = summarize_partition(accepted)
-    unatt_sum = summarize_partition(unattributed)
-    quar_sum = summarize_partition(quarantined)
-
-    report = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "journal_path": str(journal_path),
-        "ledger_path": str(ledger_path),
-        "total_trades": total_trades,
-        "partitions": {
-            "accepted": acc_sum,
-            "unattributed": unatt_sum,
-            "quarantined": quar_sum,
-        },
-    }
-
-    print("=" * 70)
-    print("TRADE JOURNAL RECONCILIATION & AUDIT REPORT")
-    print("=" * 70)
-    print(f"Journal File: {journal_path}")
-    print(f"Ledger File:  {ledger_path}")
-    print(f"Total Unique Trades: {total_trades}")
-    print("-" * 70)
-    print(
-        f"ACCEPTED (Broker Verified):  {acc_sum['trades_count']:4d} trades "
-        f"({acc_sum['closed_count']} closed), Gross: ${acc_sum['gross_pnl']:+9.2f}, "
-        f"Fees: ${acc_sum['fees']:7.2f}, Net: ${acc_sum['net_pnl']:+9.2f}"
-    )
-    print(
-        f"UNATTRIBUTED (Unresolved):   {unatt_sum['trades_count']:4d} trades "
-        f"({unatt_sum['closed_count']} closed), Gross: ${unatt_sum['gross_pnl']:+9.2f}, "
-        f"Fees: ${unatt_sum['fees']:7.2f}, Net: ${unatt_sum['net_pnl']:+9.2f}"
-    )
-    print(
-        f"QUARANTINED (Test Fixtures): {quar_sum['trades_count']:4d} trades "
-        f"({quar_sum['closed_count']} closed), Gross: ${quar_sum['gross_pnl']:+9.2f}, "
-        f"Fees: ${quar_sum['fees']:7.2f}, Net: ${quar_sum['net_pnl']:+9.2f}"
-    )
-    print("=" * 70)
+def command_report(journal_path: Path, ledger_path: Path, *, expected_scope: RecordScope | None = None,
+                   as_of_date: str | None = None) -> dict[str,Any]:
+    scope=expected_scope or RecordScope.from_env()
+    as_of=as_of_date or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    records,errors=_read_journal(journal_path)
+    grouped,classified=_classifications(records,ledger_path,scope,as_of)
+    report=dict(journal_path=str(journal_path),ledger_path=str(ledger_path),scope=scope.to_dict(),as_of_date=as_of,
+                total_trades=len(grouped),parse_error_count=len(errors),parse_errors=errors,
+                partitions={name:summarize_partition({tid:events for tid,events in grouped.items() if classified[tid]["partition"]==name})
+                            for name in ("accepted","unattributed","quarantined")},classifications=classified)
+    print(json.dumps(report,indent=2,sort_keys=True))
     return report
 
 
-def command_build(
-    journal_path: Path,
-    ledger_path: Path,
-    backup_dir: Path,
-    rebuild_dir: Path,
-) -> Path:
-    if not journal_path.exists():
-        raise FileNotFoundError(f"Journal file not found: {journal_path}")
+def _source_identity(path: Path) -> dict[str,int]:
+    stat=path.stat()
+    return dict(device=stat.st_dev,inode=stat.st_ino,size=stat.st_size,mtime_ns=stat.st_mtime_ns)
 
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    rebuild_dir.mkdir(parents=True, exist_ok=True)
 
-    timestamp_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"trades_original_{timestamp_str}.jsonl"
-    shutil.copy2(journal_path, backup_path)
-    backup_sha = sha256_file(backup_path)
+def _scope_from_manifest(manifest: dict[str,Any]) -> RecordScope:
+    value=manifest["scope"]
+    if not all(value.get(key) for key in ("broker","account_id","environment")):
+        raise ValueError("explicit scope required")
+    return RecordScope(**{key:value[key] for key in ("broker","account_id","environment")})
 
-    accepted, unattributed, quarantined = partition_trade_journal(journal_path, ledger_path)
 
-    accepted_file = rebuild_dir / "trades.accepted.jsonl"
-    unattributed_file = rebuild_dir / "trades.unattributed.jsonl"
-    quarantined_file = rebuild_dir / "trades.quarantined.jsonl"
-
-    # Write partitions deterministically sorted by trade_id and timestamp
-    for out_path, partition in (
-        (accepted_file, accepted),
-        (unattributed_file, unattributed),
-        (quarantined_file, quarantined),
-    ):
-        with open(out_path, "w", encoding="utf-8") as f:
-            for tid in sorted(partition.keys()):
-                for event in partition[tid]:
-                    f.write(json.dumps(event) + "\n")
-
-    manifest = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "original_journal": str(journal_path.resolve()),
-        "original_sha256": sha256_file(journal_path),
-        "ledger_path": str(ledger_path.resolve()),
-        "backup_path": str(backup_path.resolve()),
-        "backup_sha256": backup_sha,
-        "files": {
-            "accepted": {
-                "path": str(accepted_file.resolve()),
-                "sha256": sha256_file(accepted_file),
-                "summary": summarize_partition(accepted),
-            },
-            "unattributed": {
-                "path": str(unattributed_file.resolve()),
-                "sha256": sha256_file(unattributed_file),
-                "summary": summarize_partition(unattributed),
-            },
-            "quarantined": {
-                "path": str(quarantined_file.resolve()),
-                "sha256": sha256_file(quarantined_file),
-                "summary": summarize_partition(quarantined),
-            },
-        },
-        "preconditions": {
-            "backup_verified": True,
-            "read_only_ledger": True,
-            "zero_fixtures_in_accepted": True,
-        },
-        "activation_status": "built",
-        "rollback_command": f"python3 tools/reconcile_trade_history.py rollback --rebuild-dir {rebuild_dir.resolve()} --journal {journal_path.resolve()}",
-    }
-
-    manifest_path = rebuild_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    print(f"Build complete.")
-    print(f"  Backup:      {backup_path}")
-    print(f"  Accepted:    {accepted_file} ({len(accepted)} trades)")
-    print(f"  Unattributed:{unattributed_file} ({len(unattributed)} trades)")
-    print(f"  Quarantined: {quarantined_file} ({len(quarantined)} trades)")
-    print(f"  Manifest:    {manifest_path}")
-    return manifest_path
+def command_build(journal_path: Path, ledger_path: Path, backup_dir: Path, rebuild_dir: Path,
+                  *, expected_scope: RecordScope | None = None, as_of_date: str | None = None) -> Path:
+    """Freeze source bytes and the full evidence database before classification."""
+    scope=expected_scope or RecordScope.from_env()
+    as_of=as_of_date or datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    datetime.date.fromisoformat(as_of)
+    if not journal_path.is_file() or not ledger_path.is_file():
+        raise FileNotFoundError("Journal and evidence ledger must exist")
+    if rebuild_dir.exists() and any(rebuild_dir.iterdir()):
+        raise ValueError("Use an empty rebuild directory to preserve previous recovery artifacts")
+    rebuild_dir.mkdir(parents=True,exist_ok=True)
+    backup_dir.mkdir(parents=True,exist_ok=True)
+    backup=backup_dir/f"trades_original_{uuid.uuid4().hex}.jsonl"
+    with journal_path.open('rb') as source:
+        fcntl.flock(source,fcntl.LOCK_SH)
+        identity=_source_identity(journal_path)
+        raw=source.read()
+        backup.write_bytes(raw)
+        if identity!=_source_identity(journal_path):
+            raise ValueError("Source journal changed during backup")
+    snapshot=rebuild_dir/'evidence.sqlite3'
+    with sqlite3.connect(ledger_path.resolve().as_uri()+'?mode=ro',uri=True) as source:
+        with sqlite3.connect(snapshot) as destination:
+            source.backup(destination)
+    records,errors=_read_journal(backup)
+    grouped,classified=_classifications(records,snapshot,scope,as_of)
+    report_path=rebuild_dir/'classifications.json'
+    report_path.write_text(json.dumps(classified,sort_keys=True,indent=2))
+    error_path=rebuild_dir/'parse_errors.json'
+    error_path.write_text(json.dumps(errors,sort_keys=True,indent=2))
+    files={}
+    for name in ('accepted','unattributed','quarantined'):
+        path=rebuild_dir/f'trades.{name}.jsonl'
+        path.write_bytes(b''.join(line for event,line in records if classified[event['trade_id']]['partition']==name))
+        partition={tid:events for tid,events in grouped.items() if classified[tid]['partition']==name}
+        files[name]=dict(path=str(path.resolve()),sha256=sha256_file(path),summary=summarize_partition(partition))
+    manifest=dict(version=2,classifier_version=CLASSIFIER_VERSION,evidence_contract_version=EVIDENCE_CONTRACT_VERSION,
+                  scope=scope.to_dict(),as_of_date=as_of,original_journal=str(journal_path.resolve()),source_identity=identity,
+                  original_sha256=hashlib.sha256(raw).hexdigest(),ledger_path=str(ledger_path.resolve()),
+                  backup_path=str(backup.resolve()),backup_sha256=sha256_file(backup),
+                  evidence_snapshot=dict(path=str(snapshot.resolve()),sha256=sha256_file(snapshot)),
+                  classification_report=dict(path=str(report_path.resolve()),sha256=sha256_file(report_path)),
+                  parse_errors=dict(path=str(error_path.resolve()),sha256=sha256_file(error_path),count=len(errors)),
+                  files=files,activation_status='built',
+                  rollback_command=f'python3 tools/reconcile_trade_history.py rollback --rebuild-dir {rebuild_dir.resolve()} --journal {journal_path.resolve()}')
+    path=rebuild_dir/'manifest.json'
+    path.write_text(json.dumps(manifest,sort_keys=True,indent=2))
+    print(f'Build complete: {path}; parse errors: {len(errors)}')
+    return path
 
 
 def command_verify(rebuild_dir: Path, ledger_path: Path | None = None) -> bool:
-    manifest_path = rebuild_dir / "manifest.json"
-    if not manifest_path.exists():
-        print(f"Error: manifest not found at {manifest_path}. Run 'build' first.", file=sys.stderr)
-        return False
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    backup_path = Path(manifest["backup_path"])
-
-    # 1. Verify backup integrity
-    if not backup_path.exists():
-        print(f"Verification failed: backup {backup_path} does not exist", file=sys.stderr)
-        return False
-    if sha256_file(backup_path) != manifest["backup_sha256"]:
-        print(f"Verification failed: backup SHA256 mismatch", file=sys.stderr)
-        return False
-
-    if manifest["backup_sha256"] != manifest["original_sha256"]:
-        print("Verification failed: backup does not match original journal", file=sys.stderr)
-        return False
-
-    # 2. Verify rebuilt files SHA256
-    for key in ("accepted", "unattributed", "quarantined"):
-        file_info = manifest["files"][key]
-        p = Path(file_info["path"])
-        if not p.exists():
-            print(f"Verification failed: file {p} missing", file=sys.stderr)
-            return False
-        if sha256_file(p) != file_info["sha256"]:
-            print(f"Verification failed: {key} file SHA256 mismatch", file=sys.stderr)
-            return False
-
-    # Verify that the partitions preserve every original event, even if their
-    # files and manifest hashes were changed together.
-    from collections import Counter
-    def event_inventory(paths):
-        events = Counter()
-        for path in paths:
-            with open(path, encoding="utf-8") as stream:
-                for line in stream:
-                    if line.strip():
-                        events[json.dumps(json.loads(line), sort_keys=True)] += 1
-        return events
+    """Recompute partitions and reporting amounts from the frozen v2 contract."""
     try:
-        partition_paths = [Path(manifest["files"][key]["path"]) for key in ("accepted", "unattributed", "quarantined")]
-        if event_inventory([backup_path]) != event_inventory(partition_paths):
-            print("Verification failed: partitions do not preserve original events", file=sys.stderr)
-            return False
-    except (OSError, ValueError, TypeError) as error:
-        print(f"Verification failed: invalid journal input: {error}", file=sys.stderr)
+        manifest=json.loads((rebuild_dir/'manifest.json').read_text())
+        if (manifest.get('version')!=2 or manifest.get('classifier_version')!=CLASSIFIER_VERSION
+                or manifest.get('evidence_contract_version')!=EVIDENCE_CONTRACT_VERSION):
+            raise ValueError('unsupported manifest or classifier/evidence version')
+        scope=_scope_from_manifest(manifest)
+        datetime.date.fromisoformat(manifest['as_of_date'])
+        if ledger_path is not None and ledger_path.resolve()!=Path(manifest['ledger_path']).resolve():
+            raise ValueError('ledger destination mismatch')
+        for key in ('evidence_snapshot','classification_report','parse_errors'):
+            item=manifest[key]
+            if Path(item['path']).resolve().parent!=rebuild_dir.resolve() or sha256_file(Path(item['path']))!=item['sha256']:
+                raise ValueError(key+' path/hash mismatch')
+        backup=Path(manifest['backup_path'])
+        if sha256_file(backup)!=manifest['backup_sha256'] or manifest['backup_sha256']!=manifest['original_sha256']:
+            raise ValueError('backup does not match original journal')
+        snapshot=Path(manifest['evidence_snapshot']['path'])
+        evidence=load_ledger_execution_evidence(snapshot,expected_scope=scope,as_of_date=manifest['as_of_date'])
+        if evidence['diagnostics'] or evidence['invalid_evidence']:
+            raise ValueError('missing or corrupt retained evidence schema/content')
+        if any(evidence['scope'].get(k)!=scope.to_dict()[k] for k in ('broker','account_id','environment')):
+            raise ValueError('snapshot scope mismatch')
+        records,errors=_read_journal(backup)
+        if errors or manifest['parse_errors']['count'] or json.loads(Path(manifest['parse_errors']['path']).read_text())!=errors:
+            raise ValueError('malformed lines or missing event identities prevent activation')
+        grouped,classified=_classifications(records,snapshot,scope,manifest['as_of_date'])
+        if json.loads(Path(manifest['classification_report']['path']).read_text())!=classified:
+            raise ValueError('classification report mismatch')
+        for name in ('accepted','unattributed','quarantined'):
+            item=manifest['files'][name]
+            path=Path(item['path'])
+            wanted=b''.join(line for event,line in records if classified[event['trade_id']]['partition']==name)
+            part={tid:events for tid,events in grouped.items() if classified[tid]['partition']==name}
+            if (path.resolve()!=rebuild_dir.resolve()/f'trades.{name}.jsonl' or sha256_file(path)!=item['sha256']
+                    or path.read_bytes()!=wanted or item['summary']!=summarize_partition(part)):
+                raise ValueError(name+' assignment, ordering, multiplicity or summary mismatch')
+        if backup.stat().st_size and not Path(manifest['files']['accepted']['path']).stat().st_size:
+            raise ValueError('nonempty history cannot be replaced by an empty accepted partition')
+        print('Precondition & Integrity Verification: PASSED')
+        return True
+    except (OSError,ValueError,KeyError,TypeError,AttributeError) as error:
+        print(f'Verification failed: {error}',file=sys.stderr)
         return False
 
-    # 3. Verify zero fixtures and independent broker execution evidence in accepted file
-    accepted_path = Path(manifest["files"]["accepted"]["path"])
-    eff_ledger = ledger_path or (Path(manifest["ledger_path"]) if "ledger_path" in manifest else DEFAULT_LEDGER)
-    ledger_ev = load_ledger_execution_evidence(eff_ledger)
 
-    events_by_trade: dict[str, list[dict[str, Any]]] = {}
-    with open(accepted_path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            r = json.loads(line)
-            tid = r.get("trade_id", "")
-            if is_fixture_trade(tid, r):
-                print(f"Verification failed: accepted file contains fixture trade {tid}", file=sys.stderr)
+def _atomic_replace_bytes(target: Path, raw: bytes) -> None:
+    temporary=target.with_name(f'.{target.name}.{uuid.uuid4().hex}.tmp')
+    try:
+        with temporary.open('xb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary,target)
+        descriptor=os.open(target.parent,os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def command_activate(journal_path: Path, rebuild_dir: Path, ledger_path: Path | None = None,
+                     *, writers_stopped: bool = False) -> bool:
+    """Require stopped writers, then recheck source identity under its append lock."""
+    if not writers_stopped:
+        print('Activation requires stopped journal and ledger writers.',file=sys.stderr)
+        return False
+    if not command_verify(rebuild_dir,ledger_path):
+        return False
+    try:
+        manifest_path=rebuild_dir/'manifest.json'
+        manifest=json.loads(manifest_path.read_text())
+        if manifest['activation_status'] not in {'built','activating'}:
+            raise ValueError('build is already activated or rolled back')
+        if journal_path.resolve()!=Path(manifest['original_journal']).resolve():
+            raise ValueError('journal destination mismatch')
+        with journal_path.open('rb') as source:
+            fcntl.flock(source,fcntl.LOCK_EX)
+            if manifest['activation_status']=='activating' and sha256_file(journal_path)==manifest['files']['accepted']['sha256']:
+                manifest['activation_status']='activated'
+                _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
+                return True
+            if (_source_identity(journal_path)!=manifest['source_identity']
+                    or os.fstat(source.fileno()).st_ino!=journal_path.stat().st_ino
+                    or hashlib.sha256(source.read()).hexdigest()!=manifest['original_sha256']):
+                raise ValueError('journal changed since build')
+            # Recheck the artifacts while the source lock is held.
+            if not command_verify(rebuild_dir,ledger_path):
                 return False
-            events_by_trade.setdefault(tid, []).append(r)
-
-    for tid, events in events_by_trade.items():
-        classification = classify_trade(events, ledger_ev)
-        if classification["partition"] != "accepted" or classification["reconciliation_status"] not in {"VERIFIED", "FEE_INCOMPLETE"}:
-            print(f"Verification failed: accepted trade {tid} lacks verified execution evidence", file=sys.stderr)
-            return False
-
-    print("Precondition & Integrity Verification: PASSED")
-    print(f"  Backup valid:          YES ({backup_path.name})")
-    print(f"  Rebuilt hashes match:  YES")
-    print(f"  Accepted clean:        YES (zero fixtures, verified execution evidence)")
-    return True
-
-
-def command_activate(
-    journal_path: Path, rebuild_dir: Path, force: bool = False, ledger_path: Path | None = None
-) -> bool:
-    if not command_verify(rebuild_dir, ledger_path):
-        print("Activation aborted: verification failed.", file=sys.stderr)
-        return False
-
-    manifest_path = rebuild_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    accepted_file = Path(manifest["files"]["accepted"]["path"])
-
-    # Refuse stale builds and accidental activation into another journal.
-    if journal_path.resolve() != Path(manifest["original_journal"]).resolve():
-        print(f"Activation aborted: journal destination mismatch ({journal_path} != {manifest['original_journal']}).", file=sys.stderr)
-        return False
-    if not journal_path.exists() or sha256_file(journal_path) != manifest["original_sha256"]:
-        print("Activation aborted: journal changed since build (conflicting subsequent writes).", file=sys.stderr)
-        return False
-
-    # Recoverable atomic replacement
-    temp_target = journal_path.parent / f".tmp_activate_{journal_path.name}_{os.getpid()}"
-    try:
-        with open(accepted_file, "rb") as src, open(temp_target, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-            dst.flush()
-            os.fsync(dst.fileno())
-        os.replace(temp_target, journal_path)
-    except Exception as e:
-        if temp_target.exists():
+            accepted=Path(manifest['files']['accepted']['path']).read_bytes()
+            if hashlib.sha256(accepted).hexdigest()!=manifest['files']['accepted']['sha256']:
+                raise ValueError('accepted records changed during activation')
+            manifest['activation_status']='activating'
+            _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
             try:
-                temp_target.unlink()
-            except Exception:
-                pass
-        print(f"Activation failed during atomic replacement: {e}", file=sys.stderr)
+                _atomic_replace_bytes(journal_path,accepted)
+            except OSError:
+                if sha256_file(journal_path)==manifest['original_sha256']:
+                    manifest['activation_status']='built'
+                    _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
+                raise
+        manifest['activation_status']='activated'
+        manifest['activated_at']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
+        print(f'Activated {journal_path}. Raw backup retained at {manifest["backup_path"]}')
+        return True
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        print(f'Activation aborted: {error}',file=sys.stderr)
         return False
-
-    manifest["activation_status"] = "activated"
-    manifest["activated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-
-    print("=" * 70)
-    print("ACTIVATION SUCCESSFUL")
-    print("=" * 70)
-    print(f"Active Journal:    {journal_path}")
-    print(f"Activated Records: {accepted_file}")
-    print(f"Backup Preserved:  {manifest['backup_path']}")
-    print(f"Rollback Command:  {manifest['rollback_command']}")
-    print("=" * 70)
-    return True
 
 
 def command_rollback(rebuild_dir: Path, journal_path: Path) -> bool:
-    manifest_path = rebuild_dir / "manifest.json"
-    if not manifest_path.exists():
-        print(f"Error: manifest not found at {manifest_path}", file=sys.stderr)
-        return False
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    orig_target = Path(manifest["original_journal"]).resolve()
-    if journal_path.resolve() != orig_target:
-        print(f"Rollback aborted: journal path does not match original journal in manifest ({journal_path.resolve()} != {orig_target})", file=sys.stderr)
-        return False
-
-    backup_path = Path(manifest["backup_path"])
-    if not backup_path.exists():
-        print(f"Error: backup file {backup_path} not found", file=sys.stderr)
-        return False
-
-    # Reject corrupted backups
-    if sha256_file(backup_path) != manifest["backup_sha256"]:
-        print("Rollback aborted: corrupted backup file (SHA256 mismatch)", file=sys.stderr)
-        return False
-
-    if not journal_path.exists():
-        print(f"Error: current journal {journal_path} not found", file=sys.stderr)
-        return False
-
-    if sha256_file(journal_path) != manifest["files"]["accepted"]["sha256"]:
-        print("Rollback aborted: journal changed since activation.", file=sys.stderr)
-        return False
-
-    # Recoverable atomic replacement
-    temp_target = journal_path.parent / f".tmp_rollback_{journal_path.name}_{os.getpid()}"
+    """Restore raw bytes only while the active history has no subsequent appends."""
     try:
-        with open(backup_path, "rb") as src, open(temp_target, "wb") as dst:
-            shutil.copyfileobj(src, dst)
-            dst.flush()
-            os.fsync(dst.fileno())
-        os.replace(temp_target, journal_path)
-    except Exception as e:
-        if temp_target.exists():
-            try:
-                temp_target.unlink()
-            except Exception:
-                pass
-        print(f"Rollback failed during atomic replacement: {e}", file=sys.stderr)
+        manifest_path=rebuild_dir/'manifest.json'
+        manifest=json.loads(manifest_path.read_text())
+        if manifest.get('version')!=2 or manifest['activation_status'] not in {'activated','activating','rolling_back'}:
+            raise ValueError('no v2 activation to roll back')
+        if journal_path.resolve()!=Path(manifest['original_journal']).resolve():
+            raise ValueError('journal destination mismatch')
+        backup=Path(manifest['backup_path']).read_bytes()
+        if hashlib.sha256(backup).hexdigest()!=manifest['backup_sha256']:
+            raise ValueError('backup hash mismatch')
+        with journal_path.open('rb') as source:
+            fcntl.flock(source,fcntl.LOCK_EX)
+            if manifest['activation_status']=='rolling_back' and sha256_file(journal_path)==manifest['backup_sha256']:
+                manifest['activation_status']='rolled_back'
+                _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
+                return True
+            if os.fstat(source.fileno()).st_ino!=journal_path.stat().st_ino or hashlib.sha256(source.read()).hexdigest()!=manifest['files']['accepted']['sha256']:
+                raise ValueError('journal changed since activation; preserve both histories and reconcile forward')
+            manifest['activation_status']='rolling_back'
+            _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
+            _atomic_replace_bytes(journal_path,backup)
+        manifest['activation_status']='rolled_back'
+        _atomic_replace_bytes(manifest_path,json.dumps(manifest,sort_keys=True,indent=2).encode())
+        print(f'Rollback restored {journal_path}')
+        return True
+    except (OSError,ValueError,KeyError,TypeError) as error:
+        print(f'Rollback aborted: {error}',file=sys.stderr)
         return False
 
-    manifest["activation_status"] = "rolled_back"
-    manifest["rolled_back_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
-    print(f"Rollback successful: restored {journal_path} from {backup_path}")
-    return True
+def command_import_evidence(export_path: Path, ledger_path: Path, *, expected_scope: RecordScope) -> int:
+    """Validate a provider export against existing ownership before committing links."""
+    from strategies.position_ledger import PositionLedger
+    bundle=json.loads(export_path.read_text())
+    if bundle.get('evidence_contract_version')!=EVIDENCE_CONTRACT_VERSION or bundle.get('scope')!=expected_scope.to_dict():
+        raise ValueError('explicit export scope and evidence contract v2 required')
+    target=PositionLedger(ledger_path,scope=expected_scope)
+    staged=PositionLedger(':memory:',scope=expected_scope)
+    tables=('broker_evidence','realization_evidence_links','settlement_evidence_links','fee_evidence','settlement_values','broker_cash_evidence')
+    try:
+        target._connection.backup(staged._connection)
+        for row in bundle.get('evidence',[]):
+            if row['kind'] == 'execution' and not execution_payload_is_valid(row['payload']):
+                raise ValueError('invalid execution payload shape')
+            staged.record_broker_evidence(row['evidence_id'],scope=expected_scope,kind=row['kind'],provider_identity=row['provider_identity'],
+                                          acquisition_source=row['acquisition_source'],acquired_at=row['acquired_at'],payload=row['payload'])
+        for link in bundle.get('realization_links',[]):
+            staged.link_realization_evidence(**link)
+        for link in bundle.get('settlement_links',[]):
+            staged.link_settlement_evidence(**link)
+        for table, key, kind in (("fee_evidence","fee_records","fee"),
+                                 ("settlement_values","settlement_records","settlement"),
+                                 ("broker_cash_evidence","cash_records","cash")):
+            columns=[r[1] for r in staged._connection.execute(f'PRAGMA table_info({table})')]
+            for record in bundle.get(key,[]):
+                if set(record)!=set(columns):
+                    raise ValueError("export record columns do not match evidence contract")
+                raw=staged.get_broker_evidence(record.get("raw_evidence_id"))
+                if not raw or raw["kind"]!=kind:
+                    raise ValueError("export record requires retained raw evidence")
+                payload=raw["payload"]
+                if kind=="fee" and (payload.get("event_id")!=record["event_id"] or payload.get("trade_id")!=record["trade_id"]
+                                   or payload.get("amount_cents")!=record["amount_cents"] or payload.get("complete")!=bool(record["complete"])):
+                    raise ValueError("fee export does not match retained payload")
+                if kind in {"settlement","cash"} and (payload.get("expiration")!=record["expiration"] or payload.get("symbol")!=record["symbol"]):
+                    raise ValueError("settlement/cash export contract mismatch")
+                values=tuple(record[k] for k in columns)
+                same=staged._connection.execute(f'SELECT 1 FROM {table} WHERE '+ ' AND '.join(f'{k} IS ?' for k in columns),values).fetchone()
+                if not same:
+                    with staged._connection:
+                        staged._connection.execute(f'INSERT INTO {table} ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})',values)
+        for row in bundle.get("evidence",[]):
+            if row["payload"].get("scope")!=expected_scope.to_dict() or not row["payload"].get("raw_response"):
+                raise ValueError("retained export payload must include exact scope and raw response")
+            if row["kind"]=="execution" and not any(link["evidence_id"]==row["evidence_id"] for link in bundle.get("realization_links",[])):
+                raise ValueError("execution export requires validated ownership links")
+        # Validate each imported execution link using the same production verifier.
+        ev=load_ledger_execution_evidence_from_connection(staged)
+        for link in bundle.get('realization_links',[]):
+            row=ev['retained'][link['evidence_id']]
+            payload=row['payload']
+            leg=next((item for item in payload.get('legs',[]) if item.get('leg_id')==link['leg_id']),{})
+            package=ev['packages'][link['package_id']]
+            local=next(item for item in package['legs'] if item['order_id']==link['leg_id'])
+            if (row['kind']!='execution' or payload.get('trade_id')!=link['trade_id'] or payload.get('position_id')!=link['position_id']
+                    or payload.get('package_id')!=link['package_id'] or payload.get('parent_order_id')!=package['broker_parent_id']
+                    or leg.get('order_id')!=local['broker_order_id'] or leg.get('side')!=local['side']
+                    or leg.get('signed_quantity')!=link['allocated_signed_quantity'] or leg.get('signed_quantity')!=local['filled_signed_quantity']
+                    or _contract_identity(leg.get('contract'))!=_contract_identity({**json.loads(local['asset_key']),'multiplier':100})
+                    or not _raw_execution_matches(payload,leg)):
+                raise ValueError('export execution ownership/contract mismatch')
+        with target._connection:
+            inserted=0
+            for table in tables:
+                columns=[r[1] for r in staged._connection.execute(f'PRAGMA table_info({table})')]
+                for row in staged._connection.execute(f'SELECT * FROM {table}'):
+                    values=tuple(row)
+                    existing=target._connection.execute(f'SELECT 1 FROM {table} WHERE '+ ' AND '.join(f'{key} IS ?' for key in columns),values).fetchone()
+                    if existing:
+                        continue
+                    target._connection.execute(f'INSERT INTO {table} ({",".join(columns)}) VALUES ({",".join("?" for _ in columns)})',values)
+                    inserted+=1
+        print(f'Imported {inserted} immutable evidence/link records')
+        return inserted
+    finally:
+        staged.close()
+        target.close()
+
+
+def load_ledger_execution_evidence_from_connection(ledger: Any) -> dict[str,Any]:
+    """Read a staged import through the same read-only loader used by production."""
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix='lumibot-evidence-import-') as directory:
+        snapshot=Path(directory)/'evidence.sqlite3'
+        with sqlite3.connect(snapshot) as destination:
+            ledger._connection.backup(destination)
+        return load_ledger_execution_evidence(snapshot)
 
 
 def command_reconcile_settlement(
@@ -490,62 +474,47 @@ def command_reconcile_settlement(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Reconcile and rebuild trade journal history.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # report
-    p_report = subparsers.add_parser("report", help="Inspect and report trade partitions")
-    p_report.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
-    p_report.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
-
-    # build
-    p_build = subparsers.add_parser("build", help="Deterministically build partitioned files and manifest")
-    p_build.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
-    p_build.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
-    p_build.add_argument("--backup-dir", type=Path, default=DEFAULT_BACKUP_DIR)
-    p_build.add_argument("--rebuild-dir", type=Path, default=DEFAULT_REBUILD_DIR)
-
-    # verify
-    p_verify = subparsers.add_parser("verify", help="Verify activation preconditions and manifest hashes")
-    p_verify.add_argument("--rebuild-dir", type=Path, default=DEFAULT_REBUILD_DIR)
-    p_verify.add_argument("--ledger", type=Path, default=None)
-
-    # activate
-    p_activate = subparsers.add_parser("activate", help="Activate rebuilt accepted records")
-    p_activate.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
-    p_activate.add_argument("--rebuild-dir", type=Path, default=DEFAULT_REBUILD_DIR)
-    p_activate.add_argument("--ledger", type=Path, default=None)
-    p_activate.add_argument("--force", action="store_true")
-
-    # rollback
-    p_rollback = subparsers.add_parser("rollback", help="Revert journal to pre-activation backup")
-    p_rollback.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
-    p_rollback.add_argument("--rebuild-dir", type=Path, default=DEFAULT_REBUILD_DIR)
-
-    # reconcile-settlement
-    p_settle = subparsers.add_parser("reconcile-settlement", help="Reconcile expired positions with settlement evidence")
-    p_settle.add_argument("--journal", type=Path, default=DEFAULT_JOURNAL)
-    p_settle.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
-    p_settle.add_argument("--as-of-date", type=str, default=None)
-
-    args = parser.parse_args()
-
-    if args.command == "report":
-        command_report(args.journal, args.ledger)
-    elif args.command == "build":
-        command_build(args.journal, args.ledger, args.backup_dir, args.rebuild_dir)
-    elif args.command == "verify":
-        ok = command_verify(args.rebuild_dir, args.ledger)
-        sys.exit(0 if ok else 1)
-    elif args.command == "activate":
-        ok = command_activate(args.journal, args.rebuild_dir, args.force, args.ledger)
-        sys.exit(0 if ok else 1)
-    elif args.command == "rollback":
-        ok = command_rollback(args.rebuild_dir, args.journal)
-        sys.exit(0 if ok else 1)
-    elif args.command == "reconcile-settlement":
-        command_reconcile_settlement(args.ledger, args.journal, args.as_of_date)
+    parser=argparse.ArgumentParser(description="Offline retained-evidence reconciliation and recovery")
+    subs=parser.add_subparsers(dest="command",required=True)
+    for name in ("report","build","verify","activate","rollback","import-evidence","reconcile-settlement"):
+        command=subs.add_parser(name)
+        if name in {"report","build","activate","rollback","reconcile-settlement"}:
+            command.add_argument("--journal",type=Path,default=DEFAULT_JOURNAL)
+        if name in {"report","build","import-evidence","reconcile-settlement"}:
+            command.add_argument("--ledger",type=Path,default=DEFAULT_LEDGER)
+        if name in {"build","verify","activate","rollback"}:
+            command.add_argument("--rebuild-dir",type=Path,default=DEFAULT_REBUILD_DIR)
+        if name in {"report","build","import-evidence"}:
+            for field in ("broker","account-id","environment"):
+                command.add_argument("--"+field,required=True)
+        if name in {"report","build","reconcile-settlement"}:
+            command.add_argument("--as-of-date",required=name!="reconcile-settlement")
+        if name=="build":
+            command.add_argument("--backup-dir",type=Path,default=DEFAULT_BACKUP_DIR)
+        if name=="activate":
+            command.add_argument("--writers-stopped",action="store_true",required=True)
+        if name=="import-evidence":
+            command.add_argument("--export",type=Path,required=True)
+    args=parser.parse_args()
+    scope=RecordScope(args.environment,args.broker,args.account_id) if hasattr(args,"environment") else None
+    try:
+        if args.command=="report":
+            command_report(args.journal,args.ledger,expected_scope=scope,as_of_date=args.as_of_date)
+        elif args.command=="build":
+            command_build(args.journal,args.ledger,args.backup_dir,args.rebuild_dir,expected_scope=scope,as_of_date=args.as_of_date)
+        elif args.command=="verify":
+            sys.exit(0 if command_verify(args.rebuild_dir) else 1)
+        elif args.command=="activate":
+            sys.exit(0 if command_activate(args.journal,args.rebuild_dir,writers_stopped=args.writers_stopped) else 1)
+        elif args.command=="rollback":
+            sys.exit(0 if command_rollback(args.rebuild_dir,args.journal) else 1)
+        elif args.command=="import-evidence":
+            command_import_evidence(args.export,args.ledger,expected_scope=scope)
+        else:
+            command_reconcile_settlement(args.ledger,args.journal,args.as_of_date)
+    except (OSError,ValueError,KeyError,TypeError,sqlite3.Error) as error:
+        parser.exit(1,f"Error: {error}\n")
 
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()

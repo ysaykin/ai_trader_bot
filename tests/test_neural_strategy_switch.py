@@ -86,6 +86,56 @@ class TestNeuralStrategySwitch(unittest.TestCase):
         # Parameters must remain unchanged because switch was blocked by panic halt
         self.assertEqual(self.strategy.parameters["short_delta"], initial_delta)
 
+    def test_switch_copies_dynamic_settings_then_clears_previous_variant(self) -> None:
+        from strategies.incubator import get_strategybro_spec, get_skew_dynamic_spec
+
+        specs = [get_strategybro_spec(), get_skew_dynamic_spec(), {
+            "strategy_name": "plain", "short_delta": 0.10, "wing_width": 2.0,
+            "dte": 7, "stop_loss_mult": 1.5, "entry_time": "10:00",
+        }]
+        self.strategy.parameters["profit_target"] = 0.42
+        self.strategy.parameters["max_position_risk"] = 1234
+        with patch("strategies.incubator.get_incubator_specs", return_value=specs):
+            self.assertTrue(self.strategy._apply_neural_strategy_switch(specs[0]["strategy_name"]))
+            self.assertEqual(self.strategy.parameters["otm_put_pct"], specs[0]["otm_put_pct"])
+            self.assertEqual(self.strategy.parameters["roll_dte"], specs[0]["roll_dte"])
+            self.assertTrue(self.strategy.is_strategybro_variant)
+            self.strategy._apply_neural_strategy_switch(specs[1]["strategy_name"])
+            self.assertNotIn("otm_put_pct", self.strategy.parameters)
+            self.assertFalse(self.strategy.is_strategybro_variant)
+            self.assertTrue(self.strategy.is_skew_dynamic_variant)
+            self.assertEqual(self.strategy.parameters["call_delta"], specs[1]["call_delta"])
+            self.strategy._apply_neural_strategy_switch("plain")
+        self.assertEqual(self.strategy.structure, "iron_condor")
+        self.assertFalse(self.strategy.is_skew_dynamic_variant)
+        self.assertNotIn("call_delta", self.strategy.parameters)
+        self.assertNotIn("roll_dte", self.strategy.parameters)
+        self.assertEqual(self.strategy.parameters["profit_target"], 0.42)
+        self.assertEqual(self.strategy.parameters["max_position_risk"], 1234)
+
+    def test_unknown_selection_invalidates_previous_switch(self) -> None:
+        self.strategy._active_switched_strategy = "previous"
+        with patch("strategies.incubator.get_incubator_specs", return_value=[]):
+            self.assertFalse(self.strategy._apply_neural_strategy_switch("unavailable"))
+        self.assertIsNone(self.strategy._active_switched_strategy)
+
+    def test_ready_controller_without_applied_selection_cannot_enter(self) -> None:
+        self.strategy.pure_neural_mode = True
+        self.strategy._policy_controller = Mock(has_sufficient_data=True, last_recommendation=Mock())
+        self.strategy._position_states = {}
+        self.strategy._recovery_lock = False
+        self.strategy._reconcile_broker_state = Mock(return_value=True)
+        self.strategy.get_datetime = Mock(return_value=datetime(2026, 11, 10, 15, 0, tzinfo=timezone.utc))
+        self.strategy._is_entry_window = Mock(return_value=True)
+        self.strategy._check_allocation = Mock(return_value=True)
+        self.strategy._find_expiration = Mock()
+        self.strategy._run_trading_iteration()
+        self.strategy._find_expiration.assert_not_called()
+        self.strategy._active_switched_strategy = "selected"
+        self.strategy._find_expiration.return_value = None
+        self.strategy._run_trading_iteration()
+        self.strategy._find_expiration.assert_called_once()
+
     def test_pure_neural_blocks_entries_when_controller_absent(self) -> None:
         self.strategy.pure_neural_mode = True
         self.strategy._policy_controller = None

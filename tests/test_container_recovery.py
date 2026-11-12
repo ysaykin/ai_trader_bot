@@ -78,7 +78,7 @@ def test_submission_after_lock_wait_blocked_by_panic_halt(tmp_path: Path) -> Non
     ledger_path = str(tmp_path / "ledger.sqlite3")
     ledger = PositionLedger(ledger_path)
 
-    strategy = SPXIronCondor()
+    strategy = SPXIronCondor.__new__(SPXIronCondor)
     strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": ledger, "strategy_name": "TestStrategy"}
     strategy.broker = Mock()
     strategy.broker.name = "Tradier"
@@ -188,7 +188,7 @@ def test_recovery_continues_after_trading_exits(tmp_path: Path) -> None:
     ledger = PositionLedger(ledger_path)
 
     # 1. Trading strategy runs while panic halt is set
-    strategy = SPXIronCondor()
+    strategy = SPXIronCondor.__new__(SPXIronCondor)
     strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": ledger, "strategy_name": "TestTrading"}
     strategy.broker = Mock()
     strategy.broker.name = "Tradier"
@@ -234,7 +234,7 @@ def test_unbalanced_residual_position_scoped_recovery(tmp_path: Path) -> None:
     ledger_path = str(tmp_path / "ledger.sqlite3")
     ledger = PositionLedger(ledger_path)
 
-    strategy = SPXIronCondor()
+    strategy = SPXIronCondor.__new__(SPXIronCondor)
     strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": ledger, "strategy_name": "ScopedStrat"}
     strategy.broker = Mock()
     strategy.broker.name = "Tradier"

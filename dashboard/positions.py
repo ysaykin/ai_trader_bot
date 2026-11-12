@@ -16,11 +16,13 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from dashboard.presentation import finite_number, format_numeric, numeric_tone
+from strategies.option_payoff import covered_option_loss
 
 
 COLORS = {"negative": "#EF4444", "positive": "#10B981", "neutral": "#94A3B8"}
 STRUCTURES = {"iron_condor": "Iron condor", "bull_put": "Bull put vertical",
-              "bear_call": "Bear call vertical", "adjusted": "Adjusted / incomplete",
+              "bear_call": "Bear call vertical", "put_condor": "Put condor", "call_condor": "Call condor",
+              "adjusted": "Adjusted / incomplete",
               "unattributed": "Unattributed contract"}
 
 
@@ -89,15 +91,18 @@ def read_packages(path: Path) -> list[dict[str, Any]]:
         return packages
 
 
-def quote_symbols(packages: Iterable[Mapping[str, Any]]) -> set[str]:
+def quote_symbols(packages: Iterable[Mapping[str, Any]], *, as_of: date | None = None) -> set[str]:
+    today = (as_of or date.today()).isoformat()
     symbols = set()
     for package in packages:
         if package["state"] in {"open", "partial", "closing"}:
             for leg in package["legs"]:
                 if leg["filled_signed_quantity"]:
                     try:
-                        symbols.add(Contract.from_key(leg["asset_key"]).symbol)
-                        symbols.add(Contract.from_key(leg["asset_key"]).underlying)
+                        contract = Contract.from_key(leg["asset_key"])
+                        if contract.expiry >= today:
+                            symbols.add(contract.symbol)
+                            symbols.add(contract.underlying)
                     except (ValueError, KeyError, TypeError):
                         continue
     return symbols
@@ -110,6 +115,10 @@ def structure(legs: Mapping[Contract, Inventory]) -> str:
     puts = sorted((c.strike, q) for c, q in active if c.right == "P")
     calls = sorted((c.strike, q) for c, q in active if c.right == "C")
     balanced = len({abs(q) for _, q in active}) == 1
+    if balanced:
+        for rights, label in ((puts, "put_condor"), (calls, "call_condor")):
+            if len(rights) == 4 and rights[0][1] > 0 > rights[1][1] and rights[2][1] < 0 < rights[3][1]:
+                return label
     if balanced and len(puts) == 2 and puts[0][1] > 0 > puts[1][1]:
         if not calls:
             return "bull_put"
@@ -132,9 +141,12 @@ def defined_risk(legs: Mapping[Contract, Inventory]) -> float | None:
     for group in groups.values():
         if structure(group) == "adjusted":
             return None
-        prices = [0.0, *(c.strike for c in group), max(c.strike for c in group) * 2]
-        cost = sum(lot.cost for lot in group.values())
-        total += max(0.0, -min(sum(c.intrinsic(s) * lot.quantity * 100 for c, lot in group.items()) - cost for s in prices))
+        loss = covered_option_loss([
+            ({"symbol": c.underlying, "expiration": c.expiry, "right": "put" if c.right == "P" else "call",
+              "strike": c.strike}, lot.quantity) for c, lot in group.items()], -sum(lot.cost for lot in group.values()))
+        if loss is None:
+            return None
+        total += loss
     return total
 
 
@@ -145,6 +157,7 @@ def build_positions(packages: list[Mapping[str, Any]], broker_positions: list[Ma
                     as_of: date | None = None) -> tuple[list[dict[str, Any]], list[str]]:
     """Reconstruct separate trade lots and reconcile their sum to broker inventory."""
     trades: dict[tuple[str, str], Trade] = {}
+    today = as_of or date.today()
     package_owner: dict[str, tuple[str, str]] = {}
     issues: list[str] = []
     uncertain_owners: set[str] = set()
@@ -214,29 +227,38 @@ def build_positions(packages: list[Mapping[str, Any]], broker_positions: list[Ma
                 lot.cost -= removed
 
     owned: dict[str, int] = defaultdict(int)
+    expired_symbols = set()
     for trade in trades.values():
+        active_contracts = [c for c, lot in trade.legs.items() if lot.quantity]
+        wholly_expired = bool(active_contracts) and all(c.expiry < today.isoformat() for c in active_contracts)
         for contract, lot in trade.legs.items():
             owned[contract.symbol] += lot.quantity
+            if lot.quantity and wholly_expired:
+                expired_symbols.add(contract.symbol)
     broker = {str(p["symbol"]): p for p in broker_positions or []}
     broker_quantity = {symbol: finite_number(p.get("quantity_num", p.get("quantity"))) for symbol, p in broker.items()}
     mismatches = {symbol for symbol in owned.keys() | broker.keys()
                   if broker_positions is None or broker_quantity.get(symbol, 0) is None
                   or not math.isclose(owned.get(symbol, 0), broker_quantity.get(symbol, 0) or 0, abs_tol=1e-8)}
+    # Absent expired inventory still needs settlement evidence, but is distinct
+    # from a discrepancy in contracts that can currently be traded.
+    absent_expired = {s for s in expired_symbols if broker_quantity.get(s, 0) == 0} if broker_positions is not None else set()
+    unexpected_mismatches = mismatches - absent_expired
     if broker_positions is None:
         issues.append("Broker positions unavailable; ownership cannot be reconciled")
-    elif mismatches:
-        issues.append(f"Broker/ledger quantity mismatch on {len(mismatches)} contract(s)")
+    elif unexpected_mismatches:
+        issues.append(f"Broker/ledger quantity mismatch on {len(unexpected_mismatches)} contract(s)")
     rows = []
-    today = as_of or date.today()
     for trade in trades.values():
         active = {c: lot for c, lot in trade.legs.items() if lot.quantity}
         if not active:
             continue
+        awaiting_settlement = all(c.expiry < today.isoformat() for c in active)
         shape = structure(active)
-        reconciled = trade.strategy not in uncertain_owners and not any(c.symbol in mismatches for c in active)
+        reconciled = not awaiting_settlement and trade.strategy not in uncertain_owners and not any(c.symbol in mismatches for c in active)
         legs = []
         for contract, lot in sorted(active.items()):
-            q = quotes.get(contract.symbol, {})
+            q = quotes.get(contract.symbol, {}) if contract.expiry >= today.isoformat() else {}
             mark = finite_number(q.get("mark"))
             if mark is not None and mark < 0:
                 mark = None
@@ -286,8 +308,9 @@ def build_positions(packages: list[Mapping[str, Any]], broker_positions: list[Ma
                      "delta": sum(l["delta"] for l in legs) if all(l["delta"] is not None for l in legs) else None,
                      "theta": sum(l["theta"] for l in legs) if all(l["theta"] is not None for l in legs) else None,
                      "spot": finite_number(quotes.get(underlying, {}).get("mark")),
-                     "status": "Closing" if trade.pending_close else "Open",
-                     "quality": "Reconciliation needed" if not reconciled else "Inconsistent quotes" if inconsistent_marks else "Incomplete quotes" if not complete else "Quoted marks",
+                     "awaiting_settlement": awaiting_settlement,
+                     "status": "Awaiting settlement" if awaiting_settlement else "Closing" if trade.pending_close else "Open",
+                     "quality": "Settlement unverified" if awaiting_settlement else "Reconciliation needed" if not reconciled else "Inconsistent quotes" if inconsistent_marks else "Incomplete quotes" if not complete else "Quoted marks",
                      "scope": f"{underlying} · {expiry}" if len(scopes) == 1 else "Mixed expiries",
                      "payoff_eligible": reconciled and trade.known and shape != "adjusted" and len(scopes) == 1})
     # Do not hide inventory absent from the ledger, or invent a strategy owner.
@@ -314,6 +337,9 @@ def build_positions(packages: list[Mapping[str, Any]], broker_positions: list[Ma
                      "cash_flow": None, "remaining_entry_cash": None, "liquidation_value": None,
                      "delta": None, "theta": None, "reconciled": False, "status": "Unattributed",
                      "quality": "Reconciliation needed", "scope": "Unknown", "payoff_eligible": False})
+    awaiting_count = sum(r.get("awaiting_settlement", False) for r in rows)
+    if awaiting_count:
+        issues.append(f"{awaiting_count} expired position(s) awaiting settlement evidence; excluded from open P&L. Net since opening remains unavailable.")
     return sorted(rows, key=lambda r: (r["strategy"], r["expiry"], r["id"])), sorted(set(issues))
 
 
@@ -321,8 +347,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     def total(key: str) -> float | None:
         return sum(r[key] for r in rows) if all(r[key] is not None for r in rows) else None
     pnl, risk = total("net_pnl"), total("opening_risk")
+    current = [r for r in rows if not r.get("awaiting_settlement", False)]
+    open_pnl = sum(r["open_pnl"] for r in current) if all(r["open_pnl"] is not None for r in current) else None
+    if rows and not current:
+        open_pnl = None
     return {"count": len(rows), "marked": sum(r["net_pnl"] is not None for r in rows),
-            "open_pnl": total("open_pnl"), "realized_pnl": total("realized_pnl"),
+            "open_count": len(current), "awaiting_settlement": len(rows) - len(current),
+            "open_pnl": open_pnl, "realized_pnl": total("realized_pnl"),
             "fees": total("fees"), "net_pnl": pnl, "opening_risk": risk,
             "return_pct": pnl / risk * 100 if pnl is not None and risk else None,
             "estimated_fees": any(r["estimated_fees"] for r in rows)}

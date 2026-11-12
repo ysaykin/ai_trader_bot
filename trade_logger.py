@@ -12,7 +12,8 @@ import logging
 import threading
 from collections.abc import Mapping
 from pathlib import Path
-from datetime import datetime, time, timezone
+from enum import Enum
+from datetime import datetime, time, timedelta, timezone
 from typing import Dict, Any, List, Optional
 
 _ROOT_DIR = Path(__file__).resolve().parent
@@ -21,11 +22,12 @@ if not (_ROOT_DIR / "ml").exists() and (_ROOT_DIR.parent / "ml").exists():
 if str(_ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(_ROOT_DIR))
 
-from ml.features import GREEKS, MARKET_TZ, finite_number, grid_features, market_features
+from ml.features import GREEKS, MARKET_TZ, completed_session_bars, finite_number, grid_features, market_features
 from strategies.iron_condor_math import option_fee_per_contract
 from strategies.runtime_records import (
     RecordScope,
     classify_trade,
+    journal_event_conflicts,
     is_fixture_trade,
     load_ledger_execution_evidence,
     resolve_effective_scope,
@@ -195,6 +197,7 @@ class TrajectoryLogger:
         self._bucket: int | None = None
         self._event = ""
         self._market: dict[str, Any] = {}
+        self._market_observations: dict[str, Any] = {}
         self._cache: dict[tuple[Any, ...], Any] = {}
         self._books: dict[str, dict[str, Any]] = {}
         self._previous_grid: dict[str, Any] = {}
@@ -223,6 +226,7 @@ class TrajectoryLogger:
                 calc_mid = getattr(strategy, "_quote_midpoint", None)
                 if fetch_quote and calc_mid:
                     quote = self._optional(fetch_quote, asset)
+                    self._cache[("quote", *key[1:])] = quote
                     price_val = calc_mid(quote) if quote else None
                 if price_val is None:
                     fetch_price = getattr(strategy, "_fetch_last_price", getattr(strategy, "get_last_price", None))
@@ -234,8 +238,51 @@ class TrajectoryLogger:
         return self._cache[key]
 
     def _market_state(self, strategy: Any, now: datetime) -> dict[str, Any]:
+        rows = self._historical_rows(strategy, strategy._underlying)
+        market = market_features(
+            rows, now, self._cached("price", strategy, "VIX"),
+            self._cached("price", strategy, "VIX9D"),
+        )
+        symbol = str(getattr(strategy._underlying, "symbol", strategy._underlying))
+        observed = completed_session_bars(rows, now)
+        bar_as_of = (max(observed) + timedelta(minutes=1)).isoformat() if observed else None
+        self._market_observations = {
+            key: {"symbol": symbol, "as_of": bar_as_of}
+            for key in ("vwap_distance", "orb_30m_range", "atr_pct", "rsi_14", "price_velocity_15m")
+        }
+        # Spot indexes have no traded volume. Use one ETF's own prices AND
+        # volume for this normalized feature, preserving explicit provenance.
+        if symbol in {"XSP", "SPX"}:
+            proxy_rows = self._historical_rows(strategy, "SPY")
+            proxy = market_features(proxy_rows, now)
+            market["vwap_distance"] = proxy["vwap_distance"]
+            proxy_observed = completed_session_bars(proxy_rows, now)
+            self._market_observations["vwap_distance"] = {
+                "symbol": "SPY", "proxy_for": symbol,
+                "as_of": (max(proxy_observed) + timedelta(minutes=1)).isoformat() if proxy_observed else None,
+            }
+        for key, quote_symbol in (("vix", "VIX"), ("vix_term_ratio", "VIX9D")):
+            quote_symbols = ("VIX", "VIX9D") if key == "vix_term_ratio" else ("VIX",)
+            stamps = []
+            for item in quote_symbols:
+                quote = self._cache.get(("quote", item, "", "", ""))
+                raw = getattr(quote, "raw_data", None)
+                epoch = finite_number(raw.get("trade_date")) if isinstance(raw, Mapping) else None
+                if epoch is not None and epoch > 0:
+                    try:
+                        stamps.append(datetime.fromtimestamp(epoch / 1000 if epoch > 1e11 else epoch, timezone.utc))
+                    except (ValueError, OverflowError, OSError):
+                        pass
+            self._market_observations[key] = {
+                "symbol": quote_symbol,
+                "as_of": min(stamps).isoformat() if len(stamps) == len(quote_symbols) else None,
+            }
+        return market
+
+    def _historical_rows(self, strategy: Any, asset: Any) -> list[dict[str, Any]]:
+        """Read one symbol's minute history without substituting another asset."""
         fetch = getattr(strategy, "get_historical_prices", None)
-        bars = self._optional(fetch, strategy._underlying, 390, timestep="minute") if fetch else None
+        bars = self._optional(fetch, asset, 390, timestep="minute") if fetch else None
         rows = []
         if bars is not None:
             try:
@@ -248,10 +295,7 @@ class TrajectoryLogger:
                     rows = bars
             except (AttributeError, TypeError, ValueError) as error:
                 logger.debug("Trajectory history unavailable: %s", error)
-        return market_features(
-            rows, now, self._cached("price", strategy, "VIX"),
-            self._cached("price", strategy, "VIX9D"),
-        )
+        return rows
 
     def _strategy_state(self, strategy: Any, now: datetime, action: str) -> dict[str, Any]:
         name = _strategy_name(strategy)
@@ -419,6 +463,7 @@ class TrajectoryLogger:
                     "market_as_of": stamp.isoformat(),
                     "valuation": "estimated_fixed_basket_no_costs",
                     "session": session, "market": dict(self._market),
+                    "market_observations": dict(self._market_observations),
                     "strategies": dict.fromkeys(self.names),
                 }
             self._pending["strategies"][name] = self._strategy_state(strategy, now, action)
@@ -504,6 +549,10 @@ def _append_trade_event(
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
+class _JournalDefault(Enum):
+    UNSPECIFIED = "unspecified"
+
+
 def record_trade_entry(
     strategy_name: str,
     symbol: str,
@@ -513,13 +562,19 @@ def record_trade_entry(
     credit: float,
     max_risk: float,
     opening_credit_cash: Optional[float] = None,
-    entry_fees: Optional[float] = None,
+    entry_fees: float | None | _JournalDefault = _JournalDefault.UNSPECIFIED,
     trade_id: Optional[str] = None,
     log_path: Path | None = None,
     event_id: Optional[str] = None,
     scope: Any = None,
     source: Optional[str] = None,
     execution_evidence: Optional[Dict[str, Any]] = None,
+    evidence_refs: list[str] | None = None,
+    position_id: str | None = None,
+    package_id: str | None = None,
+    realization_legs: list[dict[str, Any]] | None = None,
+    fee_provenance: str | None = None,
+    fees_complete: bool | None = None,
 ) -> str:
     """Record a trade entry event to logs/trades.jsonl."""
     effective_scope = resolve_effective_scope(scope)
@@ -536,11 +591,10 @@ def record_trade_entry(
         else credit_per_contract * 100.0 * quantity_value
     )
     f_rate = option_fee_per_contract()
-    fees = float(
-        entry_fees
-        if entry_fees is not None
+    fees = (None if entry_fees is None else float(
+        entry_fees if entry_fees is not _JournalDefault.UNSPECIFIED
         else (len(strikes) or 4) * quantity_value * f_rate
-    )
+    ))
     entry_data = {
         "event": "ENTRY",
         "trade_id": trade_id,
@@ -562,6 +616,12 @@ def record_trade_entry(
     if execution_evidence is not None:
         entry_data["execution_evidence"] = execution_evidence
 
+    for key, value in (("evidence_refs", evidence_refs), ("position_id", position_id),
+                       ("package_id", package_id), ("legs", realization_legs),
+                       ("fee_provenance", fee_provenance), ("fees_complete", fees_complete)):
+        if value is not None:
+            entry_data[key] = value
+
     _append_trade_event(log_path, entry_data, event_id, scope=effective_scope)
 
     return trade_id
@@ -573,13 +633,20 @@ def record_trade_adjustment(
     opening_credit_cash: float,
     closing_cash: float,
     gross_pnl: float,
-    fees: float,
-    net_pnl: float,
+    fees: float | None,
+    net_pnl: float | None,
     remaining_quantity: int,
     log_path: Path | None = None,
     event_id: Optional[str] = None,
     scope: Any = None,
     source: Optional[str] = None,
+    execution_evidence: Optional[Dict[str, Any]] = None,
+    evidence_refs: list[str] | None = None,
+    position_id: str | None = None,
+    package_id: str | None = None,
+    realization_legs: list[dict[str, Any]] | None = None,
+    fee_provenance: str | None = None,
+    fees_complete: bool | None = None,
 ) -> None:
     """Record a confirmed partial realization while leaving the trade open."""
     effective_scope = resolve_effective_scope(scope)
@@ -593,14 +660,22 @@ def record_trade_adjustment(
         "opening_credit_cash": float(opening_credit_cash),
         "closing_cash": float(closing_cash),
         "gross_pnl": float(gross_pnl),
-        "fees": float(fees),
-        "net_pnl": float(net_pnl),
-        "pnl": float(net_pnl),
+        "fees": float(fees) if fees is not None else None,
+        "net_pnl": float(net_pnl) if net_pnl is not None else None,
+        "pnl": float(net_pnl) if net_pnl is not None else None,
         "remaining_quantity": int(remaining_quantity),
         "status": "OPEN",
     }
     if source is not None:
         adjustment["source"] = source
+    if execution_evidence is not None:
+        adjustment["execution_evidence"] = execution_evidence
+    for key, value in (("evidence_refs", evidence_refs), ("position_id", position_id),
+                       ("package_id", package_id), ("legs", realization_legs),
+                       ("fee_provenance", fee_provenance), ("fees_complete", fees_complete)):
+        if value is not None:
+            adjustment[key] = value
+
     _append_trade_event(log_path, adjustment, event_id, scope=effective_scope)
 
 
@@ -608,12 +683,19 @@ def record_trade_addition(
     trade_id: str,
     strategy_name: str,
     opening_credit_cash: float,
-    fees: float,
+    fees: float | None,
     added_quantity: int,
     log_path: Path | None = None,
     event_id: Optional[str] = None,
     scope: Any = None,
     source: Optional[str] = None,
+    execution_evidence: Optional[Dict[str, Any]] = None,
+    evidence_refs: list[str] | None = None,
+    position_id: str | None = None,
+    package_id: str | None = None,
+    realization_legs: list[dict[str, Any]] | None = None,
+    fee_provenance: str | None = None,
+    fees_complete: bool | None = None,
 ) -> None:
     """Record confirmed scale-in cash and fees for an existing trade."""
     effective_scope = resolve_effective_scope(scope)
@@ -625,12 +707,20 @@ def record_trade_addition(
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "strategy": strategy_name,
         "opening_credit_cash": float(opening_credit_cash),
-        "fees": float(fees),
+        "fees": float(fees) if fees is not None else None,
         "added_quantity": int(added_quantity),
         "status": "OPEN",
     }
     if source is not None:
         addition["source"] = source
+    if execution_evidence is not None:
+        addition["execution_evidence"] = execution_evidence
+    for key, value in (("evidence_refs", evidence_refs), ("position_id", position_id),
+                       ("package_id", package_id), ("legs", realization_legs),
+                       ("fee_provenance", fee_provenance), ("fees_complete", fees_complete)):
+        if value is not None:
+            addition[key] = value
+
     _append_trade_event(log_path, addition, event_id, scope=effective_scope)
 
 
@@ -646,9 +736,9 @@ def record_trade_exit(
     exit_price: float = 0.0,
     mfe_pnl: Optional[float] = None,
     mae_pnl: Optional[float] = None,
-    fees: Optional[float] = None,
+    fees: float | None | _JournalDefault = _JournalDefault.UNSPECIFIED,
     gross_pnl: Optional[float] = None,
-    net_pnl: Optional[float] = None,
+    net_pnl: float | None | _JournalDefault = _JournalDefault.UNSPECIFIED,
     opening_credit_cash: Optional[float] = None,
     closing_cash: Optional[float] = None,
     log_path: Path | None = None,
@@ -665,6 +755,11 @@ def record_trade_exit(
     fees_complete: bool = True,
     known_fees: Optional[float] = None,
     execution_evidence: Optional[Dict[str, Any]] = None,
+    evidence_refs: list[str] | None = None,
+    position_id: str | None = None,
+    package_id: str | None = None,
+    realization_legs: list[dict[str, Any]] | None = None,
+    fee_provenance: str | None = None,
 ) -> None:
     """Record a trade exit event to logs/trades.jsonl with fee and net P&L tracking."""
     effective_scope = resolve_effective_scope(scope)
@@ -672,7 +767,9 @@ def record_trade_exit(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     f_rate = option_fee_per_contract()
     calc_gross = float(gross_pnl if gross_pnl is not None else pnl)
-    if fees is not None:
+    if fees is None or (fees is _JournalDefault.UNSPECIFIED and not fees_complete):
+        calc_fees = None
+    elif fees is not _JournalDefault.UNSPECIFIED:
         calc_fees = float(fees)
     else:
         eff_legs = legs if legs is not None else 4
@@ -692,7 +789,8 @@ def record_trade_exit(
             except Exception:
                 pass
         calc_fees = round(float(eff_legs * eff_qty * f_rate), 2)
-    calc_net = float(net_pnl if net_pnl is not None else (calc_gross - calc_fees))
+    calc_net = (None if net_pnl is None or (net_pnl is _JournalDefault.UNSPECIFIED and calc_fees is None) else
+                float(net_pnl if net_pnl is not _JournalDefault.UNSPECIFIED else (calc_gross - calc_fees)))
 
     exit_data: Dict[str, Any] = {
         "event": "EXIT",
@@ -701,7 +799,7 @@ def record_trade_exit(
         "strategy": strategy_name,
         "exit_reason": exit_reason,
         "exit_trigger": exit_trigger or exit_reason,
-        "outcome": outcome or realized_outcome(calc_net),
+        "outcome": outcome or (realized_outcome(calc_net) if calc_net is not None else "UNKNOWN"),
         "gross_pnl": calc_gross,
         "fees": calc_fees,
         "pnl": calc_net,
@@ -710,7 +808,7 @@ def record_trade_exit(
         "opening_credit_cash": opening_credit_cash,
         "closing_cash": closing_cash,
         "status": "CLOSED",
-        "fees_complete": bool(fees_complete),
+        "fees_complete": bool(fees_complete) and calc_fees is not None,
     }
     if known_fees is not None:
         exit_data["known_fees"] = float(known_fees)
@@ -728,6 +826,12 @@ def record_trade_exit(
     if mae_pnl is not None:
         exit_data["mae_pnl"] = float(mae_pnl)
 
+    for key, value in (("evidence_refs", evidence_refs), ("position_id", position_id),
+                       ("package_id", package_id), ("legs", realization_legs),
+                       ("fee_provenance", fee_provenance)):
+        if value is not None:
+            exit_data[key] = value
+
     _append_trade_event(log_path, exit_data, event_id, scope=effective_scope)
 
 
@@ -737,6 +841,7 @@ def load_all_trades(
     include_unattributed: bool = False,
     ledger_path: Path | None = None,
     scope: Any = None,
+    *, as_of_date: Any = None,
 ) -> List[Dict[str, Any]]:
     """Parse logs/trades.jsonl and reconcile entries and exits into completed trade records."""
     effective_scope = resolve_effective_scope(scope)
@@ -744,12 +849,16 @@ def load_all_trades(
     if not log_path.exists():
         return []
 
-    ledger_ev = load_ledger_execution_evidence(ledger_path)
+    ledger_ev = load_ledger_execution_evidence(ledger_path, expected_scope=effective_scope, as_of_date=as_of_date)
+
+    def amount(value: Any) -> float:
+        return float(value) if value is not None else 0.0
 
     entries: Dict[str, Dict[str, Any]] = {}
     adjustments: Dict[str, List[Dict[str, Any]]] = {}
     additions: Dict[str, List[Dict[str, Any]]] = {}
     exits: Dict[str, Dict[str, Any]] = {}
+    events_by_trade: Dict[str, List[Dict[str, Any]]] = {}
 
     try:
         with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -763,6 +872,7 @@ def load_all_trades(
                     ev = record.get("event")
                     if not t_id:
                         continue
+                    events_by_trade.setdefault(t_id, []).append(record)
                     if ev == "ENTRY":
                         entries[t_id] = record
                     elif ev == "ADJUSTMENT":
@@ -774,6 +884,7 @@ def load_all_trades(
                 except json.JSONDecodeError:
                     continue
 
+        ledger_ev["conflicting_event_ids"] = journal_event_conflicts([event for sequence in events_by_trade.values() for event in sequence])
         completed_trades: List[Dict[str, Any]] = []
         for t_id, entry in entries.items():
             entry_qty = int(entry.get("quantity", 1))
@@ -783,24 +894,24 @@ def load_all_trades(
             )
             f_rate = option_fee_per_contract()
             new_schema = "opening_credit_cash" in entry or "entry_fees" in entry
-            opening_cash = float(
+            opening_cash = amount(
                 entry.get(
                     "opening_credit_cash",
-                    float(entry.get("credit", 0.0)) * 100.0 * entry_qty,
+                    amount(entry.get("credit", 0.0)) * 100.0 * entry_qty,
                 )
             ) + sum(
-                float(item.get("opening_credit_cash", 0.0))
+                amount(item.get("opening_credit_cash", 0.0))
                 for item in trade_additions
             )
-            entry_fees = float(
+            entry_fees = amount(
                 entry.get("entry_fees", round((len(entry.get("strikes") or {}) or 4) * entry_qty * f_rate, 2))
-            ) + sum(float(item.get("fees", 0.0)) for item in trade_additions)
+            ) + sum(amount(item.get("fees", 0.0)) for item in trade_additions)
             partials = adjustments.get(t_id, [])
             partial_gross = sum(
-                float(item.get("gross_pnl", item.get("pnl", 0.0)))
+                amount(item.get("gross_pnl", item.get("pnl", 0.0)))
                 for item in partials
             )
-            partial_fees = sum(float(item.get("fees", 0.0)) for item in partials)
+            partial_fees = sum(amount(item.get("fees", 0.0)) for item in partials)
             exit_record = exits.get(t_id)
             if exit_record is None:
                 gross_pnl = partial_gross
@@ -813,21 +924,21 @@ def load_all_trades(
                 terminal: Dict[str, Any] = {}
             else:
                 terminal = exit_record
-                exit_gross = float(
+                exit_gross = amount(
                     terminal.get("gross_pnl", terminal.get("pnl", 0.0))
                 )
                 gross_pnl = partial_gross + exit_gross
                 if new_schema:
-                    exit_fees = float(terminal.get("fees", (len(entry.get("strikes") or {}) or 4) * int(partials[-1].get("remaining_quantity", qty) if partials else qty) * f_rate))
+                    exit_fees = amount(terminal.get("fees", (len(entry.get("strikes") or {}) or 4) * int(partials[-1].get("remaining_quantity", qty) if partials else qty) * f_rate))
                     fees = entry_fees + partial_fees + exit_fees
                     net_pnl = round(gross_pnl - fees, 2)
                 else:
-                    exit_fees = float(terminal.get("fees", round(2 * (len(entry.get("strikes") or {}) or 4) * qty * f_rate, 2)))
+                    exit_fees = amount(terminal.get("fees", round(2 * (len(entry.get("strikes") or {}) or 4) * qty * f_rate, 2)))
                     fees = partial_fees + exit_fees
                     net_pnl = sum(
-                        float(item.get("net_pnl", item.get("pnl", 0.0)))
+                        amount(item.get("net_pnl", item.get("pnl", 0.0)))
                         for item in partials
-                    ) + float(
+                    ) + amount(
                         terminal.get("net_pnl", round(exit_gross - exit_fees, 2))
                     )
                 entry_dt = datetime.fromisoformat(str(entry["timestamp"]).replace("Z", "+00:00"))
@@ -842,6 +953,10 @@ def load_all_trades(
                 exit_time = terminal["timestamp"]
                 status = "CLOSED"
                 reason = terminal.get("exit_reason", "MANUAL")
+            unknown_fees = any(("fees" in item and item["fees"] is None) or
+                               ("entry_fees" in item and item["entry_fees"] is None)
+                               for item in events_by_trade[t_id])
+            unknown_net = unknown_fees or any("net_pnl" in item and item["net_pnl"] is None for item in events_by_trade[t_id])
             net_roi_pct = (
                 round((net_pnl / opening_cash) * 100.0, 1)
                 if opening_cash > 0
@@ -849,8 +964,7 @@ def load_all_trades(
             )
 
             # Attribution & Partitioning via shared classifier
-            trade_events = [entry] + partials + ([terminal] if terminal and terminal != entry else [])
-            classification = classify_trade(trade_events, ledger_ev)
+            classification = classify_trade(events_by_trade[t_id], ledger_ev, expected_scope=effective_scope, as_of_date=as_of_date)
             t_partition = classification["partition"]
             source = classification["source"]
             reconciliation_status = classification["reconciliation_status"]
@@ -870,10 +984,10 @@ def load_all_trades(
                 "max_risk": entry.get("max_risk", 0.0),
                 "quantity": qty,
                 "gross_pnl": gross_pnl,
-                "fees": fees,
-                "pnl": net_pnl,
-                "net_pnl": net_pnl,
-                "net_roi_pct": net_roi_pct,
+                "fees": None if unknown_fees else fees,
+                "pnl": None if unknown_net else net_pnl,
+                "net_pnl": None if unknown_net else net_pnl,
+                "net_roi_pct": None if unknown_net else net_roi_pct,
                 "mfe_pnl": terminal.get("mfe_pnl"),
                 "mae_pnl": terminal.get("mae_pnl"),
                 "exit_reason": reason,
@@ -882,7 +996,12 @@ def load_all_trades(
                 "source": source,
                 "reconciliation_status": reconciliation_status,
                 "is_eligible": is_eligible,
-                "fee_source": "exact" if entry.get("has_broker_fees") else "estimated",
+                "provenance_reasons": classification.get("reasons", []),
+                "evidence_references": classification.get("evidence_references", []),
+                "fee_source": "retained_actual" if reconciliation_status == "VERIFIED" else "unavailable",
+                "reason_codes": classification["reason_codes"],
+                "evidence_refs": classification["evidence_refs"],
+                "classifier_version": classification["classifier_version"],
             })
 
     except Exception:
@@ -905,7 +1024,7 @@ def compute_strategy_metrics(trades: List[Dict[str, Any]], strategy_name: str) -
         t for t in trades
         if strategy_name.lower() in t.get("strategy", "").lower()
         and t.get("status") == "CLOSED"
-        and t.get("is_eligible", t.get("partition") == "accepted")
+        and t.get("is_eligible") is True
     ]
 
     total_trades = len(strat_trades)

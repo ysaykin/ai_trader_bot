@@ -115,7 +115,10 @@ class TrajectoryTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertTrue(rows[0]["complete"])
         self.assertEqual(rows[0]["grid"]["observed_count"], 20)
-        self.assertEqual(sum(strategy.get_historical_prices.call_count for strategy in strategies), 1)
+        # One shared underlying read and one shared SPY VWAP read per grid.
+        self.assertEqual(sum(strategy.get_historical_prices.call_count for strategy in strategies), 2)
+        assets = [call.args[0] for strategy in strategies for call in strategy.get_historical_prices.call_args_list]
+        self.assertCountEqual(assets, ["XSP", "SPY"])
         self.assertEqual(sum(strategy.get_greeks.call_count for strategy in strategies), 4)
         self.assertEqual(rows[0]["market"]["vix_term_ratio"], 1.1)
         for strategy in strategies:

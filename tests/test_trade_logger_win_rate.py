@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -90,49 +91,15 @@ class TestTradeLoggerFeeAccounting(unittest.TestCase):
         self.assertEqual(exit_rec["fees"], 1.60)
 
     def test_load_all_trades_and_metrics_with_dynamic_fees(self) -> None:
-        strikes_2 = {"put_short": 5800.0, "put_long": 5795.0}
-        entry_ev = {
-            "broker": "tradier", "account_id": "VA123", "environment": "paper",
-            "package_id": "pkg_entry_1", "broker_parent_id": "ord_entry_1",
-            "legs": [{"contract": "SPX_5800_P", "side": "sell_to_open", "quantity": 1},
-                     {"contract": "SPX_5795_P", "side": "buy_to_open", "quantity": 1}],
-        }
-        exit_ev = {
-            "broker": "tradier", "account_id": "VA123", "environment": "paper",
-            "package_id": "pkg_exit_1", "broker_parent_id": "ord_exit_1",
-            "legs": [{"contract": "SPX_5800_P", "side": "buy_to_close", "quantity": 1},
-                     {"contract": "SPX_5795_P", "side": "sell_to_close", "quantity": 1}],
-        }
-        t_id = record_trade_entry(
-            strategy_name="STRAT_V2",
-            symbol="SPX",
-            expiry="2026-11-01",
-            strikes=strikes_2,
-            quantity=1,
-            credit=1.00,  # $100 opening cash
-            max_risk=500.0,
-            log_path=self.log_path,
-            execution_evidence=entry_ev,
-            scope="paper",
-            source="broker_verified",
-        )
-        # Close at a small gross gain of $1.00 (gross_pnl = $1.00)
-        # Total fees: entry $0.80 + exit $0.80 = $1.60
-        # Net P&L = $1.00 - $1.60 = -$0.60 (net loss despite positive gross)
-        record_trade_exit(
-            trade_id=t_id,
-            strategy_name="STRAT_V2",
-            exit_reason="PROFIT_TARGET",
-            pnl=1.00,
-            gross_pnl=1.00,
-            fees=0.80,
-            log_path=self.log_path,
-            execution_evidence=exit_ev,
-            scope="paper",
-            source="broker_verified",
-        )
-
-        trades = load_all_trades(self.log_path)
+        from trade_history_fixtures import evidence_bundle, SCOPE, AS_OF
+        bundle=evidence_bundle(self.log_path.parent / "retained")
+        events=bundle["events"]
+        for event in events:
+            event["strategy"]="STRAT_V2"
+        events[0].update(opening_credit_cash=100.0,entry_fees=0.80,credit=1.0)
+        events[1].update(gross_pnl=1.0,fees=0.80,net_pnl=0.20)
+        bundle["journal"].write_text("".join(json.dumps(e)+"\n" for e in events))
+        trades=load_all_trades(bundle["journal"],ledger_path=bundle["ledger"],scope=SCOPE,as_of_date=AS_OF)
         self.assertEqual(len(trades), 1)
         trade = trades[0]
         self.assertEqual(trade["fees"], 1.60)
@@ -156,3 +123,40 @@ class TestTradeLoggerFeeAccounting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_explicit_unknown_amounts_remain_unknown(tmp_path):
+    import json
+    from trade_history_fixtures import SCOPE
+    path=tmp_path/'unknown.jsonl'
+    record_trade_entry(strategy_name='retained',symbol='XSP',expiry='2026-11-05',
+                       strikes={'long_put':690,'short_put':695},quantity=1,credit=1.,max_risk=500.,
+                       entry_fees=None,trade_id='unknown',log_path=path,scope=SCOPE)
+    record_trade_exit(trade_id='unknown',strategy_name='retained',exit_reason='CASH_SETTLED',pnl=10.,
+                      fees=None,net_pnl=None,log_path=path,scope=SCOPE)
+    entry,exit_event=[json.loads(line) for line in path.read_text().splitlines()]
+    assert entry['entry_fees'] is None
+    assert exit_event['fees'] is None and exit_event['net_pnl'] is None
+    assert exit_event['fees_complete'] is False
+
+
+@pytest.mark.parametrize('field', ['fees', 'entry_fees', 'net_pnl'])
+def test_complete_provenance_with_unknown_amount_excluded_from_metrics(tmp_path: Path, field: str) -> None:
+    from trade_history_fixtures import evidence_bundle, SCOPE, AS_OF
+
+    bundle = evidence_bundle(tmp_path)
+    event = bundle['events'][0 if field == 'entry_fees' else 1]
+    event[field] = None
+    for record in bundle['events']:
+        record['fees_complete'] = True
+    bundle['journal'].write_text(''.join(json.dumps(record) + '\n' for record in bundle['events']))
+    [trade] = load_all_trades(bundle['journal'], ledger_path=bundle['ledger'], scope=SCOPE, as_of_date=AS_OF)
+    assert trade['reconciliation_status'] == 'VERIFIED'
+    assert trade['is_eligible'] is False
+    assert trade['fee_source'] == 'retained_actual'
+    assert 'JOURNAL_AMOUNTS_INCOMPLETE' in trade['reason_codes']
+    assert trade['net_pnl'] is None
+    if field != 'net_pnl':
+        assert trade['fees'] is None
+    metrics = compute_strategy_metrics([trade], 'IronCondor_V31')
+    assert metrics['total_trades'] == 0 and metrics['raw_pnl'] == 0.

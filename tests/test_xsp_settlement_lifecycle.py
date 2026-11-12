@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import unittest
 
+from trade_history_fixtures import retain_settlement
 from strategies.position_ledger import LedgerLeg, PositionLedger, asset_key
 from strategies.xsp_settlement import (
     BrokerCashEvidence,
@@ -298,9 +299,10 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
             self.ledger.record_fill(leg.order_id, leg.requested_signed_quantity, px)
 
         settlement = create_settlement_value(date(2026, 10, 26), "105.0")
-        broker_cash = create_broker_cash_evidence("acc-test", "act-xsp-1", date(2026, 10, 26), 0, True)
+        broker_cash = create_broker_cash_evidence(self.ledger.record_scope.account_id, "act-xsp-1", date(2026, 10, 26), 0, True)
         fee = FeeEvidence("fee:open", 160, True, "opening")
 
+        retain_settlement(self.ledger, "pkg-1", settlement, broker_cash, fee=fee)
         retired = self.ledger.expire_strategy_positions(
             "IC_STRAT",
             date(2026, 10, 27),
@@ -337,8 +339,29 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
         self.assertEqual(dispatched, 1)
         self.assertTrue(self.journal_path.exists())
 
+        event = json.loads(self.journal_path.read_text().splitlines()[0])
+        self.assertEqual(event["event_id"], "pkg-1:SETTLEMENT")
+        self.assertEqual(event["scope"], self.ledger.record_scope.to_dict())
+        self.assertEqual(len(event["evidence_refs"]), 2)
+        self.assertIn("known_fees", event)
+        self.assertIn("fees_complete", event)
+        # Simulate crash after append but before marking the outbox dispatched.
+        self.ledger._connection.execute("UPDATE outbox SET status='pending'")
+        self.ledger._connection.commit()
+        self.assertEqual(self.ledger.flush_outbox(self.journal_path), 1)
+        self.assertEqual(len(self.journal_path.read_text().splitlines()), 1)
         # Second flush is idempotent
         self.assertEqual(self.ledger.flush_outbox(self.journal_path), 0)
+
+    def test_unretained_settlement_assertions_do_not_release_inventory(self) -> None:
+        self.ledger.record_submission("missing", "IC_STRAT", "open", self.legs, trade_id="legacy")
+        for leg in self.legs:
+            self.ledger.record_fill(leg.order_id, leg.requested_signed_quantity, 1.0)
+        settlement=create_settlement_value(date(2026,10,26), "105")
+        cash=create_broker_cash_evidence(self.ledger.record_scope.account_id,"aggregate",date(2026,10,26),0,True)
+        self.assertEqual(self.ledger.expire_strategy_positions("IC_STRAT",date(2026,10,27),settlement=settlement,broker_cash=cash),0)
+        self.assertTrue(self.ledger.owned_quantities("IC_STRAT"))
+        self.assertGreater(self.ledger.portfolio_defined_risk("IC_STRAT"),0)
 
     def test_settlement_with_prior_trims_does_not_double_count(self) -> None:
         # Open 2 contracts
@@ -365,8 +388,9 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
 
         # Settle remaining 1 contract ITM on put side (Settlement at 98.0 -> -$200 for 1 contract)
         settlement = create_settlement_value(date(2026, 10, 26), "98.0")
-        broker_cash = create_broker_cash_evidence("acc-test", "act-trim-1", date(2026, 10, 26), -20000, True)
+        broker_cash = create_broker_cash_evidence(self.ledger.record_scope.account_id, "act-trim-1", date(2026, 10, 26), -20000, True)
 
+        retain_settlement(self.ledger, "open-1", settlement, broker_cash)
         retired = self.ledger.expire_strategy_positions(
             "IC_STRAT",
             date(2026, 10, 27),
@@ -381,53 +405,22 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
         self.assertEqual(rec["settlement_cash_cents"], -20000)
 
     def test_fee_incomplete_settlement_excluded_from_certified_win_rate(self) -> None:
-        # Matching execution evidence keeps the trade accepted while incomplete
-        # fees exclude it from certified performance.
-        entry_evidence = {"broker": "tradier", "account_id": "default", "environment": "paper", "package_id": "entry-1", "broker_parent_id": "order-1", "legs": [
-            {"contract": f"XSP_{strike}_{right}", "side": side, "quantity": 1}
-            for strike, right, side in [(500, "P", "buy_to_open"), (505, "P", "sell_to_open"), (520, "C", "sell_to_open"), (525, "C", "buy_to_open")]
-        ]}
-        exit_evidence = {**entry_evidence, "package_id": "exit-1", "broker_parent_id": "order-2", "legs": [
-            {"contract": leg["contract"], "side": "sell_to_close" if leg["side"] == "buy_to_open" else "buy_to_close", "quantity": 1}
-            for leg in entry_evidence["legs"]
-        ]}
-        record_trade_entry(
-            strategy_name="IC_STRAT",
-            symbol="XSP",
-            expiry="2026-10-26",
-            strikes={"long_put": 500, "short_put": 505, "short_call": 520, "long_call": 525},
-            quantity=1,
-            credit=2.00,
-            max_risk=500.0,
-            log_path=self.journal_path,
-            trade_id="T-FEE-INC",
-            source="broker_verified",
-            scope="paper",
-            execution_evidence=entry_evidence,
-        )
-        # Record exit with incomplete fees
-        record_trade_exit(
-            trade_id="T-FEE-INC",
-            strategy_name="IC_STRAT",
-            exit_reason="EXPIRED_WORTHLESS",
-            pnl=200.0,
-            gross_pnl=200.0,
-            fees=1.60,
-            net_pnl=198.40,
-            log_path=self.journal_path,
-            source="broker_verified",
-            fees_complete=False,
-            scope="paper",
-            execution_evidence=exit_evidence,
-        )
-
-        trades = load_all_trades(self.journal_path, ledger_path=self.ledger_path)
+        from trade_history_fixtures import evidence_bundle, SCOPE, AS_OF
+        bundle=evidence_bundle(Path(self.temp_dir.name)/"attributed",fees=False,events=("ENTRY",))
+        ledger=PositionLedger(bundle["ledger"],scope=SCOPE)
+        self.addCleanup(ledger.close)
+        settlement=create_settlement_value("2026-11-05","700")
+        cash=create_broker_cash_evidence(SCOPE.account_id,"settlement-fee-incomplete","2026-11-05",0,True)
+        retain_settlement(ledger,"position-retained-1",settlement,cash)
+        self.assertEqual(ledger.expire_strategy_positions("IronCondor_V31",date(2026,11,6)),1)
+        self.assertEqual(ledger.flush_outbox(bundle["journal"]),1)
+        trades=load_all_trades(bundle["journal"],ledger_path=bundle["ledger"],scope=SCOPE,as_of_date=AS_OF)
         self.assertEqual(len(trades), 1)
         trade = trades[0]
         self.assertFalse(trade["is_eligible"])
         self.assertEqual(trade["reconciliation_status"], "FEE_INCOMPLETE")
 
-        metrics = compute_strategy_metrics(trades, "IC_STRAT")
+        metrics = compute_strategy_metrics(trades, "IronCondor_V31")
         self.assertEqual(metrics["total_trades"], 0)
         self.assertEqual(metrics["wins"], 0)
         self.assertIn("0 trades", metrics["win_rate"])
@@ -435,3 +428,29 @@ class TestPositionLedgerDurableLifecycle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_settlement_cash_account_and_activity_cannot_be_reused(tmp_path):
+    import pytest
+    from trade_history_fixtures import evidence_bundle,SCOPE,retain_settlement
+    bundle=evidence_bundle(tmp_path,events=('ENTRY',))
+    ledger=PositionLedger(bundle['ledger'],scope=SCOPE)
+    try:
+        settlement=create_settlement_value('2026-11-05','700')
+        wrong=create_broker_cash_evidence('OTHER','shared-activity','2026-11-05',0,True)
+        with pytest.raises(ValueError,match='scope'):
+            retain_settlement(ledger,'position-retained-1',settlement,wrong)
+        # Failed attribution has not retired any known inventory.
+        assert ledger.owned_quantities('IronCondor_V31')
+        assert ledger.expire_strategy_positions('IronCondor_V31',date(2026,11,6))==0
+        other=create_broker_cash_evidence(SCOPE.account_id,'different-activity','2026-11-05',0,True)
+        retain_settlement(ledger,'position-retained-1',settlement,other)
+        second_legs=[LedgerLeg('other-'+str(i),leg['asset_key'],leg['requested_signed_quantity'])
+                     for i,leg in enumerate(ledger.get_basket('retained-1-0').legs)]
+        ledger.record_submission('other','IronCondor_V31','open',second_legs,trade_id='other')
+        for leg in second_legs:
+            ledger.record_fill(leg.order_id,leg.requested_signed_quantity,1.)
+        with pytest.raises(ValueError,match='Conflicting'):
+            retain_settlement(ledger,'other',settlement,other)
+    finally:
+        ledger.close()

@@ -263,6 +263,9 @@ def test_strategy_manages_shared_contract_entries_independently(strategy, ledger
     assert strategy._reconcile_broker_state()
     strategy._manage_position(a)
     strategy._manage_position(b)
+    strategy.get_datetime.return_value = NOW + timedelta(minutes=5)
+    strategy._manage_position(a)
+    strategy._manage_position(b)
     closes = [basket for basket in ledger.open_baskets() if basket.intent == "close"]
     assert len(closes) == 1
     assert closes[0].position_id == a
@@ -515,13 +518,37 @@ def test_settlement_of_one_expiry_keeps_other_position_managed(strategy, ledger)
     from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
     settlement = SettlementValue(date(2026, 11, 20), Decimal("105.0"), "cboe.com", datetime.now(timezone.utc), "hash", "official")
     broker_cash = BrokerCashEvidence("test_account", "act-settle-a", date(2026, 11, 20), 0, True)
-    ledger.record_settlement_value(settlement)
-    ledger.record_broker_cash_evidence(broker_cash)
+    from trade_history_fixtures import retain_settlement
+    retain_settlement(ledger, a, settlement, broker_cash)
     assert strategy._reconcile_broker_state()
     assert ledger.get_basket(ledger.position_baskets(a)[0].package_id).state == "expired"
     assert ledger.position_opening_cash(b) == 60
     assert ledger.portfolio_defined_risk() == 440
     assert strategy._runtime(b).position_open
+
+
+@pytest.mark.parametrize("path", ["close", "manage"])
+def test_expired_pending_close_preserves_reservation_without_cancel_loop(strategy, ledger, path):
+    pid = strategy_entry(strategy)
+    strategy._close_all_options(position_id=pid, exit_reason="EOD_CLOSE")
+    closing = next(b for b in ledger.position_baskets(pid) if b.intent == "close")
+    inventory = ledger.position_quantities(pid)
+    strategy.get_datetime.return_value = NOW + timedelta(days=21)
+    strategy.get_positions = Mock(return_value=[])
+    strategy.cancel_order.reset_mock()
+    strategy.submit_order.reset_mock()
+    strategy._close_reprice_seconds = 0
+    for _ in range(2):
+        if path == "close":
+            strategy._close_all_options(position_id=pid, exit_reason="EOD_CLOSE")
+        else:
+            strategy._manage_position(pid)
+    strategy.cancel_order.assert_not_called()
+    strategy.submit_order.assert_not_called()
+    assert ledger.position_quantities(pid) == inventory
+    assert ledger.is_inflight(ledger.get_basket(closing.package_id))
+    assert ledger.get_settlement_reconciliation(pid) is None
+    assert not any(event == "EXIT" for event, _ in strategy.journal_events)
 
 
 def test_single_basket_trajectory_cannot_reuse_previous_position_for_multiple_entries(strategy, tmp_path):

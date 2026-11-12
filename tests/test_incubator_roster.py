@@ -17,6 +17,9 @@ class IncubatorRosterTests(unittest.TestCase):
         environment = patch.dict(os.environ, {}, clear=True)
         environment.start()
         self.addCleanup(environment.stop)
+        constructor = patch.object(incubator, "SPXIronCondor", iron_condor.SPXIronCondor)
+        constructor.start()
+        self.addCleanup(constructor.stop)
 
     def test_default_compares_distinct_dynamics_with_one_plain_control(self):
         specs = incubator.get_incubator_specs()

@@ -509,23 +509,32 @@ class BrokerReads:
                 transport_error = ""
                 try:
                     for symbol in chunk:
-                        _, tickets[symbol] = self._claim("quote:" + symbol, deadline, True)
+                        try:
+                            value, ticket = self._claim("quote:" + symbol, deadline, True)
+                        except BrokerReadUnavailable:
+                            # Keep per-symbol cooldowns out of the shared fetch.
+                            # The complete request still fails below, after the
+                            # other symbols have had a chance to refresh.
+                            continue
+                        if ticket is None:
+                            result[symbol] = value
+                        else:
+                            tickets[symbol] = ticket
+                    if not tickets:
+                        self._publish(batch_key, batch_ticket, {})
+                        continue
                     try:
-                        payload = self._fetch("/markets/quotes", {"symbols": ",".join(chunk), "greeks": "true"}, "market", caller, deadline)
+                        payload = self._fetch("/markets/quotes", {"symbols": ",".join(tickets), "greeks": "true"}, "market", caller, deadline)
                         self._validate(payload, "quotes")
                     except Exception as error:
                         transport_error = str(error) if isinstance(error, BrokerReadUnavailable) else "Quote transport failure"
                         raise
                     received = {str(row.get("symbol")): row for row in _rows(payload, "quotes", "quote") if self._valid_quote(row)}
-                    for symbol in chunk:
-                        ticket = tickets[symbol]
-                        if ticket:
-                            value = received.get(symbol)
-                            self._publish("quote:" + symbol, ticket, value, "Missing quote" if value is None else "")
+                    for symbol, ticket in tickets.items():
+                        value = received.get(symbol)
+                        self._publish("quote:" + symbol, ticket, value, "Missing quote" if value is None else "")
                         if symbol in received:
                             result[symbol] = received[symbol]
-                    if any(symbol not in received for symbol in chunk):
-                        raise BrokerReadUnavailable("Incomplete broker quote batch")
                 except Exception as error:
                     message = str(error) if isinstance(error, BrokerReadUnavailable) else "Quote transport failure"
                     for symbol, ticket in tickets.items():
@@ -699,4 +708,15 @@ def install_sdk_reads(broker, token, account, sandbox=True):
                 _sdk_error.reset(context)
         guarded._broker_reads_guard = True
         setattr(broker, name, guarded)
+    polling = getattr(broker, "do_polling", None)
+    if callable(polling) and not getattr(polling, "_broker_poll_guard", False):
+        def poll_safely(*args, **kwargs):
+            try:
+                return polling(*args, **kwargs)
+            except BrokerReadUnavailable as error:
+                # Abort this cycle before SDK reconciliation can treat a failed
+                # read as empty inventory. Execution reads still raise above.
+                log.warning("Skipping broker polling cycle after unavailable read: %s", error)
+        poll_safely._broker_poll_guard = True
+        broker.do_polling = poll_safely
     return reads

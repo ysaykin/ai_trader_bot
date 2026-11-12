@@ -6,11 +6,10 @@ durable panic halt enforcement, cumulative fill pricing, and idempotent journali
 
 from __future__ import annotations
 
-import json
 import os
 import tempfile
 import unittest
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -200,10 +199,24 @@ class TestPartialFillTerminalReconciliation(unittest.TestCase):
 
 class TestDurablePanicHalt(unittest.TestCase):
     def setUp(self) -> None:
+        # These execution fixtures precede their November 20 expiry.
+        clock = patch.object(SPXIronCondor, "get_datetime", return_value=datetime(2026, 11, 6, 15, tzinfo=timezone.utc))
+        clock.start()
+        self.addCleanup(clock.stop)
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.ledger = PositionLedger(os.path.join(self.tmpdir.name, "test_ledger.sqlite3"))
         self.addCleanup(self.ledger._connection.close)
+
+    def _create_strategy(self, name: str) -> SPXIronCondor:
+        strategy = SPXIronCondor.__new__(SPXIronCondor)
+        strategy._name = name
+        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": name}
+        strategy.broker = Mock(name="offline-broker")
+        strategy.broker.name = "Tradier"
+        strategy.broker._shared_broker_reads = None
+        strategy.initialize()
+        return strategy
 
     def test_panic_halt_persistence_and_check(self) -> None:
         self.assertFalse(self.ledger.is_panic_halted())
@@ -247,11 +260,7 @@ class TestDurablePanicHalt(unittest.TestCase):
 
 
     def test_restarted_entry_canceled_before_close(self) -> None:
-        strategy = SPXIronCondor()
-        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "RestartStrat"}
-        strategy.broker = Mock()
-        strategy.broker.name = "Tradier"
-        strategy.initialize()
+        strategy = self._create_strategy("RestartStrat")
         strategy.cancel_order = Mock()
         strategy.submit_order = Mock(return_value=[])
 
@@ -275,12 +284,8 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy.cancel_order.assert_called_once_with(broker_parent)
         strategy.submit_order.assert_not_called()
 
-    def test_non_expiring_stop_loss_uses_bounded_fallback(self) -> None:
-        strategy = SPXIronCondor()
-        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "StopStrat"}
-        strategy.broker = Mock()
-        strategy.broker.name = "Tradier"
-        strategy.initialize()
+    def test_non_expiring_stop_loss_requires_validated_quotes(self) -> None:
+        strategy = self._create_strategy("StopStrat")
         position = strategy._runtime()
         position.owned_legs = [
             (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1),
@@ -292,16 +297,12 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy._emergency_close_debit_fallback = Mock(return_value=4.0)
         strategy._submit_package = Mock(return_value=[])
         strategy._close_all_options(exit_reason="STOP_LOSS")
-        strategy._submit_package.assert_called_once()
-        self.assertEqual(strategy._submit_package.call_args.kwargs["order_type"], "debit")
-        self.assertEqual(strategy._submit_package.call_args.kwargs["price"], 4.0)
+        strategy._submit_package.assert_not_called()
+        strategy._emergency_close_debit_fallback.assert_not_called()
+        self.assertTrue(position.exit_requested)
 
     def test_close_repricing_stays_a_bounded_debit_limit(self) -> None:
-        strategy = SPXIronCondor()
-        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "RepriceStrat"}
-        strategy.broker = Mock()
-        strategy.broker.name = "Tradier"
-        strategy.initialize()
+        strategy = self._create_strategy("RepriceStrat")
         position = strategy._runtime()
         position.owned_legs = [
             (Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put"), 1),
@@ -321,11 +322,7 @@ class TestDurablePanicHalt(unittest.TestCase):
         self.assertLessEqual(strategy._submit_package.call_args.kwargs["price"], 5.0)
 
     def test_missing_underlying_price_fallback_for_expiry_exits_no_attribute_error(self) -> None:
-        strategy = SPXIronCondor()
-        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "ExpiryStrat"}
-        strategy.broker = Mock()
-        strategy.broker.name = "Tradier"
-        strategy.initialize()
+        strategy = self._create_strategy("ExpiryStrat")
         strategy._underlying = Asset("SPXW", asset_type="index")
         strategy._is_expiring_today = Mock(return_value=True)
 
@@ -343,11 +340,7 @@ class TestDurablePanicHalt(unittest.TestCase):
         self.assertTrue(price > 0)
 
     def test_orphan_pending_entry_without_broker_identity_does_not_block_close(self) -> None:
-        strategy = SPXIronCondor()
-        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "OrphanStrat"}
-        strategy.broker = Mock()
-        strategy.broker.name = "Tradier"
-        strategy.initialize()
+        strategy = self._create_strategy("OrphanStrat")
         strategy.cancel_order = Mock()
         strategy.submit_order = Mock(return_value=[SimpleNamespace(identifier="close-parent", status="open")])
         strategy._package_price = Mock(return_value=1.50)
@@ -380,11 +373,7 @@ class TestDurablePanicHalt(unittest.TestCase):
         strategy._submit_package.assert_called_once()
 
     def test_uncertain_orphan_remains_reserved(self) -> None:
-        strategy = SPXIronCondor()
-        strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "OrphanStrat"}
-        strategy.broker = Mock()
-        strategy.broker.name = "Tradier"
-        strategy.initialize()
+        strategy = self._create_strategy("OrphanStrat")
         strategy.cancel_order = Mock()
         strategy.submit_order = Mock(return_value=[SimpleNamespace(identifier="close-parent", status="open")])
         strategy._package_price = Mock(return_value=1.50)
@@ -419,12 +408,8 @@ class TestDurablePanicHalt(unittest.TestCase):
     def test_zero_and_debit_positions_stop_loss(self) -> None:
         for entry_cash in (0.0, -50.0):
             with self.subTest(entry_cash=entry_cash):
-                strategy = SPXIronCondor()
-                strategy.parameters = {**SPXIronCondor.parameters, "position_ledger": self.ledger, "strategy_name": "ZeroDebitStrat", "wing_width": 5.0}
-                strategy.broker = Mock()
-                strategy.broker.name = "Tradier"
-                strategy.broker._shared_broker_reads = None
-                strategy.initialize()
+                strategy = self._create_strategy("ZeroDebitStrat")
+                strategy.parameters["wing_width"] = 5.0
                 strategy._close_all_options = Mock()
                 strategy.get_orders = Mock(return_value=[])
                 strategy.get_positions = Mock(return_value=[object()])
@@ -436,24 +421,23 @@ class TestDurablePanicHalt(unittest.TestCase):
                 asset1 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5800, right="put")
                 asset2 = Asset("SPXW", asset_type="option", expiration=date(2026, 11, 20), strike=5795, right="put")
                 position = strategy._runtime()
-                position.owned_legs = [(asset1, 1), (asset2, -1)]
+                position.owned_legs = [(asset1, -1), (asset2, 1)]
                 position.position_open = True
                 position.entry_credit_cash = entry_cash
 
-                # Market quotes where position is losing:
-                # asset1 (long put 5800): mid = 0.50 (+50)
-                # asset2 (short put 5795): mid = 6.00 (-600)
-                # current_value = +50 - 600 = -550
-                # signed pnl = entry_cash + (-550) <= -500 (defined loss = 500)
+                # A clean credit vertical at its $5 maximum closing debit.
                 def mock_quote(asset):
                     if asset.strike == 5800:
-                        return {"bid": 0.40, "ask": 0.60, "last": 0.50}
-                    return {"bid": 5.90, "ask": 6.10, "last": 6.00}
+                        return {"bid": 5.40, "ask": 5.60}
+                    return {"bid": .40, "ask": .60}
 
                 strategy._fetch_quote = mock_quote
                 strategy._manage_position()
+                strategy._close_all_options.assert_not_called()
+                strategy.get_datetime = Mock(return_value=datetime(2026, 11, 6, 15, 5, tzinfo=timezone.utc))
+                strategy._manage_position()
 
-                # Must not exit early with VALUATION_UNAVAILABLE; must trigger STOP_LOSS!
+                # Clean independent readings still trigger a real stop.
                 strategy._close_all_options.assert_called_once()
                 self.assertEqual(strategy._close_all_options.call_args.kwargs.get("exit_reason"), "STOP_LOSS")
 

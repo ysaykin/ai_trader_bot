@@ -59,12 +59,15 @@ from strategies.iron_condor_math import (
     select_short_strikes,
     select_short_strikes_otm_pct,
     select_short_strikes_skew,
-    signed_basket_value,
 )
 from strategies.position_ledger import LedgerLeg, PositionLedger, TERMINAL_STATES, asset_key
-from strategies.position_state import PositionState, position_attribute
+from strategies.manual_positions import MANUAL_OWNER
+from strategies.position_state import CancellationRetry, PositionState, position_attribute
+from strategies.order_sessions import EASTERN, day_session_ended, session_bounds
+from strategies.exit_safety import bounded_option_value
 
-PROFIT_BOUNDED_EXIT_REASONS = frozenset({"PROFIT_TARGET", "MFE_TRAIL_LOCK"})
+PROFIT_BOUNDED_EXIT_REASONS = frozenset({"PROFIT_TARGET", "MFE_TRAIL_LOCK", "BREAKEVEN_RATCHET"})
+PNL_EXIT_REASONS = PROFIT_BOUNDED_EXIT_REASONS | {"STOP_LOSS"}
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +204,8 @@ class SPXIronCondor(Strategy):
         "structure": "iron_condor",
         "max_concurrent_positions": 1,
         "entry_spacing_minutes": 60.0,
+        "stop_cooldown_minutes": 60.0,
+        "min_credit_to_width": 0.10,
     }
 
     _position_open = position_attribute("position_open")
@@ -249,6 +254,12 @@ class SPXIronCondor(Strategy):
         p["max_position_risk"] = _resolve_param("max_position_risk", "IC_MAX_POSITION_RISK", float)
         p["max_concurrent_positions"] = _resolve_param("max_concurrent_positions", "IC_MAX_CONCURRENT_POSITIONS", int)
         p["entry_spacing_minutes"] = _resolve_param("entry_spacing_minutes", "IC_ENTRY_SPACING_MINUTES", float)
+        p["stop_cooldown_minutes"] = _resolve_param("stop_cooldown_minutes", "IC_STOP_COOLDOWN_MINUTES", float)
+        p["min_credit_to_width"] = _resolve_param("min_credit_to_width", "IC_MIN_CREDIT_TO_WIDTH", float)
+        if not math.isfinite(p["stop_cooldown_minutes"]) or p["stop_cooldown_minutes"] < 0:
+            raise ValueError("stop cooldown must be finite and nonnegative")
+        if not math.isfinite(p["min_credit_to_width"]) or not 0 < p["min_credit_to_width"] < 1:
+            raise ValueError("minimum credit to width must be between zero and one")
         if p["max_concurrent_positions"] < 1 or not math.isfinite(p["entry_spacing_minutes"]) or p["entry_spacing_minutes"] < 0:
             raise ValueError("position capacity must be positive and entry spacing nonnegative")
         self._position_states: dict[str, PositionState] = {}
@@ -331,6 +342,7 @@ class SPXIronCondor(Strategy):
         self._pending_fees = None
         self._pending_net_pnl = None
         self._terminal_package_times: dict[str, datetime] = {}
+        self._cancellation_retries: dict[str, CancellationRetry] = {}
         self._close_reprice_seconds = max(
             float(os.getenv("IC_CLOSE_REPRICE_SECONDS", "60")), 0.0
         )
@@ -408,6 +420,7 @@ class SPXIronCondor(Strategy):
                     follower.on_trading_iteration()
                 except Exception as err:
                     logger.error("Error in attached strategy %s iteration: %s", getattr(follower, "name", follower), err)
+            self._last_iteration_completed_at = datetime.now(timezone.utc)
 
     @property
     def on_trading_iteration_count(self) -> int:
@@ -482,6 +495,10 @@ class SPXIronCondor(Strategy):
         # --- MANAGEMENT: Check existing position ---
         for position_id in tuple(self._position_states):
             self._manage_position(position_id)
+        cooldown = self._position_ledger.entry_cooldown_until(self._strategy_id())
+        if cooldown is not None and self._as_aware_utc(self._current_datetime()) < cooldown:
+            logger.info("[%s] Stop cooldown blocks new entries until %s.", self._strategy_id(), cooldown.isoformat())
+            return
         if len(self._position_ledger.open_positions(self._strategy_id())) >= int(self.parameters.get("max_concurrent_positions", 1)):
             return
 
@@ -489,7 +506,7 @@ class SPXIronCondor(Strategy):
             return
 
         if self._recovery_lock:
-            logger.error("Unmanaged broker option positions detected; new entries are locked.")
+            logger.error("[%s] Broker ownership or order recovery remains unresolved; new entries are locked.", self._strategy_id())
             return
 
         # --- DATA SUFFICIENCY CHECK FOR NEURAL STRATEGY ---
@@ -514,6 +531,9 @@ class SPXIronCondor(Strategy):
                     "[%s] Waiting for initial neural recommendation before trading.",
                     getattr(self, "name", "NeuralPure"),
                 )
+                return
+            if not getattr(self, "_active_switched_strategy", None):
+                logger.warning("[%s] Neural selection has not resolved to an active strategy; blocking entry.", self._strategy_id())
                 return
 
         # --- COOLDOWN CHECK: Prevent duplicate entry on transient network blips ---
@@ -781,6 +801,7 @@ class SPXIronCondor(Strategy):
             positions = self.get_positions()
             if positions is None or orders is None:
                 logger.warning("Position or order data unavailable; retaining position management.")
+                self._reset_exit_signal(position)
                 return
             pending_orders = any(
                 order.is_active()
@@ -788,10 +809,17 @@ class SPXIronCondor(Strategy):
             )
         except Exception as e:
             logger.warning("Could not reconcile open position; retaining management: %s", e)
+            self._reset_exit_signal(position)
+            return
+
+        if self._retire_legacy_exit(position, orders):
             return
 
         option_positions = self._filter_owned_option_positions(positions, position_id=position.position_id)
         if not option_positions:
+            if position.owned_legs and self._all_owned_legs_expired(position_id=position.position_id) and pending_orders:
+                logger.info("Position %s awaits settlement; retaining inventory and unresolved orders.", position.position_id)
+                return
             if pending_orders:
                 if position.exit_requested:
                     self._close_all_options(position_id=position.position_id,
@@ -854,7 +882,6 @@ class SPXIronCondor(Strategy):
             # Open positions remain active and will be caught by EOD close.
             return
 
-        marked_legs = []
         leg_quotes = []
         batched_quotes = None
         if getattr(self.broker, "_shared_broker_reads", None) is not None:
@@ -882,8 +909,6 @@ class SPXIronCondor(Strategy):
             })
             if midpoint is None:
                 incomplete = True
-            else:
-                marked_legs.append((signed_quantity, midpoint))
         wing_width = float(position.settings.get("wing_width", 0.0))
         quantity = max((abs(q) for _, q in position.owned_legs), default=1)
         if wing_width <= 0:
@@ -897,68 +922,17 @@ class SPXIronCondor(Strategy):
             else (abs(position.entry_credit_cash) if position.entry_credit_cash < 0 else 0.0)
         )
 
-        if incomplete:
-            # Pair legs by (right, expiration) to calculate conservative closing debit
-            # A wing can contribute positive lower-bound closing debit max(short_ask - long_bid, 0.0)
-            # ONLY when both legs of that wing have valid quotes (capped at wing width),
-            # or via spot intrinsic value when expiring and spot breaches the short strike.
-            # Otherwise retain the position with VALUATION_UNAVAILABLE without fabricating naked-option spikes.
-            wings: dict[tuple[Any, Any], dict[str, Any]] = defaultdict(dict)
-            for item in leg_quotes:
-                asset = item["asset"]
-                signed_quantity = item["signed_quantity"]
-                right = getattr(asset, "right", None)
-                expiration = getattr(asset, "expiration", None)
-                if right:
-                    right = str(right).lower()
-                key = (right, expiration)
-                if signed_quantity < 0:
-                    wings[key]["short"] = item
-                else:
-                    wings[key]["long"] = item
-
-            conservative_debit = 0.0
-            wing_width_cfg = float(position.settings.get("wing_width", 0.0))
-            for key, wing in wings.items():
-                short_item = wing.get("short")
-                long_item = wing.get("long")
-                if short_item and long_item:
-                    s_asset = short_item["asset"]
-                    l_asset = long_item["asset"]
-                    s_qty = short_item["signed_quantity"]
-                    l_qty = long_item["signed_quantity"]
-                    s_bounds = short_item["bounds"]
-                    l_bounds = long_item["bounds"]
-                    w_qty = min(abs(s_qty), abs(l_qty))
-                    s_strike = getattr(s_asset, "strike", None)
-                    l_strike = getattr(l_asset, "strike", None)
-                    w_width = abs(float(s_strike) - float(l_strike)) if (s_strike is not None and l_strike is not None) else wing_width_cfg
-
-                    if s_bounds and l_bounds:
-                        closing_debit_per_share = max(s_bounds[1] - l_bounds[0], 0.0)
-                        conservative_debit += min(w_width, closing_debit_per_share) * w_qty * 100.0
-                    elif self._is_expiring_today(position_id=position.position_id):
-                        try:
-                            spot = self._fetch_last_price(self._underlying)
-                        except Exception:
-                            spot = None
-                        if spot is not None and math.isfinite(spot) and spot > 0 and s_strike is not None:
-                            right = key[0]
-                            intrinsic = (float(s_strike) - spot) if right == "put" else (spot - float(s_strike))
-                            if intrinsic > 0:
-                                conservative_debit += min(w_width, intrinsic) * w_qty * 100.0
-
-            if position.entry_credit_cash > 0:
-                threshold = position.entry_credit_cash * (1 + position.settings["stop_loss_mult"])
-            else:
-                threshold = max(defined_loss + position.entry_credit_cash, 0.0)
-            if conservative_debit > 0 and threshold > 0 and conservative_debit >= threshold:
-                self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS")
-            else:
-                logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
-                self._publish_position_snapshot(position, pnl=0.0, status="VALUATION_UNAVAILABLE")
+        current_value = None if incomplete else bounded_option_value(
+            position.owned_legs, [item["midpoint"] for item in leg_quotes])
+        if current_value is None:
+            self._reset_exit_signal(position)
+            logger.warning("Incomplete or inconsistent option quotes; retaining contracts without P&L exits.")
+            self._publish_position_snapshot(position, pnl=position.last_pnl, status="VALUATION_UNAVAILABLE")
             return
-        current_value = signed_basket_value(marked_legs)
+        if self._defer_opening_pnl_exit(position):
+            self._reset_exit_signal(position)
+            self._publish_position_snapshot(position, pnl=position.last_pnl, status="OPENING_QUOTE_HOLD")
+            return
         pnl = credit_strategy_pnl(position.entry_credit_cash, current_value)
         if pnl is None:
             logger.warning("Incomplete option quotes; retaining contracts without P&L exits.")
@@ -989,33 +963,52 @@ class SPXIronCondor(Strategy):
             gross_pnl, roundtrip_fees, net_pnl, pt_threshold, sl_threshold,
         )
 
+        reason, threshold = None, None
         if net_pnl >= pt_threshold and net_pnl > 0:
-            logger.info("🎯 NET PROFIT TARGET HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
-            self._capture_exit_decision(position, "PROFIT_TARGET", gross_pnl, roundtrip_fees, net_pnl, pt_threshold, leg_quotes)
-            self._close_all_options(position_id=position.position_id, exit_reason="PROFIT_TARGET", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
+            reason, threshold = "PROFIT_TARGET", pt_threshold
         elif sl_threshold < 0 and net_pnl <= sl_threshold:
-            logger.warning("🛑 STOP LOSS HIT — closing iron condor (Gross $%.2f, Fees -$%.2f, Net $%.2f)", gross_pnl, roundtrip_fees, net_pnl)
-            self._capture_exit_decision(position, "STOP_LOSS", gross_pnl, roundtrip_fees, net_pnl, sl_threshold, leg_quotes)
-            self._close_all_options(position_id=position.position_id, exit_reason="STOP_LOSS", gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
+            reason, threshold = "STOP_LOSS", sl_threshold
         elif bool(position.settings.get("enable_mfe_ratchet", False)) or os.getenv("IC_MFE_RATCHET_ENABLED", "").strip().lower() in ("true", "1", "yes", "on"):
-            ratchet_reason = evaluate_mfe_ratchet(
-                position.entry_credit_cash,
-                position.mfe_pnl,
-                net_pnl,
-            )
-            if ratchet_reason is not None:
-                logger.info(
-                    "🔒 %s HIT — locking in profit/breakeven (MFE $%.2f -> Current Net $%.2f)",
-                    ratchet_reason, position.mfe_pnl, net_pnl,
-                )
-                self._capture_exit_decision(position, ratchet_reason, gross_pnl, roundtrip_fees, net_pnl,
-                                            position.mfe_pnl * DEFAULT_MFE_TRAIL_LOCK_FRACTION if ratchet_reason == "MFE_TRAIL_LOCK" else 0.0, leg_quotes)
-                self._close_all_options(position_id=position.position_id,
-                    exit_reason=ratchet_reason,
-                    gross_pnl=gross_pnl,
-                    fees=roundtrip_fees,
-                    net_pnl=net_pnl,
-                )
+            reason = evaluate_mfe_ratchet(position.entry_credit_cash, position.mfe_pnl, net_pnl)
+            threshold = position.mfe_pnl * DEFAULT_MFE_TRAIL_LOCK_FRACTION
+        if reason is None:
+            self._reset_exit_signal(position)
+            return
+        if not self._confirm_pnl_exit(position, reason, leg_quotes):
+            return
+        self._capture_exit_decision(position, reason, gross_pnl, roundtrip_fees, net_pnl, threshold, leg_quotes)
+        self._close_all_options(position_id=position.position_id, exit_reason=reason,
+                                gross_pnl=gross_pnl, fees=roundtrip_fees, net_pnl=net_pnl)
+
+    @staticmethod
+    def _reset_exit_signal(position: PositionState) -> None:
+        position.exit_signal_reason = None
+        position.exit_signal_at = None
+        position.exit_signal_quotes = None
+
+    def _defer_opening_pnl_exit(self, position: PositionState) -> bool:
+        if self._is_expiring_today(position_id=position.position_id):
+            return False
+        now = self._as_aware_utc(self._current_datetime())
+        bounds = session_bounds(now.astimezone(EASTERN).date())
+        return bounds is not None and bounds[0] <= now < bounds[0] + timedelta(minutes=15)
+
+    def _confirm_pnl_exit(self, position: PositionState, reason: str, quotes: list[dict]) -> bool:
+        now = self._as_aware_utc(self._current_datetime())
+        stamps = tuple(item["quote_time"] for item in quotes)
+        # Provider timestamps identify a cached reading. Without timestamps,
+        # require a new management read at least 30 seconds later.
+        identity = stamps if any(stamps) else (now.isoformat(),)
+        elapsed = (now - position.exit_signal_at).total_seconds() if position.exit_signal_at else None
+        if position.exit_signal_reason == reason and elapsed is not None and 30 <= elapsed <= 600:
+            if identity != position.exit_signal_quotes:
+                return True
+            return False
+        position.exit_signal_reason = reason
+        position.exit_signal_at = now
+        position.exit_signal_quotes = identity
+        logger.info("Position %s awaits a second valid %s reading.", position.position_id, reason)
+        return False
 
     def _record_exit_log(
         self,
@@ -1263,11 +1256,11 @@ class SPXIronCondor(Strategy):
         self._last_action = "HOLD"
         return "HOLD"
 
-    def _apply_neural_strategy_switch(self, target_strategy_name: str) -> None:
+    def _apply_neural_strategy_switch(self, target_strategy_name: str) -> bool:
         """Dynamically adapt parameters to match the variant selected by the neural network
         based on real-time market regime, volatility, and cross-strategy signals."""
         if self.parameters.get("management_only", False) or self._position_ledger.is_panic_halted():
-            return
+            return False
         from strategies.incubator import get_incubator_specs
         specs = {s["strategy_name"]: s for s in get_incubator_specs(include_neural=False)}
         target_spec = specs.get(target_strategy_name)
@@ -1275,28 +1268,76 @@ class SPXIronCondor(Strategy):
             prefix = target_strategy_name.split("_")[0] + "_" + target_strategy_name.split("_")[1] if "_" in target_strategy_name else target_strategy_name
             target_spec = next((s for name, s in specs.items() if name.startswith(prefix)), None)
 
-        if target_spec is not None:
-            old_name = getattr(self, "_active_switched_strategy", "Default")
-            self._active_switched_strategy = target_spec.get("strategy_name", target_strategy_name)
-            self.parameters["short_delta"] = float(target_spec.get("short_delta", self.parameters["short_delta"]))
-            self.parameters["wing_width"] = float(target_spec.get("wing_width", self.parameters["wing_width"]))
-            self.parameters["dte"] = int(target_spec.get("dte", self.parameters["dte"]))
-            self.parameters["stop_loss_mult"] = float(target_spec.get("stop_loss_mult", self.parameters["stop_loss_mult"]))
-            if "structure" in target_spec:
-                self.structure = str(target_spec["structure"]).lower()
-                self.parameters["structure"] = self.structure
-            entry_time_val = target_spec.get("entry_time") or target_spec.get("run_times") or target_spec.get("entry_times")
-            if entry_time_val:
-                self.set_run_times(entry_time_val)
-            logger.info(
-                "[%s] Neural network dynamically switched strategy: %s -> %s (DTE=%d, Δ=%.2f, Wing=$%.1f)",
-                getattr(self, "name", "IC_V22_NEURAL_PURE"),
-                old_name,
-                self._active_switched_strategy,
-                self.parameters["dte"],
-                self.parameters["short_delta"],
-                self.parameters["wing_width"],
+        if target_spec is None:
+            self._active_switched_strategy = None
+            logger.warning("Neural picker selected unavailable strategy %s; blocking entry.", target_strategy_name)
+            return False
+
+        old_name = getattr(self, "_active_switched_strategy", "Default")
+        self._active_switched_strategy = target_spec.get("strategy_name", target_strategy_name)
+        self.parameters["short_delta"] = float(target_spec.get("short_delta", self.parameters["short_delta"]))
+        self.parameters["wing_width"] = float(target_spec.get("wing_width", self.parameters["wing_width"]))
+        self.parameters["dte"] = int(target_spec.get("dte", self.parameters["dte"]))
+        self.parameters["stop_loss_mult"] = float(target_spec.get("stop_loss_mult", self.parameters["stop_loss_mult"]))
+        self.structure = str(target_spec.get("structure", "iron_condor")).lower()
+        self.parameters["structure"] = self.structure
+        for key in (
+            "roll_dte", "otm_pct", "otm_put_pct", "otm_call_pct",
+            "put_delta", "call_delta", "min_trend_sd", "min_rv_ratio",
+            "orb_threshold_pct", "enable_mfe_ratchet",
+        ):
+            self.parameters.pop(key, None)
+            if key in target_spec:
+                self.parameters[key] = target_spec[key]
+        for flag in (
+            "is_testing_variant", "is_strategybro_variant", "is_trendflow_variant",
+            "is_skew_dynamic_variant", "is_vol_crush_variant", "is_orb_dynamic_variant",
+        ):
+            enabled = bool(target_spec.get(flag, False))
+            self.parameters[flag] = enabled
+            setattr(self, flag, enabled)
+        entry_time_val = target_spec.get("entry_time") or target_spec.get("run_times") or target_spec.get("entry_times")
+        if entry_time_val:
+            self.set_run_times(entry_time_val)
+        logger.info(
+            "[%s] Neural network dynamically switched strategy: %s -> %s (DTE=%d, Δ=%.2f, Wing=$%.1f)",
+            getattr(self, "name", "IC_V22_NEURAL_PURE"),
+            old_name,
+            self._active_switched_strategy,
+            self.parameters["dte"],
+            self.parameters["short_delta"],
+            self.parameters["wing_width"],
+        )
+        return True
+
+    def _cancel_managed_order(self, order: Any) -> None:
+        """Space cancellation attempts while reconciliation retains the reservation."""
+        identifier = str(order.identifier)
+        raw = getattr(order, "_raw", None)
+        # LumiBot maps Tradier's pending and open statuses to the same value.
+        status = (raw.get("status") if isinstance(raw, dict) else None) or getattr(order, "status", "")
+        status = str(status or "").lower()
+        now = self._as_aware_utc(self._current_datetime())
+        retry = self._cancellation_retries.get(identifier)
+        if retry is not None and retry.status == status and now < retry.retry_at:
+            return
+        failures = retry.failures if retry is not None and retry.status == status else 0
+        try:
+            self.cancel_order(order)
+        except Exception as error:
+            failures += 1
+            delay = min(60 * 2 ** min(failures - 1, 4), 900)
+            logger.error(
+                "[%s] Could not cancel broker order %s (status=%s); retry in %ds; "
+                "retaining inventory and order reservation: %s",
+                self._strategy_id(), identifier, status, delay, error,
             )
+        else:
+            failures = 0
+            delay = 60
+        self._cancellation_retries[identifier] = CancellationRetry(
+            status, failures, now + timedelta(seconds=delay),
+        )
 
     @fresh_broker_reads()
     def _close_all_options(
@@ -1313,17 +1354,28 @@ class SPXIronCondor(Strategy):
                 self._close_all_options(exit_reason, gross_pnl, fees, net_pnl, position_id=pid)
             return
         position = self._runtime(position_id)
+        if self._all_owned_legs_expired(position_id=position.position_id):
+            # Calendar expiry prevents further execution, but cannot certify
+            # settlement or release unresolved broker order reservations.
+            logger.info("Position %s awaits settlement; no further close attempts after expiry.", position.position_id)
+            return
+        reason = exit_reason or position.pending_exit_reason
+        if reason in PNL_EXIT_REASONS and self._defer_opening_pnl_exit(position):
+            self._reset_exit_signal(position)
+            logger.info("Position %s defers P&L closing during the opening quote hold.", position.position_id)
+            return
+        prior_reason = position.pending_exit_reason
         if position.exit_requested and position.pending_exit_reason:
-            if (
-                exit_reason
-                and exit_reason not in PROFIT_BOUNDED_EXIT_REASONS
-                and position.pending_exit_reason in PROFIT_BOUNDED_EXIT_REASONS
-            ):
+            if exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"} or (
+                    exit_reason and exit_reason not in PROFIT_BOUNDED_EXIT_REASONS
+                    and position.pending_exit_reason in PROFIT_BOUNDED_EXIT_REASONS):
                 position.pending_exit_reason = exit_reason
         else:
             position.pending_exit_reason = exit_reason or position.pending_exit_reason or "MANUAL"
         position.exit_requested = True
         position.position_open = True
+        if position.pending_exit_reason == "STOP_LOSS" and prior_reason != "STOP_LOSS":
+            self._record_stop_cooldown(position)
         self._persist_position(position)
         if gross_pnl is not None:
             position.pending_gross_pnl = gross_pnl
@@ -1379,7 +1431,7 @@ class SPXIronCondor(Strategy):
                             except Exception:
                                 pass
                         if parent.is_active():
-                            self.cancel_order(parent)
+                            self._cancel_managed_order(parent)
                             has_active = True
                         elif str(getattr(parent, "status", "")).lower() in TERMINAL_STATES:
                             self._reconcile_inflight_orders(broker_orders)
@@ -1410,7 +1462,7 @@ class SPXIronCondor(Strategy):
             pending_entries = [order for order in position.entry_orders if order.is_active()]
             if pending_entries:
                 for order in pending_entries:
-                    self.cancel_order(order)
+                    self._cancel_managed_order(order)
                 return
             active_close = next(
                 (
@@ -1436,7 +1488,7 @@ class SPXIronCondor(Strategy):
                 age = (now - created).total_seconds()
                 if parent is not None and parent.is_active():
                     if age >= self._close_reprice_seconds:
-                        self.cancel_order(parent)
+                        self._cancel_managed_order(parent)
                     return
                 # Absence and timeouts cannot prove that a submission was rejected.
                 # Reconciliation must observe a terminal status before replacement.
@@ -1501,9 +1553,12 @@ class SPXIronCondor(Strategy):
             if price == 0:
                 price = 0.01
             if price is None or price < 0:
+                if position.pending_exit_reason in PNL_EXIT_REASONS:
+                    logger.warning("Validated quotes are required to execute a P&L exit; retaining intent.")
+                    return
                 urgent = (
                     self._is_expiring_today(position_id=position.position_id)
-                    or position.pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW", "STOP_LOSS"}
+                    or position.pending_exit_reason in {"EOD_CLOSE", "FLATTEN_NOW"}
                 )
                 if not urgent:
                     logger.warning("Complete quotes are required before closing the package.")
@@ -1545,6 +1600,40 @@ class SPXIronCondor(Strategy):
     # Helpers
     # ------------------------------------------------------------------ #
 
+    def _retire_legacy_exit(self, position: PositionState, orders: list) -> bool:
+        """Retire disabled exits without abandoning submitted broker orders."""
+        if position.pending_exit_reason not in {"ABRUPT_CLOSE", "BREAKEVEN_RATCHET"} or position.position_id is None:
+            return False
+        baskets = self._position_baskets(position)
+        closes = [basket for basket in baskets if basket.intent == "close"]
+        created = closes[-1].created_at if closes else self._position_ledger.get_position(position.position_id).created_at
+        if position.pending_exit_reason == "ABRUPT_CLOSE":
+            try:
+                requested = self._as_aware_utc(datetime.fromisoformat(str(created)))
+            except (TypeError, ValueError):
+                logger.warning("Cannot date legacy abrupt intent for %s; retaining its reservation.", position.position_id)
+                return True
+            bounds = session_bounds(requested.astimezone(EASTERN).date())
+            if bounds is not None and self._as_aware_utc(self._current_datetime()) < bounds[1]:
+                return False
+        pending = [basket for basket in closes if self._position_ledger.is_inflight(basket)]
+        if pending:
+            for basket in pending:
+                parent = next((order for order in [*orders, *position.closing_orders]
+                               if basket.broker_parent_id and str(getattr(order, "identifier", "")) == str(basket.broker_parent_id)), None)
+                if parent is not None and parent.is_active():
+                    self._cancel_managed_order(parent)
+            # Only terminal broker evidence releases a submitted reservation.
+            return True
+        self._position_ledger.clear_exit_reason(position.position_id)
+        position.pending_exit_reason = None
+        position.exit_requested = False
+        position.pending_gross_pnl = position.pending_fees = position.pending_net_pnl = None
+        position.pending_decision = None
+        self._reset_exit_signal(position)
+        logger.info("Retired legacy exit intent for position %s.", position.position_id)
+        return False
+
     @staticmethod
     def _quote_timestamp(quote: Any) -> str | None:
         try:
@@ -1556,8 +1645,13 @@ class SPXIronCondor(Strategy):
             return None
         return None
 
+    def _record_stop_cooldown(self, position: PositionState) -> None:
+        minutes = float(position.settings.get("stop_cooldown_minutes", self.parameters.get("stop_cooldown_minutes", 60)))
+        self._position_ledger.block_entries_until(
+            self._strategy_id(), self._as_aware_utc(self._current_datetime()) + timedelta(minutes=minutes))
+
     def _profit_close_debit_ceiling(self, position: PositionState, legs: list[tuple[Asset, int]]) -> float | None:
-        """Max per-unit debit that keeps realized net P&L >= 0 after round-trip fees."""
+        """Preserve the profit threshold after round-trip fees and limit rounding."""
         credit = position.entry_credit_cash
         if credit is None or not math.isfinite(credit) or credit <= 0:
             return None
@@ -1565,7 +1659,12 @@ class SPXIronCondor(Strategy):
         if qty <= 0:
             return None
         fees = 2 * option_execution_fees((q for _, q in legs), option_fee_per_contract())
-        ceiling = (credit - fees) / (100.0 * qty)
+        required_profit = 0.0
+        if position.pending_exit_reason == "PROFIT_TARGET":
+            required_profit = credit * float(position.settings["profit_target"])
+        elif position.pending_exit_reason == "MFE_TRAIL_LOCK":
+            required_profit = position.mfe_pnl * DEFAULT_MFE_TRAIL_LOCK_FRACTION
+        ceiling = (credit - fees - required_profit) / (100.0 * qty)
         return math.floor(ceiling * 100) / 100 if ceiling > 0 else None
 
     def _withdraw_discretionary_exit(self, position: PositionState, *, market_debit: float, ceiling: float | None) -> None:
@@ -1577,6 +1676,7 @@ class SPXIronCondor(Strategy):
         position.pending_exit_reason = None
         position.pending_gross_pnl = position.pending_fees = position.pending_net_pnl = None
         position.pending_decision = None
+        self._reset_exit_signal(position)
 
     def _capture_exit_decision(self, position: PositionState, reason: str, gross: float, fees: float,
                                net: float, threshold: float | None, leg_quotes: list[dict[str, Any]]) -> None:
@@ -1727,7 +1827,7 @@ class SPXIronCondor(Strategy):
 
     def _management_settings(self) -> dict[str, Any]:
         keys = ("symbol", "dte", "roll_dte", "wing_width", "quantity", "profit_target",
-                "stop_loss_mult", "enable_mfe_ratchet")
+                "stop_loss_mult", "enable_mfe_ratchet", "stop_cooldown_minutes")
         return {key: self.parameters[key] for key in keys if key in self.parameters}
 
     def _persist_position(self, position: PositionState) -> None:
@@ -1773,6 +1873,8 @@ class SPXIronCondor(Strategy):
             )
             position.current_trade_id = record.trade_id
             position.mfe_pnl = record.mfe_pnl
+            if position.entry_credit_cash is not None and position.entry_credit_cash > 0 and position.mfe_pnl > position.entry_credit_cash:
+                position.mfe_pnl = 0.0
             position.mae_pnl = record.mae_pnl
             position.pending_exit_reason = record.exit_reason or position.pending_exit_reason
             position.exit_requested = bool(position.pending_exit_reason)
@@ -1957,6 +2059,22 @@ class SPXIronCondor(Strategy):
             right=decoded["right"],
         )
 
+    @fresh_broker_reads()
+    def _reconcile_session_orders(self) -> None:
+        """Resolve reservations while the executor waits outside strategy ticks."""
+        managers = (self, *getattr(self, "_attached_strategies", ()))
+        if not any(self._position_ledger.is_inflight(b) for b in self._position_ledger.open_baskets()):
+            return
+        try:
+            with self._position_ledger.execution_gate():
+                positions, orders = self.get_positions(), self.get_orders()
+                if positions is None or orders is None:
+                    return
+                for manager in managers:
+                    manager._reconcile_inflight_orders(orders, positions)
+        except Exception as error:
+            logger.warning("Session order reconciliation unavailable; reservations retained: %s", error)
+
     def _reconcile_broker_state(self) -> bool:
         """Reconcile broker visibility without assigning account-net ownership."""
         try:
@@ -2000,6 +2118,15 @@ class SPXIronCondor(Strategy):
                     )
         self._hydrate_from_ledger()
         ledger_totals = self._position_ledger.all_owned_quantities()
+        inflight_ids = {
+            str(basket.broker_parent_id)
+            for basket in self._position_ledger.open_baskets(self._strategy_id())
+            if self._position_ledger.is_inflight(basket) and basket.broker_parent_id
+        }
+        self._cancellation_retries = {
+            identifier: retry for identifier, retry in self._cancellation_retries.items()
+            if identifier in inflight_ids
+        }
         inflight = any(
             self._position_ledger.is_inflight(basket)
             for basket in self._position_ledger.open_baskets()
@@ -2077,6 +2204,14 @@ class SPXIronCondor(Strategy):
             "failed": "failed",
         }
         ambiguous = False
+        broker_quantities: dict[str, int] | None = None
+        if positions is not None:
+            broker_quantities = {}
+            for position in positions:
+                asset = getattr(position, "asset", None)
+                if getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
+                    key = asset_key(asset)
+                    broker_quantities[key] = broker_quantities.get(key, 0) + int(position.quantity)
         today = self.get_datetime().date()
         stale_ids = {
             basket.package_id
@@ -2156,6 +2291,17 @@ class SPXIronCondor(Strategy):
                     basket.package_id, parent.child_orders
                 )
                 basket = self._position_ledger.get_basket(basket.package_id)
+            # DAY orders must stop working at the strategy's regular close.
+            # Reconciliation also catches a missed close after a restart. A
+            # cancellation request never releases ownership or reserved risk.
+            market = getattr(broker, "market", None) or "NYSE"
+            if (parent is not None and str(getattr(parent, "identifier", None) or getattr(parent, "id", None)) == str(basket.broker_parent_id)
+                    and (basket.duration or "").lower() == "day"
+                    and day_session_ended(basket.created_at, self._current_datetime(), market=market)):
+                raw = getattr(parent, "_raw", None)
+                duration = (raw.get("duration") if isinstance(raw, dict) else None) or getattr(parent, "time_in_force", None) or basket.duration
+                if str(duration).lower() == "day" and parent.is_active():
+                    self._cancel_managed_order(parent)
             leg_statuses: list[str] = []
             complete_evidence = True
             current_children = {str(getattr(child, "identifier", "")): child for child in
@@ -2183,6 +2329,7 @@ class SPXIronCondor(Strategy):
                     complete_evidence = False
                 else:
                     broker_filled, fill_price = evidence
+                    self._retain_order_evidence(broker_order, leg, parent)
                     already_filled = abs(int(leg["filled_signed_quantity"]))
                     if broker_filled > already_filled:
                         sign = 1 if int(leg["requested_signed_quantity"]) > 0 else -1
@@ -2236,6 +2383,25 @@ class SPXIronCondor(Strategy):
                     elif resolved.state == "open" and resolved.intent == "add":
                         self._record_filled_addition(resolved)
                 continue
+            # The recent-order list drops prior sessions. DAY expiry plus a
+            # matching fresh inventory snapshot resolves the unfilled remainder
+            # even when no historical parent/leg identity can be recovered.
+            raw = getattr(parent, "_raw", None)
+            duration = ((raw.get("duration") if isinstance(raw, dict) else None)
+                        or getattr(parent, "time_in_force", None) or refreshed.duration)
+            if (broker_quantities is not None and str(duration or "").lower() == "day"
+                    and (parent_status in terminal_map or parent is None and not any(
+                        str(getattr(order, "status", "")).lower() in {
+                            "open", "pending", "submitted", "partially_filled", "partial",
+                            "pending_cancel", "pending_replace", "held", "accepted", "new"}
+                        for order in orders))):
+                resolved = self._position_ledger.expire_day_order(
+                    refreshed.package_id, now=self._current_datetime(),
+                    broker_quantities=broker_quantities, market=getattr(broker, "market", None) or "NYSE")
+                if resolved is not None:
+                    logger.info("[%s] DAY session expired for %s; released unfilled reservation, retained fills",
+                                self._strategy_id(), resolved.package_id)
+                    continue
             known_reserved_order = (
                 parent_refreshed and complete_evidence
                 and len(leg_statuses) == len(refreshed.legs)
@@ -2335,6 +2501,16 @@ class SPXIronCondor(Strategy):
         with self._position_ledger.execution_gate():
             if opening and self._position_ledger.is_panic_halted():
                 raise RuntimeError("Atomic package rejected: panic halt is active")
+            if opening:
+                cooldown = self._position_ledger.entry_cooldown_until(self._strategy_id())
+                if cooldown is not None and self._as_aware_utc(self._current_datetime()) < cooldown:
+                    raise RuntimeError("Atomic package rejected: stop cooldown is active")
+                settings = self._runtime(position_id).settings if intent == "add" else self.parameters
+                width = float(settings["wing_width"])
+                minimum = max(width * float(self.parameters.get("min_credit_to_width", .10)),
+                              float(self.parameters.get("min_credit") or os.getenv("IC_MIN_CREDIT") or 0))
+                if order_type != "credit" or not math.isfinite(price) or price < minimum:
+                    raise ValueError(f"Atomic package credit must be at least {minimum:.2f}")
             capacity = int(self.parameters.get("max_concurrent_positions", 1))
             cap = float(self.parameters.get("max_position_risk", 5000.0))
             global_cap = self.parameters.get("max_portfolio_risk") or os.getenv("IC_MAX_PORTFOLIO_RISK")
@@ -2463,7 +2639,54 @@ class SPXIronCondor(Strategy):
         target = getattr(self, "_strategy_lookup", {}).get(owner, self)
         target._record_filled_order(order, price, quantity, partial=True)
 
+    def _retain_order_evidence(self, order: Any, leg: dict[str, Any], parent: Any = None) -> None:
+        """Capture reporting evidence using only an existing provider response."""
+        try:
+            from strategies.runtime_records import RecordScope
+            broker = getattr(self, "broker", None)
+            account = getattr(broker, "_tradier_account_number", None)
+            paper = getattr(broker, "_tradier_paper", None)
+            if not isinstance(account, str) or not account or not isinstance(paper, bool):
+                return
+            scope = RecordScope("paper" if paper else "live", "tradier", account)
+            parent_response = getattr(parent, "_raw", None)
+            if parent is None:
+                parent_id = leg.get("broker_parent_id")
+                # SDK get_order reads tracked objects; it does not poll the broker.
+                get_cached_order = getattr(broker, "get_order", None)
+                cached_parent = get_cached_order(parent_id) if parent_id and callable(get_cached_order) else None
+                parent_response = getattr(cached_parent, "_raw", None)
+                if not isinstance(parent_response, dict) or not parent_response.get("leg"):
+                    reads = getattr(broker, "_shared_broker_reads", None)
+                    if reads is not None and reads.account == account and reads.sandbox is paper:
+                        snapshot = reads.snapshot("orders").get("data")
+                        orders = snapshot.get("orders") if isinstance(snapshot, dict) else None
+                        rows = orders.get("order", []) if isinstance(orders, dict) else []
+                        rows = [rows] if isinstance(rows, dict) else rows
+                        rows = rows if isinstance(rows, list) else []
+                        matches = [row for row in rows if isinstance(row, dict) and str(row.get("id")) == str(parent_id)]
+                        parent_response = matches[0] if len(matches) == 1 else None
+            self._position_ledger.capture_order_evidence(
+                order, leg, scope=scope, parent_response=parent_response,
+            )
+        except Exception as error:
+            logger.warning("Could not retain reporting evidence; fill ownership remains recorded: %s", error)
+
+    def _journal_evidence(self, basket, event_id: str, trade_id: str) -> dict:
+        try:
+            metadata = self._position_ledger.attach_package_evidence(basket.package_id,event_id,trade_id)
+            metadata["realization_legs"] = metadata.pop("legs")
+            metadata["scope"] = self._position_ledger.record_scope
+            return metadata
+        except Exception as error:
+            logger.warning("Could not attach reporting evidence: %s", error)
+            return {"fees_complete":False}
+
     def _record_filled_order(self, order, price: float, quantity: int, *, partial: bool = False) -> None:
+        # A multileg parent's aggregate price/quantity is not a contract fill.
+        # Child callbacks and broker reconciliation establish inventory.
+        if getattr(order, "order_class", None) == "multileg":
+            return
         local_id = getattr(order, "_ledger_order_id", None)
         broker_id = getattr(order, "identifier", None) or getattr(order, "id", None)
         parent_id = getattr(order, "parent_identifier", None) or getattr(order, "parent_id", None)
@@ -2478,6 +2701,10 @@ class SPXIronCondor(Strategy):
         )
         if resolved is None:
             logger.warning("Ignoring fill without broker child details; no ledger leg matched.")
+            return
+        if self._position_ledger.get_basket(str(resolved["package_id"])).strategy_id == MANUAL_OWNER:
+            # Manual executions are imported explicitly and never enter a host's
+            # strategy journal or position-management state through SDK replay.
             return
         sign = 1 if "buy" in side else -1
 
@@ -2513,6 +2740,7 @@ class SPXIronCondor(Strategy):
         if fill_quantity <= 0:
             return
 
+        self._retain_order_evidence(order, resolved)
         basket = self._position_ledger.record_fill(
             str(resolved["order_id"]),
             sign * fill_quantity,
@@ -2553,12 +2781,15 @@ class SPXIronCondor(Strategy):
             mfe = max(float(getattr(position, "mfe_pnl", 0.0)), actual_net)
             mae = min(float(getattr(position, "mae_pnl", 0.0)), actual_net)
             reason = position.pending_exit_reason or "MANUAL"
+            if reason == "STOP_LOSS":
+                self._record_stop_cooldown(position)
 
             remaining = self._position_ledger.quantities_after(basket.package_id)
             remaining_qty = max((abs(value) for value in remaining.values()), default=0)
             if remaining_qty > 0:
                 record_trade_adjustment(
                     event_id=f"{basket.package_id}:REALIZATION",
+                    **self._journal_evidence(basket, f"{basket.package_id}:REALIZATION", trade_id),
                     trade_id=trade_id,
                     strategy_name=self._strategy_id(),
                     opening_credit_cash=realized_opening,
@@ -2579,6 +2810,7 @@ class SPXIronCondor(Strategy):
 
             record_trade_exit(
                 event_id=f"{basket.package_id}:REALIZATION",
+                **self._journal_evidence(basket, f"{basket.package_id}:REALIZATION", trade_id),
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
                 exit_reason=reason,
@@ -2623,6 +2855,7 @@ class SPXIronCondor(Strategy):
             quantity = max(abs(int(leg["filled_signed_quantity"])) for leg in basket.legs)
             position.current_trade_id = record_trade_entry(
                 event_id=f"{basket.package_id}:ENTRY",
+                **self._journal_evidence(basket, f"{basket.package_id}:ENTRY", position.current_trade_id or position.position_id),
                 trade_id=position.current_trade_id or position.position_id,
                 strategy_name=self._strategy_id(),
                 symbol=self.parameters["symbol"],
@@ -2660,6 +2893,7 @@ class SPXIronCondor(Strategy):
             )
             record_trade_addition(
                 event_id=f"{basket.package_id}:ADDITION",
+                **self._journal_evidence(basket, f"{basket.package_id}:ADDITION", trade_id),
                 trade_id=trade_id,
                 strategy_name=self._strategy_id(),
                 opening_credit_cash=float(basket.opening_cash_flow or 0.0),
@@ -2692,7 +2926,7 @@ class SPXIronCondor(Strategy):
             (signed_quantity, self._quote_midpoint(quote))
             for (_, signed_quantity), quote in zip(legs, quotes)
         ]
-        value = signed_basket_value(marks)
+        value = bounded_option_value(legs, [mark for _, mark in marks])
         if value is None:
             return None
         quantity = quantities.pop()
@@ -2703,9 +2937,9 @@ class SPXIronCondor(Strategy):
             if unit_value >= 0:
                 return None
             credit = -unit_value
-            # In paper / sandbox mode, discount the limit credit slightly (e.g. 10%)
-            # so Tradier Sandbox's 15-minute delayed matching simulator crosses and executes the order.
-            discount_pct_str = os.getenv("SANDBOX_CREDIT_DISCOUNT_PCT", "0.10" if os.getenv("TRADIER_PAPER", "true").lower() in ("true", "1") else "0.0")
+            # Keep the quoted credit by default, including in paper mode.
+            # An explicit simulator discount remains available for experiments.
+            discount_pct_str = os.getenv("SANDBOX_CREDIT_DISCOUNT_PCT", "0.0")
             try:
                 discount_pct = float(discount_pct_str)
             except ValueError:
@@ -2778,7 +3012,12 @@ class SPXIronCondor(Strategy):
             return None
         if not (math.isfinite(bid_value) and math.isfinite(ask_value)):
             return None
-        if bid_value < 0 or ask_value < bid_value:
+        if bid_value < 0 or ask_value < bid_value or ask_value <= 0:
+            return None
+        midpoint = (bid_value + ask_value) / 2
+        # Reject both large absolute gaps and noisy relative spreads. Cheap
+        # options retain a 25-cent allowance; no leg may have a gap above $1.
+        if ask_value - bid_value > min(1.0, max(.25, midpoint * .5)) + 1e-9:
             return None
         return bid_value, ask_value
 
@@ -2805,6 +3044,7 @@ class SPXIronCondor(Strategy):
         position.pending_net_pnl = None
         position.pending_decision = None
         position.mfe_pnl = 0.0
+        self._reset_exit_signal(position)
         position.mae_pnl = 0.0
         position.last_pnl = 0.0
         self._publish_position_snapshot(position, pnl=0.0, status="FLAT")
@@ -3238,7 +3478,7 @@ class SPXIronCondor(Strategy):
             if position.position_open and should_close:
                 exit_reason = (
                     "EOD_CLOSE"
-                    if position.pending_exit_reason in PROFIT_BOUNDED_EXIT_REASONS
+                    if position.pending_exit_reason in PNL_EXIT_REASONS
                     else (position.pending_exit_reason or "EOD_CLOSE")
                 )
                 self._close_all_options(
@@ -3250,7 +3490,8 @@ class SPXIronCondor(Strategy):
                 logger.error("Error in attached strategy %s before_market_closes: %s", getattr(follower, "name", follower), err)
 
     def after_market_closes(self) -> None:
-        """Record terminal basket marks and relabel the completed session."""
+        """Cancel remaining DAY orders, reconcile and record the session."""
+        self._reconcile_broker_state()
         self._record_trajectory("HOLD", session_end=True)
         for follower in getattr(self, "_attached_strategies", ()):
             try:
@@ -3260,15 +3501,9 @@ class SPXIronCondor(Strategy):
 
     def on_abrupt_closing(self):
         """Handle unexpected shutdowns gracefully."""
-        logger.warning("Abrupt shutdown detected. Attempting to close positions.")
-        if self._position_open:
-            pending = getattr(self, "_pending_exit_reason", None)
-            exit_reason = (
-                "ABRUPT_CLOSE"
-                if pending in PROFIT_BOUNDED_EXIT_REASONS
-                else (pending or "ABRUPT_CLOSE")
-            )
-            self._close_all_options(exit_reason=exit_reason)
+        logger.warning("Abrupt shutdown detected. Retaining positions and existing exit intents for recovery.")
+        for position in getattr(self, "_position_states", {}).values():
+            self._persist_position(position)
         for follower in getattr(self, "_attached_strategies", ()):
             try:
                 follower.on_abrupt_closing()

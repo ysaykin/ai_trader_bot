@@ -3,7 +3,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+
+
+@dataclass(frozen=True)
+class CancellationRetry:
+    status: str
+    failures: int
+    retry_at: datetime
 
 
 @dataclass
@@ -27,6 +35,9 @@ class PositionState:
     pending_fees: float | None = None
     pending_net_pnl: float | None = None
     pending_decision: dict[str, Any] | None = None
+    exit_signal_reason: str | None = None
+    exit_signal_at: datetime | None = None
+    exit_signal_quotes: tuple | None = None
 
 
 def position_attribute(name: str) -> property:

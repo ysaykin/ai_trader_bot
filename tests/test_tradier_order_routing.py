@@ -238,6 +238,140 @@ class TradierOrderRoutingTests(unittest.TestCase):
         self.assertEqual(self.ledger.get_basket(basket.package_id).state, "open")
         self.assertEqual(self.ledger.get_basket(basket.package_id).opening_cash_flow, 200.0)
 
+    def test_provider_parent_child_evidence_survives_cumulative_replay(self) -> None:
+        from trade_history_fixtures import SCOPE
+        from strategies.position_ledger import PositionLedger
+        self.ledger=PositionLedger(":memory:",scope=SCOPE)
+        self.addCleanup(self.ledger.close)
+        self.broker._tradier_account_number=SCOPE.account_id
+        self.broker._tradier_paper=True
+        host=self.make_strategy("EvidenceHost")
+        host.parameters["symbol"]="XSP"
+        [parent]=host._submit_package(self.option_legs(quantity=2),intent="open",order_type="credit",price=2.0)
+        [basket]=self.ledger.open_baskets(host.name)
+        row=self.polling_row(str(parent.identifier),host._broker_routing_tag())
+        row.update(quantity=2,status="partially_filled")
+        for leg,price in zip(row["leg"],(.25,1.25,1.25,.25)):
+            leg.update(quantity=2,status="partially_filled",exec_quantity=1,avg_fill_price=price)
+        with patch.object(self.broker,"_pull_broker_order",return_value=row):
+            host._reconcile_inflight_orders([parent])
+            quantities=self.ledger.all_owned_quantities()
+            host._reconcile_inflight_orders([parent])
+            self.assertEqual(self.ledger.all_owned_quantities(),quantities)
+        row["status"]="filled"
+        for leg in row["leg"]:
+            leg.update(status="filled",exec_quantity=2)
+        with patch.object(self.broker,"_pull_broker_order",return_value=row), patch("trade_logger.record_trade_entry",return_value=basket.position_id) as journal:
+            host._reconcile_inflight_orders([parent])
+        links=self.ledger.realization_evidence(f"{basket.package_id}:ENTRY")
+        self.assertEqual(len(links),4)
+        from strategies.runtime_records import classify_trade
+        from tools.reconcile_trade_history import load_ledger_execution_evidence_from_connection
+        data=journal.call_args.kwargs
+        event=dict(event="ENTRY",event_id=data["event_id"],trade_id=data["trade_id"],
+                   position_id=data["position_id"],package_id=data["package_id"],scope=SCOPE.to_dict(),
+                   symbol=data["symbol"],expiry=data["expiry"],quantity=data["quantity"],
+                   strikes=data["strikes"],legs=data["realization_legs"],evidence_refs=data["evidence_refs"])
+        attributed=classify_trade([event],load_ledger_execution_evidence_from_connection(self.ledger),expected_scope=SCOPE,as_of_date="2026-11-06")
+        self.assertEqual(attributed["partition"],"accepted",attributed)
+        self.assertEqual(attributed["reconciliation_status"],"FEE_INCOMPLETE")
+        self.assertEqual({abs(link["allocated_signed_quantity"]) for link in links},{2})
+        for link in links:
+            payload=self.ledger.get_broker_evidence(link["evidence_id"])["payload"]
+            self.assertEqual(payload["parent_response"]["id"],str(parent.identifier))
+            self.assertEqual(payload["raw_response"]["exec_quantity"],2)
+        host._record_filled_order(self.broker._parse_broker_order_dict(row,host.name).child_orders[0],.25,2)
+        self.assertEqual(len(self.ledger.realization_evidence(f"{basket.package_id}:ENTRY")),4)
+        self.assertEqual(sorted(self.ledger.all_owned_quantities().values()),[-2,-2,2,2])
+
+    def test_callback_first_retains_observed_parent_without_polling(self) -> None:
+        from trade_history_fixtures import SCOPE
+        from strategies.position_ledger import PositionLedger
+        from strategies.runtime_records import classify_trade
+        from tools.reconcile_trade_history import load_ledger_execution_evidence_from_connection
+
+        for source in ('tracked', 'snapshot'):
+            with self.subTest(source=source):
+                self.ledger = PositionLedger(':memory:', scope=SCOPE)
+                self.addCleanup(self.ledger.close)
+                self.broker._tradier_account_number = SCOPE.account_id
+                self.broker._tradier_paper = True
+                host = self.make_strategy('CallbackEvidence')
+                host.parameters['symbol'] = 'XSP'
+                [submitted] = host._submit_package(self.option_legs(quantity=2), intent='open', order_type='credit', price=2.)
+                [basket] = self.ledger.open_baskets(host.name)
+                row = self.polling_row(str(submitted.identifier), host._broker_routing_tag())
+                row.update(quantity=2, status='filled')
+                for leg, price in zip(row['leg'], (.25, 1.25, 1.25, .25)):
+                    leg.update(quantity=2, status='filled', exec_quantity=2, avg_fill_price=price)
+                observed = self.broker._parse_broker_order_dict(row, host.name)
+                self.ledger.bind_broker_children(basket.package_id, observed.child_orders)
+                reads = SimpleNamespace(account=SCOPE.account_id, sandbox=True,
+                                        snapshot=Mock(return_value={'data': {'orders': {'order': row}}}))
+                self.broker._shared_broker_reads = reads
+                cached = observed if source == 'tracked' else submitted
+                with patch.object(self.broker, 'get_order', return_value=cached), \
+                     patch.object(self.broker, '_pull_broker_order', side_effect=AssertionError('unexpected polling')), \
+                     patch('trade_logger.record_trade_entry', return_value=basket.position_id) as journal:
+                    first = observed.child_orders[0]
+                    first._raw['exec_quantity'] = 1
+                    host.on_partially_filled_order(None, first, .25, 1, 100)
+                    partial_quantities = self.ledger.all_owned_quantities()
+                    host.on_partially_filled_order(None, first, .25, 1, 100)
+                    self.assertEqual(self.ledger.all_owned_quantities(), partial_quantities)
+                    first._raw['exec_quantity'] = 2
+                    for child in observed.child_orders:
+                        self.assertNotIn('parent_order_id', child._raw)
+                        host.on_filled_order(None, child, child.avg_fill_price, 2, 100)
+                    journal.assert_called_once()
+                    data = journal.call_args.kwargs
+                    event = dict(event='ENTRY', event_id=data['event_id'], trade_id=data['trade_id'],
+                                 position_id=data['position_id'], package_id=data['package_id'], scope=SCOPE.to_dict(),
+                                 symbol=data['symbol'], expiry=data['expiry'], quantity=data['quantity'],
+                                 strikes=data['strikes'], legs=data['realization_legs'], evidence_refs=data['evidence_refs'],
+                                 fees_complete=False)
+                    result = classify_trade([event], load_ledger_execution_evidence_from_connection(self.ledger),
+                                            expected_scope=SCOPE, as_of_date='2026-11-06')
+                    self.assertEqual(result['partition'], 'accepted', result)
+                    self.assertEqual(result['reconciliation_status'], 'FEE_INCOMPLETE')
+                    quantities = self.ledger.all_owned_quantities()
+                    host.on_filled_order(None, first, .25, 2, 100)
+                    host._reconcile_inflight_orders([observed])
+                    self.assertEqual(self.ledger.all_owned_quantities(), quantities)
+                    self.assertEqual(sorted(quantities.values()), [-2, -2, 2, 2])
+                    if source == 'snapshot':
+                        reads.snapshot.assert_called_with('orders')
+
+    def test_aggregate_parent_fill_is_not_treated_as_an_unmatched_leg(self) -> None:
+        [parent] = self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
+        [basket] = self.ledger.open_baskets(self.host.name)
+        with self.assertNoLogs(iron_condor.__name__, level="WARNING"):
+            self.host.on_filled_order(None, parent, -2.0, 4, 100)
+        self.assertEqual(self.ledger.all_owned_quantities(), {})
+        with patch("trade_logger.record_trade_entry", return_value="confirmed"):
+            for child, price in zip(parent.child_orders, (.25, 1.25, 1.25, .25)):
+                self.host.on_filled_order(None, child, price, 1, 100)
+        owned = self.ledger.all_owned_quantities()
+        self.assertEqual(sorted(owned.values()), [-1, -1, 1, 1])
+        with self.assertNoLogs(iron_condor.__name__, level="WARNING"):
+            self.host.on_filled_order(None, parent, -2.0, 4, 100)
+        self.assertEqual(self.ledger.all_owned_quantities(), owned)
+        self.assertEqual(self.ledger.get_basket(basket.package_id).opening_cash_flow, 200.0)
+
+    def test_cancel_backoff_observes_raw_tradier_status_changes(self) -> None:
+        row = self.polling_row("close-parent", self.host._broker_routing_tag())
+        row["status"] = "pending"
+        pending = self.broker._parse_broker_order_dict(row, self.host.name)
+        self.host.cancel_order = Mock(side_effect=RuntimeError("cancel rejected"))
+        self.host._cancel_managed_order(pending)
+        self.host._cancel_managed_order(pending)
+        self.host.cancel_order.assert_called_once()
+        row["status"] = "open"
+        opened = self.broker._parse_broker_order_dict(row, self.host.name)
+        self.assertEqual(pending.status, opened.status)
+        self.host._cancel_managed_order(opened)
+        self.assertEqual(self.host.cancel_order.call_count, 2)
+
     def test_incomplete_parent_fetches_only_the_child_missing_execution_evidence(self) -> None:
         [parent] = self.host._submit_package(self.option_legs(), intent="open", order_type="credit", price=2.0)
         row = self.polling_row(str(parent.identifier), self.host._broker_routing_tag())

@@ -114,7 +114,9 @@ def get_broker() -> Broker:
         broker = Tradier(tradier_config, polling_interval=polling_interval, connect_stream=False)
         if type(broker).__module__.startswith("lumibot.brokers.tradier"):
             from strategies.broker_reads import install_sdk_reads
+            from strategies.session_runtime import install_session_waits
             install_sdk_reads(broker, token_str, account_str, is_paper)
+            install_session_waits(broker)
             broker.stream = broker._get_stream_object()
             broker._launch_stream()
         return broker
@@ -220,14 +222,12 @@ def build_strategies_for_mode(
             broker=broker, market_data_hub=hub, budget=budget, position_ledger=ledger
         )
     else:
-        try:
-            strategy = SPXIronCondor(
-                broker=broker,
-                budget=budget,
-                parameters={**SPXIronCondor.parameters, "position_ledger": ledger},
-            )
-        except TypeError:
-            strategy = SPXIronCondor()
+        strategy = SPXIronCondor(
+            broker=broker,
+            data_source=broker.data_source,
+            budget=budget,
+            parameters={**SPXIronCondor.parameters, "position_ledger": ledger},
+        )
         if not getattr(strategy, "name", None):
             try:
                 strategy.name = "SPXIronCondor"
@@ -291,11 +291,15 @@ def _run_once() -> None:
         "strategy" if len(strategies) == 1 else "strategies",
     )
     reads = getattr(broker, "_shared_broker_reads", None)
-    if reads is not None:
-        reads.start("bot")
+    from strategies.session_runtime import IterationWatchdog
+    watchdog = IterationWatchdog(strategies)
     try:
+        if reads is not None:
+            reads.start("bot")
+        watchdog.start()
         trader.run_all()
     finally:
+        watchdog.close()
         if reads is not None:
             reads.close()
 

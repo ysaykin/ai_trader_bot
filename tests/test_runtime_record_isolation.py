@@ -217,3 +217,47 @@ def test_connect_ex_blocks_external_hosts() -> None:
     with socket.socket() as client:
         with pytest.raises(RuntimeError, match="network guard"):
             client.connect_ex(("192.0.2.1", 443))
+
+
+def test_inventory_includes_scoped_snapshots_sidecars_and_logs(tmp_path: Path, monkeypatch) -> None:
+    from strategies import runtime_records
+    for name in ('broker_snapshots.sqlite3', 'broker_snapshots.sqlite3-wal', 'trading.log',
+                 'scopes/paper/broker_snapshots.sqlite3-shm', 'scopes/paper/trading.log.1'):
+        path = tmp_path/name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b'retained')
+    monkeypatch.setattr(runtime_records, '_PROTECTED_DIR', tmp_path)
+    assert len(runtime_records.protected_record_inventory()) == 5
+
+
+def test_snapshot_store_starts_empty_without_reading_runtime(tmp_path: Path, monkeypatch) -> None:
+    from strategies import runtime_records
+    source = tmp_path/'runtime'
+    source.mkdir()
+    (source/'broker_snapshots.sqlite3').write_bytes(b'not a database')
+    monkeypatch.setattr(runtime_records, '_PROTECTED_DIR', source)
+    target=runtime_records.isolate_snapshot_database(tmp_path/'isolated')
+    with sqlite3.connect(target) as db:
+        assert db.execute('SELECT count(*) FROM snapshots').fetchone()[0] == 0
+        assert db.execute('SELECT count(*) FROM attempts').fetchone()[0] == 0
+
+
+def test_child_guards_block_snapshot_and_network() -> None:
+    code = f'''from pathlib import Path
+import socket, sqlite3
+for path in ({str(ROOT/'logs/broker_snapshots.sqlite3')!r}, {str(ROOT/'logs/scopes/example/broker_snapshots.sqlite3-wal')!r}):
+    try: open(path, 'a')
+    except PermissionError: pass
+    else: raise AssertionError(path)
+try: socket.socket().connect(('192.0.2.1',443))
+except RuntimeError: pass
+else: raise AssertionError('broker connection allowed')
+'''
+    result = subprocess.run([sys.executable,'-c',code], env={},capture_output=True,text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_snapshot_initializer_cannot_bypass_runtime_write_guard() -> None:
+    from strategies.runtime_records import isolate_snapshot_database
+    with pytest.raises(PermissionError, match='protected runtime'):
+        isolate_snapshot_database(ROOT)
