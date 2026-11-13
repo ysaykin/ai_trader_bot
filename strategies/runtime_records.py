@@ -906,13 +906,20 @@ def classify_trade(
 
     def result(partition: str, status: str) -> dict[str, Any]:
         return dict(partition=partition,reconciliation_status=status,
-                    source={"VERIFIED":"tradier_verified","FEE_INCOMPLETE":"fee_incomplete","QUARANTINED":"synthetic"}.get(status,"unattributed"),
+                    source={"VERIFIED":"tradier_verified","FEE_INCOMPLETE":"fee_incomplete","QUARANTINED":"synthetic","ARCHIVED":"archived"}.get(status,"unattributed"),
                     is_eligible=status=="VERIFIED" and amounts_complete, reason_codes=sorted(reasons),reason_details=details,
                     evidence_refs=sorted(refs),classifier_version=CLASSIFIER_VERSION,evidence_contract_version=EVIDENCE_CONTRACT_VERSION)
 
     if any(is_fixture_trade(trade_id,event) for event in events):
         reasons.add("SYNTHETIC_MARKER_OR_FIXTURE_FINGERPRINT")
         return result("quarantined","QUARANTINED")
+    archived = [p for p in evidence.get('packages', {}).values() if p.get('state') == 'archived']
+    if any(p.get('trade_id') and p.get('trade_id') == trade_id or any(
+            p.get('position_id') and e.get('position_id') == p.get('position_id')
+            or p.get('package_id') and e.get('package_id') == p.get('package_id')
+            for e in events) for p in archived):
+        reasons.add('USER_ARCHIVED_POSITION')
+        return result('unattributed', 'ARCHIVED')
     if expected_scope is None:
         reasons.add("EXPECTED_SCOPE_MISSING")
     expected=expected_scope.to_dict() if expected_scope else {}

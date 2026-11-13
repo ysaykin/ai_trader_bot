@@ -162,7 +162,7 @@ def build_positions(packages: list[Mapping[str, Any]], broker_positions: list[Ma
     issues: list[str] = []
     uncertain_owners: set[str] = set()
     for package in packages:
-        if package["state"] == "expired":
+        if package["state"] in {"expired", "archived"}:
             continue
         owner, pid = str(package["strategy_id"]), str(package["package_id"])
         fills = []

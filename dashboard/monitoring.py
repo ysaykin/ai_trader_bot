@@ -73,7 +73,7 @@ def data_health(telemetry: dict[str, Any], *, symbols: list[str], session_open: 
 def order_activity(telemetry: dict[str, Any], *, now: datetime | None = None) -> list[dict[str, Any]]:
     """Join by stored broker parent ID only; retain unconfirmed local orders."""
     now = now or datetime.now(timezone.utc)
-    packages = telemetry.get("ledger_packages", [])
+    packages = [p for p in telemetry.get("ledger_packages", []) if p.get('state') != 'archived']
     by_parent: dict[str, list[dict[str, Any]]] = {}
     for package in packages:
         parent = package.get("broker_parent_id")

@@ -708,7 +708,7 @@ class PositionLedger:
             links[package.package_id] = pid
             owners[pid] = package.strategy_id
             trades[pid] = package.trade_id or trades.get(pid)
-            if package.state != "expired":
+            if package.state not in {"expired", "archived"}:
                 for leg in package.legs:
                     inventories[pid][str(leg["asset_key"])] += int(leg["filled_signed_quantity"])
 
@@ -737,6 +737,8 @@ class PositionLedger:
         position = self.get_position(position_id)
         if position.strategy_id != strategy_id:
             raise ValueError("position belongs to another strategy")
+        if any(b.state == 'archived' for b in self.position_baskets(position_id)):
+            raise ValueError('Archived positions cannot accept new submissions')
         return position_id
 
     def get_position(self, position_id: str) -> PositionRecord:
@@ -763,7 +765,7 @@ class PositionLedger:
         with self._lock:
             query = """SELECT position_id FROM positions WHERE position_id IN (
                 SELECT p.position_id FROM packages p JOIN legs l USING(package_id)
-                WHERE p.state != 'expired' AND p.position_id IS NOT NULL
+                WHERE p.state NOT IN ('expired','archived') AND p.position_id IS NOT NULL
                 GROUP BY p.position_id,l.asset_key HAVING SUM(l.filled_signed_quantity) != 0
                 UNION
                 SELECT position_id FROM packages
@@ -787,7 +789,7 @@ class PositionLedger:
         removed: dict[str, float] = defaultdict(float)
         valid = True
         for basket in self.position_baskets(position_id):
-            if basket.state == "expired":
+            if basket.state in {"expired", "archived"}:
                 continue
             for leg in basket.legs:
                 quantity = int(leg["filled_signed_quantity"])
@@ -823,7 +825,7 @@ class PositionLedger:
     def unreported_baskets(self, strategy_id: str) -> tuple[BasketRecord, ...]:
         with self._lock:
             rows = self._connection.execute(
-                "SELECT * FROM packages WHERE strategy_id = ? AND state != 'expired' ORDER BY rowid",
+                "SELECT * FROM packages WHERE strategy_id = ? AND state NOT IN ('expired','archived') ORDER BY rowid",
                 (strategy_id,),
             ).fetchall()
             result = []
@@ -841,7 +843,7 @@ class PositionLedger:
             rows = self._connection.execute(
                 """SELECT l.asset_key,SUM(l.filled_signed_quantity) AS quantity
                    FROM legs l JOIN packages p USING(package_id)
-                   WHERE p.position_id = ? AND p.state != 'expired' GROUP BY l.asset_key""",
+                   WHERE p.position_id = ? AND p.state NOT IN ('expired','archived') GROUP BY l.asset_key""",
                 (position_id,),
             ).fetchall()
             return {str(row[0]): int(row[1]) for row in rows if row[1]}
@@ -1271,6 +1273,8 @@ class PositionLedger:
                 raise ValueError("fill exceeds requested quantity")
             if filled == previous_quantity:
                 return self.get_basket(str(leg["package_id"]))
+            if self.get_basket(str(leg['package_id'])).state == 'archived':
+                raise ValueError('New fills for an archived position require manual reconciliation')
             previous_price = leg["fill_price"]
             delta = abs(filled) - abs(previous_quantity)
             if cumulative:
@@ -1329,6 +1333,8 @@ class PositionLedger:
             ).fetchone()
             if package is None:
                 raise KeyError(f"unknown package_id: {package_id}")
+            if package['state'] == 'archived':
+                return
             strategy_id = str(package["strategy_id"])
             legs = self._connection.execute(
                 "SELECT * FROM legs WHERE package_id = ?", (package_id,)
@@ -1363,6 +1369,8 @@ class PositionLedger:
             ).fetchone()
             if package is None:
                 raise KeyError(f"unknown package_id: {package_id}")
+            if package['state'] == 'archived':
+                return self.get_basket(package_id)
             intent = str(package["intent"])
             self._connection.execute(
                 "UPDATE packages SET terminal_status = ?, terminal_reason = ? WHERE package_id = ?",
@@ -2028,7 +2036,7 @@ class PositionLedger:
         results = []
 
         with self._lock, self._connection:
-            query = "SELECT * FROM packages WHERE strategy_id = ? AND state != 'expired'"
+            query = "SELECT * FROM packages WHERE strategy_id = ? AND state NOT IN ('expired','archived')"
             args = [strategy_id]
             if position_id is not None:
                 query += " AND position_id = ?"
@@ -2326,7 +2334,7 @@ class PositionLedger:
             rows = self._connection.execute(
                 """SELECT l.asset_key, SUM(l.filled_signed_quantity) AS quantity
                    FROM legs AS l JOIN packages AS p USING (package_id)
-                   WHERE p.strategy_id = ? AND p.state != 'expired'
+                   WHERE p.strategy_id = ? AND p.state NOT IN ('expired','archived')
                    GROUP BY l.asset_key""",
                 (strategy_id,),
             ).fetchall()
@@ -2342,7 +2350,7 @@ class PositionLedger:
             rows = self._connection.execute(
                 """SELECT l.asset_key, SUM(l.filled_signed_quantity) AS quantity
                    FROM legs AS l JOIN packages AS p USING (package_id)
-                   WHERE p.state != 'expired' GROUP BY l.asset_key"""
+                   WHERE p.state NOT IN ('expired','archived') GROUP BY l.asset_key"""
             ).fetchall()
         return {
             str(row["asset_key"]): int(row["quantity"])
@@ -2491,6 +2499,8 @@ class PositionLedger:
         ).fetchall()
         if package is None or not legs:
             raise KeyError(f"unknown package_id: {package_id}")
+        if package['state'] == 'archived':
+            return self._basket_from_row(package)
         cash = sum(
             -int(leg["filled_signed_quantity"]) * float(leg["fill_price"] or 0.0) * 100.0
             for leg in legs

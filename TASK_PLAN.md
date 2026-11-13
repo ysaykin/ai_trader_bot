@@ -1,5 +1,46 @@
 # Implementation task plan
 
+## Remove the two expired legacy positions, 2026-11-13
+
+The user explicitly requested deleting legacy positions after moving to newer
+strategies. Scope this to the two discussed expired position IDs, preserving all
+current positions and the currently enabled V29 strategy. Existing retained
+evidence has immutable foreign-key links, so archive position lifecycle state
+instead of erasing those facts or manufacturing a verified settlement.
+
+1. Add an explicit archived state excluded from active ownership, risk, recovery,
+   settlement management and position warnings. Retain fills and journal facts.
+2. Provide a position-specific archive command with fresh scoped broker evidence,
+   expiration and zero-inventory checks, and a full recoverable ledger backup.
+3. Verify same-owner current positions, immutable evidence, callback replay and
+   repeated archive requests. Run the full offline gate before activation.
+4. Stop record writers, archive only the two reviewed positions, restart services
+   and prove current broker holdings are unchanged. Publish the tested tool and
+   implementation to the existing repair branch.
+
+Completed: archived only the November 4 V07 position and November 5 V29 position,
+nine packages total, after a fresh scoped broker read confirmed zero holdings in
+all eight expired contracts. Preserved every historical fill, evidence link and
+journal event, with a full ledger and original journals backed up under
+`logs/archives/legacy-positions-20261113`. The archive is explicitly unverified,
+with both trades marked ARCHIVED and excluded from certified performance.
+
+The complete isolated gate passes 814 tests and 82 subtests, with two optional
+checks skipped and protected records unchanged. Static checks pass with the
+documented pre-existing unused-name exceptions. Regressions cover current
+positions under the same owner, invalid/freshness/scope evidence, offsetting
+ownership, callback replay, idempotence and transaction rollback.
+
+Restarted all services with archive-aware code. Bot and recovery are healthy;
+the dashboard returns HTTP 200. All ten other tracked position records and exact
+broker quantities across 26 contracts are unchanged. Reserved risk fell from
+$11,897 to $10,981 by removing the two stale reservations. Live audit reports zero
+order reviews, zero settlement warnings and zero unexpected contract mismatches.
+Seven entry strategies remain enabled, including V29, with no retired V07
+management-only strategy. Runtime image is
+`sha256:7386db4204aa7c4441908f35b4077c17ba7b27c0b19ef8ebd71a6b6c6f71c310`.
+Evidence is in `logs/reconciliation/legacy-position-archive-20261113`.
+
 ## Audit worker shutdown and external reconciliation dependencies, 2026-11-13
 
 The previous goal turn deployed and pushed the main repairs. A current-state

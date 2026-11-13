@@ -305,3 +305,21 @@ interruption between publishing the ledger and journal. Every original event is
 retained. The repair adds matching execution provenance and identifies fee
 estimates; it cannot invent actual fees or settle expired positions. Missing
 settlement and account cash evidence must be supplied by the provider.
+
+## Archive expired legacy positions
+
+`tools/archive_legacy_positions.py` removes explicitly selected expired paper
+positions from active management, ownership, risk and position warnings. It
+preserves historical fills, cash flows, journal events and immutable evidence.
+Archived trades remain excluded from certified performance, with settlement and
+fees unverified. Current positions belonging to the same strategy are retained.
+
+Supply a fresh scoped broker snapshot with successful complete `positions` and
+`orders` lists, `scope`, `acquired_at`, `positions_complete=true` and
+`orders_complete=true`. The default command prints a preview. Repeat `--position`
+for each selected position. Applying requires `--apply --writers-stopped` after
+stopping all record writers, plus `--archive-dir` for the recoverable ledger
+backup. Optional `--journal` arguments back up original journals as well.
+The command refuses unexpired or still-held contracts, active matching broker
+orders, pending recovery and incomplete evidence. It never places broker orders
+or records a fabricated close or cash settlement.

@@ -971,6 +971,8 @@ def load_all_trades(
             is_eligible = classification["is_eligible"]
             if reconciliation_status == "UNRESOLVED_EXPIRY" and exit_record is None:
                 status = "AWAITING_SETTLEMENT"
+            elif reconciliation_status == 'ARCHIVED':
+                status = 'ARCHIVED'
 
             completed_trades.append({
                 "trade_id": t_id,
