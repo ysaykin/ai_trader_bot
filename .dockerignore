@@ -9,6 +9,7 @@ logs/
 .ruff_cache/
 .scrum/
 tests/
-backend/
+backend/*
+!backend/requirements.txt
 ui/
 lumibot/

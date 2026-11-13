@@ -15,7 +15,7 @@ from decimal import Decimal
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -362,6 +362,7 @@ class PositionLedger:
                     "terminal_status": "TEXT",
                     "terminal_reason": "TEXT",
                     "submission_started": "INTEGER",
+                    "recovery_job_id": "TEXT",
                 },
             )
             self._add_columns(
@@ -545,7 +546,8 @@ class PositionLedger:
         return RecordScope(broker=row[0], account_id=row[1], environment=row[2])
 
     def capture_order_evidence(self, order: Any, leg: Mapping[str, Any], *, scope: RecordScope,
-                               parent_response: Mapping[str, Any] | None = None) -> str | None:
+                               parent_response: Mapping[str, Any] | None = None,
+                               acquired_at: str | None = None) -> str | None:
         """Retain a provider observation already obtained by the execution path."""
         raw = getattr(order, "_raw", None)
         if not isinstance(raw, dict) or not raw:
@@ -572,7 +574,7 @@ class PositionLedger:
         evidence_id = "execution:" + digest
         # Content-addressed observations make replay stable even when acquisition repeats.
         previous = self.get_broker_evidence(evidence_id)
-        acquired = previous["acquired_at"] if previous else datetime.now(timezone.utc).isoformat()
+        acquired = previous["acquired_at"] if previous else acquired_at or datetime.now(timezone.utc).isoformat()
         return self.record_broker_evidence(evidence_id, scope=scope, kind="execution",
                                           provider_identity=digest, acquisition_source="broker-order-response",
                                           acquired_at=acquired, payload=payload)
@@ -582,8 +584,13 @@ class PositionLedger:
         basket = self.get_basket(package_id)
         refs: set[str] = set()
         journal_legs = []
+        allocations = self.realization_evidence(event_id)
         for leg in basket.legs:
-            candidates = self._connection.execute(
+            existing = [link for link in allocations if link["leg_id"] == leg["order_id"]]
+            if len(existing) > 1 or any(link["allocated_signed_quantity"] != leg["filled_signed_quantity"]
+                                        for link in existing):
+                raise ValueError("Existing realization allocation differs from confirmed fills")
+            candidates = [(existing[0]["evidence_id"],)] if existing else self._connection.execute(
                 "SELECT evidence_id FROM broker_evidence WHERE kind='execution' ORDER BY acquired_at DESC,evidence_id"
             ).fetchall()
             for row in candidates:
@@ -595,7 +602,8 @@ class PositionLedger:
                               and item.get("signed_quantity") == leg["filled_signed_quantity"]), None)
                 if match is None:
                     continue
-                self.set_trade_id(package_id, trade_id)
+                if basket.trade_id != trade_id or self.get_position(basket.position_id).trade_id != trade_id:
+                    self.set_trade_id(package_id, trade_id)
                 self.link_realization_evidence(event_id=event_id, trade_id=trade_id, position_id=basket.position_id,
                                               package_id=package_id, leg_id=leg["order_id"], evidence_id=row[0],
                                               allocated_signed_quantity=int(leg["filled_signed_quantity"]))
@@ -1028,12 +1036,13 @@ class PositionLedger:
         trade_id: str | None = None,
         settings: Mapping[str, Any] | None = None,
         submission_started: int | None = None,
+        recovery_job_id: str | None = None,
     ) -> None:
         """Atomically record a broker package before considering any leg owned."""
         if not getattr(self, "_position_schema_ready", False):
             self._initialize()
         normalized = tuple(self._coerce_leg(leg) for leg in legs)
-        if len(normalized) not in (2, 4):
+        if len(normalized) not in (2, 4) and not (recovery_job_id and 1 <= len(normalized) <= 4):
             raise ValueError("an option package must contain exactly two legs (vertical) or four legs (iron condor)")
         if len({leg.order_id for leg in normalized}) != len(normalized):
             raise ValueError("package order identifiers must be unique")
@@ -1061,6 +1070,22 @@ class PositionLedger:
             )
         )
         with self._lock, self._connection:
+            if recovery_job_id:
+                job = self._connection.execute(
+                    "SELECT * FROM recovery_jobs WHERE job_id=?", (recovery_job_id,)
+                ).fetchone()
+                if (not job or job["scope"] != "position" or job["target_id"] != position_id
+                        or job["status"] != "in_progress" or normalized_intent != "close"):
+                    raise ValueError("Recovery submission requires its claimed position job")
+                position = self.get_position(position_id)
+                owned = self.position_quantities(position_id)
+                if position.strategy_id != strategy_id or any(
+                        owned.get(leg.asset_key, 0) * leg.requested_signed_quantity >= 0
+                        or abs(leg.requested_signed_quantity) > abs(owned.get(leg.asset_key, 0))
+                        for leg in normalized):
+                    raise ValueError("Recovery must reduce only its position's owned contracts")
+                if any(self.is_inflight(b) for b in self.position_baskets(position_id)):
+                    raise ValueError("Recovery requires resolved prior position submissions")
             position_id = self._submission_position(
                 package_id, strategy_id, normalized_intent, normalized,
                 position_id, replacement_of, now, settings, trade_id=trade_id,
@@ -1084,6 +1109,7 @@ class PositionLedger:
                 "position_id": position_id,
                 "terminal_status": None,
                 "submission_started": submission_started,
+                "recovery_job_id": recovery_job_id,
             }
             package_cols = {
                 str(col["name"])
@@ -1483,32 +1509,19 @@ class PositionLedger:
     def claim_next_recovery_job(
         self, worker_id: str, lock_timeout_seconds: float = 30.0
     ) -> dict[str, Any] | None:
-        """Claim the oldest pending or timed-out recovery job."""
+        """Prioritize liquidation and rotate retries without starving other jobs."""
         now = datetime.now(timezone.utc)
         now_str = now.isoformat()
         with self._lock, self._connection:
-            cursor = self._connection.execute(
+            if not self._connection.in_transaction:
+                self._connection.execute("BEGIN IMMEDIATE")
+            row = self._connection.execute(
                 """SELECT * FROM recovery_jobs
-                   WHERE status = 'pending'
-                   ORDER BY created_at ASC LIMIT 1"""
-            )
-            row = cursor.fetchone()
-            if row is None:
-                cursor = self._connection.execute(
-                    """SELECT * FROM recovery_jobs
-                       WHERE status = 'in_progress'
-                       ORDER BY updated_at ASC LIMIT 1"""
-                )
-                cand = cursor.fetchone()
-                if cand is not None:
-                    try:
-                        updated_at = datetime.fromisoformat(cand["updated_at"])
-                        if updated_at.tzinfo is None:
-                            updated_at = updated_at.replace(tzinfo=timezone.utc)
-                        if (now - updated_at).total_seconds() > lock_timeout_seconds:
-                            row = cand
-                    except Exception:
-                        row = cand
+                   WHERE status = 'pending' OR (status = 'in_progress' AND updated_at < ?)
+                   ORDER BY CASE WHEN scope='account' THEN 0 ELSE 1 END,
+                            updated_at ASC, created_at ASC LIMIT 1""",
+                ((now - timedelta(seconds=lock_timeout_seconds)).isoformat(),),
+            ).fetchone()
             if row is None:
                 return None
             job_id = row["job_id"]
@@ -2236,7 +2249,7 @@ class PositionLedger:
 
     def flush_outbox(self, log_path: Path | None = None) -> int:
         """Dispatch pending outbox records to trades.jsonl atomically."""
-        from trade_logger import record_trade_exit
+        from trade_logger import record_trade_adjustment, record_trade_exit
         from strategies.runtime_records import resolve_record_path
 
         target_path = (
@@ -2253,7 +2266,19 @@ class PositionLedger:
             for row in rows:
                 oid = row["outbox_id"]
                 data = json.loads(row["payload"])
-                if row["event_type"] == "EXIT":
+                if row['event_type'] == 'ADJUSTMENT':
+                    record_trade_adjustment(
+                        trade_id=data['trade_id'], strategy_name=data['strategy'],
+                        opening_credit_cash=data['opening_credit_cash'], closing_cash=data['closing_cash'],
+                        gross_pnl=data['gross_pnl'], fees=data['fees'], net_pnl=data['net_pnl'],
+                        remaining_quantity=data['remaining_quantity'], log_path=target_path,
+                        event_id=data['event_id'], scope=RecordScope(
+                            **{key: data['scope'][key] for key in ('broker', 'account_id', 'environment')}),
+                        position_id=data['position_id'], package_id=data['package_id'],
+                        realization_legs=data['legs'], evidence_refs=data['evidence_refs'],
+                        fees_complete=data['fees_complete'], fee_provenance=data.get('fee_provenance'),
+                        source=data['source'])
+                elif row["event_type"] == "EXIT":
                     legacy = "event_id" not in data
                     event_id = data.get("event_id") or f"legacy-outbox:{oid}:{hashlib.sha256(row['payload'].encode()).hexdigest()}"
                     event_scope = self.record_scope if legacy else RecordScope(
@@ -2275,9 +2300,14 @@ class PositionLedger:
                         log_path=target_path,
                         event_id=event_id, scope=event_scope,
                         position_id=data.get("position_id"), evidence_refs=data.get("evidence_refs", []),
+                        package_id=data.get('package_id'), realization_legs=data.get('legs'),
+                        opening_credit_cash=data.get('opening_credit_cash'), closing_cash=data.get('closing_cash'),
+                        fee_provenance=data.get('fee_provenance'),
                         outcome=data.get("outcome"), fees_complete=data.get("fees_complete", False), known_fees=data.get("known_fees"),
                         source="unattributed" if legacy else data.get("source", "broker_verified"),
                     )
+                else:
+                    raise ValueError('Unsupported journal outbox event')
                 with self._connection:
                     self._connection.execute(
                         "UPDATE outbox SET status = 'dispatched', dispatched_at = ? WHERE outbox_id = ?",
@@ -2471,7 +2501,7 @@ class PositionLedger:
         strategy_id = str(package["strategy_id"])
         state = (
             ("open" if intent in {"open", "add"} else "closed")
-            if fully_filled and balanced
+            if fully_filled and (balanced or package["recovery_job_id"])
             else ("partial" if any_fill else "submitted")
         )
         opening_cash = cash if intent in {"open", "add"} and any_fill else None

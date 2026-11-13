@@ -184,6 +184,26 @@ def test_expired_lease_cannot_publish_and_restart_keeps_success(setup_reads):
     assert restarted.snapshot('positions')['data']['positions'] is not None
 
 
+def test_order_invalidation_during_balance_read_reacquires_without_stale_publish(setup_reads):
+    reads, _, transport = setup_reads
+    calls = []
+
+    def invalidating_transport(method, url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            reads.invalidate(inventory_only=True)
+            return response({'balances': {'total_equity': 100000}})
+        return response({'balances': {'total_equity': 90000}})
+
+    reads.transport = invalidating_transport
+    assert reads.get('/accounts/private-account/balances', fresh=True)['balances']['total_equity'] == 90000
+    assert len(calls) == 2
+    snapshot = reads.snapshot('balances')
+    assert snapshot['generation'] == 1
+    assert snapshot['error'] == ''
+    assert snapshot['data']['balances']['total_equity'] == 90000
+
+
 def test_collector_prefers_bot_and_dashboard_takes_over_after_expiry(setup_reads):
     bot, clock, transport = setup_reads
     dashboard = BrokerReads('secret', 'private-account', path=bot.path, transport=transport,

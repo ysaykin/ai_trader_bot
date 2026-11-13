@@ -22,19 +22,27 @@ def main() -> int:
         "tests/test_position_ledger.py", "tests/test_iron_condor_math.py::IronCondorMathTests",
         "tests/test_strike_selection_and_pnl.py",
     ])
-    parser.add_argument("--image", default="lumibot-lumibot-bot:latest")
+    parser.add_argument("--all", action="store_true", help="Run the complete execution/dashboard suite")
+    parser.add_argument("--image", default="lumibot-lumibot-test:latest")
     args = parser.parse_args()
+    if args.all:
+        args.tests = ["tests"]
     root = Path(__file__).resolve().parents[1]
     with tempfile.TemporaryDirectory(prefix="lumibot-exit-check-") as directory:
         target = Path(directory)
-        for folder in ("strategies", "tests", "tools", "ml", "dashboard", "reflex_dashboard"):
+        for folder in ("strategies", "tests", "tools", "ml", "dashboard", "reflex_dashboard", "backend"):
             shutil.copytree(root / folder, target / folder,
-                            ignore=shutil.ignore_patterns("__pycache__", "node_modules", ".env*", ".web"))
-        for name in ("main.py", "trade_logger.py", "sitecustomize.py", "pyproject.toml", "Dockerfile"):
+                            ignore=shutil.ignore_patterns("__pycache__", "node_modules", ".env*", ".web", ".venv"))
+        for name in ("main.py", "trade_logger.py", "sitecustomize.py", "pyproject.toml", "Dockerfile", "docker-compose.yml"):
             shutil.copy2(root / name, target / name)
         (target / "logs").mkdir()
+        # Read-only guard tests need an existing protected database, never the
+        # running account's ledger. An empty SQLite file is sufficient.
+        (target / "logs" / "position_ledger.sqlite3").touch()
+        (target / ".states").mkdir()
         return subprocess.run([
             "docker", "run", "--rm", "--network", "none",
+            "--tmpfs", "/app/.states:rw",
             "-e", "PYTEST_ADDOPTS=-p no:cacheprovider --tb=short -q",
             "-e", "PYTHONPATH=/app/reflex_dashboard:/app",
             "-v", f"{target}:/app:ro", "-w", "/app", "--entrypoint", "python",

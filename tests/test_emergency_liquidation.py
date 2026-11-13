@@ -1,8 +1,14 @@
 """Offline checks for emergency liquidation failure handling."""
 
 from unittest.mock import patch
+import pytest
 
 from dashboard.broker_client import TradierClient
+
+
+@pytest.fixture(autouse=True)
+def isolated_durable_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("POSITION_LEDGER_PATH", str(tmp_path / "emergency.sqlite3"))
 
 
 def test_cancel_timeout_is_failure() -> None:

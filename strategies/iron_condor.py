@@ -756,13 +756,8 @@ class SPXIronCondor(Strategy):
             if package_price is None or package_price <= 0:
                 logger.warning("Complete bid/ask quotes are required before entry submission.")
                 return
-            min_credit = self.parameters.get("min_credit")
-            if min_credit is None and os.getenv("IC_MIN_CREDIT"):
-                try:
-                    min_credit = float(os.getenv("IC_MIN_CREDIT", "0"))
-                except ValueError:
-                    min_credit = None
-            if min_credit is not None and float(package_price) < float(min_credit):
+            min_credit = self._minimum_entry_credit(self.parameters)
+            if float(package_price) < min_credit:
                 logger.info(
                     "[%s] Package credit $%.2f is below minimum threshold $%.2f (avoiding fee drag). Skipping entry.",
                     getattr(self, "name", "SPXIronCondor"),
@@ -2506,9 +2501,7 @@ class SPXIronCondor(Strategy):
                 if cooldown is not None and self._as_aware_utc(self._current_datetime()) < cooldown:
                     raise RuntimeError("Atomic package rejected: stop cooldown is active")
                 settings = self._runtime(position_id).settings if intent == "add" else self.parameters
-                width = float(settings["wing_width"])
-                minimum = max(width * float(self.parameters.get("min_credit_to_width", .10)),
-                              float(self.parameters.get("min_credit") or os.getenv("IC_MIN_CREDIT") or 0))
+                minimum = self._minimum_entry_credit(settings)
                 if order_type != "credit" or not math.isfinite(price) or price < minimum:
                     raise ValueError(f"Atomic package credit must be at least {minimum:.2f}")
             capacity = int(self.parameters.get("max_concurrent_positions", 1))
@@ -2907,6 +2900,13 @@ class SPXIronCondor(Strategy):
             self._position_ledger.mark_journaled(basket.package_id, "ADDITION")
         except Exception as error:
             logger.warning("Could not persist filled trade addition: %s", error)
+
+    def _minimum_entry_credit(self, settings: dict) -> float:
+        """Use one credit floor for candidate checks and the submission boundary."""
+        width = float(settings["wing_width"])
+        ratio = float(settings.get("min_credit_to_width", self.parameters.get("min_credit_to_width", .10)))
+        absolute = float(settings.get("min_credit") or os.getenv("IC_MIN_CREDIT") or 0)
+        return max(width * ratio, absolute)
 
     def _package_price(
         self,

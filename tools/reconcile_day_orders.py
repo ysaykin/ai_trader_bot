@@ -7,7 +7,6 @@ canceled, and confirmed fills and settlement records are retained.
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 from datetime import datetime, timezone
 import json
 import os
@@ -17,10 +16,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[1] if Path(__file__).is_file() else Path.cwd()
 sys.path.insert(0, str(ROOT))
 
-from dashboard.app import broker_settings
-from dashboard.monitoring import ACTIVE_ORDERS
-from dashboard.positions import Contract
 from strategies.broker_reads import fresh_broker_reads, get_broker_reads
+from strategies.day_orders import reconcile
 from strategies.order_sessions import day_session_ended
 from strategies.position_ledger import PositionLedger, resolve_ledger_path
 
@@ -35,58 +32,12 @@ def rows(payload, root, child):
     return value if isinstance(value, list) else [value]
 
 
-def reconcile(ledger, *, orders, positions, now, apply=False):
-    """Resolve only ended DAY orders with no active order or unexplained fills."""
-    by_id = {str(order["id"]): order for order in orders}
-    actual = defaultdict(int)
-    for position in positions:
-        quantity = float(position["quantity"])
-        if not quantity.is_integer():
-            raise ValueError("Broker contract quantity must be integral")
-        actual[position["symbol"]] += int(quantity)
-    report = []
-    active = [order for order in orders if str(order.get("status") or "").lower() in ACTIVE_ORDERS]
-    for basket in ledger.open_baskets():
-        if (not ledger.is_inflight(basket) or (basket.duration or "").lower() != "day"
-                or not day_session_ended(basket.created_at, now)):
-            continue
-        order = by_id.get(str(basket.broker_parent_id))
-        row = {"package_id": basket.package_id, "strategy": basket.strategy_id, "result": "retained"}
-        report.append(row)
-        # An unidentified working broker order could own a missing local ID.
-        if (order is not None and order in active) or (order is None and active):
-            row["reason"] = "Broker still reports active orders"
-            continue
-        if order:
-            if str(order.get("duration") or "").lower() != "day":
-                row["reason"] = "Broker duration is not DAY"
-                continue
-            legs = order.get("leg") or [order]
-            legs = legs if isinstance(legs, list) else [legs]
-            recorded = {Contract.from_key(leg["asset_key"]).symbol: abs(leg["filled_signed_quantity"])
-                        for leg in basket.legs}
-            if any(leg.get("exec_quantity") is None or
-                   float(leg["exec_quantity"]) > recorded.get(leg.get("option_symbol") or leg.get("symbol"), 0)
-                   for leg in legs):
-                row["reason"] = "Broker executions need fill reconciliation"
-                continue
-        quantities = {leg["asset_key"]: actual[Contract.from_key(leg["asset_key"]).symbol]
-                      for leg in basket.legs}
-        owned = ledger.all_owned_quantities()
-        if any(quantities[key] != owned.get(key, 0) for key in quantities):
-            row["reason"] = "Broker and ledger inventory differ on requested contracts"
-            continue
-        row["result"] = "eligible"
-        if apply:
-            resolved = ledger.expire_day_order(basket.package_id, now=now, broker_quantities=quantities)
-            row["result"] = "canceled" if resolved else "retained"
-    return report
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
+    from dashboard.app import broker_settings
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
     settings = broker_settings(os.environ)

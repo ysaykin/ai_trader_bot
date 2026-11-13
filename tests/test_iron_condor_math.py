@@ -175,6 +175,7 @@ class PositionLedgerTests(unittest.TestCase):
         from decimal import Decimal
         from datetime import datetime, timezone
         from strategies.xsp_settlement import SettlementValue, BrokerCashEvidence
+        from trade_history_fixtures import retain_settlement
 
         self.ledger.record_submission("package-a", "strategy-a", "open", self.legs)
         for leg in self.legs:
@@ -197,7 +198,8 @@ class PositionLedgerTests(unittest.TestCase):
             "settle-hash",
             "official",
         )
-        broker_cash = BrokerCashEvidence("test_account", "act-settle-1", date(2026, 10, 26), 0, True)
+        broker_cash = BrokerCashEvidence(self.ledger.record_scope.account_id, "act-settle-1", date(2026, 10, 26), 0, True)
+        retain_settlement(self.ledger, "package-a", settlement, broker_cash)
         self.assertEqual(
             self.ledger.expire_strategy_positions(
                 "strategy-a",

@@ -97,6 +97,7 @@ class ManagementOnlyTests(unittest.TestCase):
         self.strategy.parameters = {"management_only": True}
         self.strategy._position_ledger = Mock()
         self.strategy._position_ledger.is_panic_halted.return_value = False
+        self.strategy._position_ledger.entry_cooldown_until.return_value = None
         self.strategy._position_ledger.open_positions.return_value = []
         self.strategy._reconcile_broker_state = Mock(return_value=True)
         self.strategy.get_datetime = Mock(return_value=datetime(2026, 11, 2, 15, 0, tzinfo=timezone.utc))

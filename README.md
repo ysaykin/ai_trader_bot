@@ -196,6 +196,7 @@ Run the exit and runtime checks in an isolated container with broker networking
 disabled and no live records or credentials mounted:
 
 ```bash
+docker build --target test -t lumibot-lumibot-test:latest .
 python3 tools/verify_exit_safeguards.py
 ```
 
@@ -238,3 +239,69 @@ including the dashboard's previous read-only logs mount. A cache storage failure
 shows a warning while readable positions and independent strategy data still load.
 The initial integration retains SDK polling; the installed SDK has
 no account-event consumer to reconcile reconnects or duplicate events safely.
+
+## Verify the complete application
+
+Build the Python 3.12 test image, then run all execution, dashboard and mock
+backend tests:
+
+```bash
+docker build --target test -t lumibot-lumibot-test:latest .
+python3 tools/verify_exit_safeguards.py --all
+```
+
+The verifier copies source without credentials or runtime records, disables
+networking and mounts source read-only. Reflex state uses a temporary filesystem.
+The empty ledger fixture proves production write guards without exposing the
+running account. `--image` selects another compatible test image.
+
+## Run durable recovery
+
+Start both execution services so background recovery survives a bot restart:
+
+```bash
+docker compose up -d --build lumibot-bot lumibot-recovery
+docker exec lumibot-recovery python -m strategies.recovery_worker --check-readiness
+```
+
+Readiness requires a worker heartbeat within 15 seconds. Recovery and emergency
+submissions use `POSITION_LEDGER_PATH`. Idle workers do not close positions.
+Position jobs cancel only their owner's unresolved orders, retain unidentified
+submissions and reduce attributable contracts with limit orders. Confirmed short
+reductions precede long protection. Broker fills update the original position's
+ledger; other owners retain their quantities.
+Recovery realizations enter a durable journal outbox. Replaying an interrupted
+dispatch does not duplicate an event. Fees and net P&L remain unknown until
+actual fee evidence arrives. The paper worker also checks ended DAY orders once
+per minute when needed, releasing canceled remainders only after fresh order and
+inventory confirmation. This check never submits or cancels broker orders.
+
+## Separate market data from paper execution
+
+Tradier delays sandbox data by 15 minutes. A production token can supply market
+GET requests while `TRADIER_PAPER=true` continues routing account operations and
+orders to the sandbox. Some production index feeds can also be delayed. Provider
+timestamps remain the freshness check. See the [Tradier market-data coverage](https://docs.tradier.com/brokerage-api/market-data).
+
+Set either `TRADIER_MARKET_DATA_TOKEN_FILE` to a private token file or
+`TRADIER_MARKET_DATA_TOKEN` in private configuration. The file must be readable
+inside both containers. `TRADIER_MARKET_DATA_PAPER` defaults to `false` for a
+separate token. Restart the services after changing credentials. Without a
+separate credential, the bot retains the delayed sandbox feed.
+
+## Repair missing historical execution links
+
+Capture scoped provider orders with `tools/capture_account_evidence.py`. Repeat
+the capture after quota exhaustion; completed captures are reused. Build a
+reviewable repair with `tools/repair_execution_history.py build`, supplying the
+ledger, original journals, capture directory, output directory and fixed as-of
+date. `verify` recomputes classifications and checks the original financial
+records against the staged ledger.
+
+Before `activate`, stop bot and recovery writers. Supply `--writers-stopped`
+and choose one of the reviewed input journals as `--target-journal`. Activation
+rejects changed inputs, backs up originals and resumes safely after an
+interruption between publishing the ledger and journal. Every original event is
+retained. The repair adds matching execution provenance and identifies fee
+estimates; it cannot invent actual fees or settle expired positions. Missing
+settlement and account cash evidence must be supplied by the provider.

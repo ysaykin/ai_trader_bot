@@ -176,7 +176,7 @@ class TestReflexDashboard(unittest.TestCase):
             state = DashboardState(_reflex_internal_init=True)
             with patch.dict(os.environ, {"POSITION_LEDGER_PATH": ledger_path}), \
                  patch("dashboard.broker_client.get_broker_client", return_value=mock_client), \
-                 patch.object(DashboardState, "load_all"):
+                 patch.object(DashboardState, "load_all", new=Mock()):
                 result = state.execute_panic_liquidation()
                 self.assertFalse(state.panic_in_progress)
                 self.assertFalse(state.panic_modal_open)

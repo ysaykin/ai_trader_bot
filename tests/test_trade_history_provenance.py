@@ -35,6 +35,19 @@ def test_complete_lifecycle_and_empty_fees(tmp_path: Path) -> None:
     assert result['is_eligible'] is False
 
 
+@pytest.mark.parametrize('remaining', [1, 0, 2, True, None])
+def test_partial_close_requires_exact_remaining_inventory(tmp_path: Path, remaining) -> None:
+    bundle = evidence_bundle(tmp_path, events=('ENTRY', 'ADDITION', 'ADJUSTMENT', 'EXIT'))
+    adjustment = bundle['events'][2]
+    adjustment['remaining_quantity'] = remaining
+    with sqlite3.connect(bundle['ledger']) as db:
+        db.execute("UPDATE packages SET intent='close' WHERE package_id=?", (adjustment['package_id'],))
+    result = classify(bundle)
+    assert result['is_eligible'] is (type(remaining) is int and remaining == 1)
+    if not result['is_eligible']:
+        assert 'PARTIAL_CLOSE_REMAINDER_MISMATCH' in result['reason_codes']
+
+
 @pytest.mark.parametrize('location', ['raw', 'child', 'parent', 'parent_child'])
 @pytest.mark.parametrize(('field', 'value'), [('broker', 'other'), ('account_id', 'OTHER'),
                                            ('environment', 'live'), ('scope_key', 'tradier_live_OTHER')])

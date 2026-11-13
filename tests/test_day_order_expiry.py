@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
 
@@ -161,3 +162,35 @@ def test_cleanup_keeps_unrecorded_executions_even_when_account_net_is_zero(ledge
     assert report[0]["result"] == "retained"
     assert "executions" in report[0]["reason"]
     assert ledger.is_inflight(ledger.get_basket("old"))
+
+
+def test_worker_reconciles_cancellation_after_strategy_sleeps(ledger):
+    from strategies.recovery import RecoveryCoordinator
+    submit(ledger)
+    ledger.bind_broker_submission('old', SimpleNamespace(identifier='broker'))
+    client = Mock(account=ledger.record_scope.account_id, sandbox=True)
+    client._fetch_all_orders.return_value = []
+    client._fetch_all_positions.return_value = []
+    client._get.return_value.json.return_value = {'order': {
+        'id': 'broker', 'status': 'canceled', 'duration': 'day',
+        'leg': [{'option_symbol': 'XSP261120P00700000', 'exec_quantity': 0},
+                {'option_symbol': 'XSP261120P00705000', 'exec_quantity': 0}]}}
+    worker = RecoveryCoordinator(ledger=ledger)
+    with patch('dashboard.broker_client.get_broker_client', return_value=client), \
+            patch('strategies.recovery.datetime') as clock:
+        clock.now.return_value = NOW
+        assert worker.run_step()
+        assert not worker.run_step()
+    assert not ledger.is_inflight(ledger.get_basket('old'))
+    assert ledger.all_owned_quantities() == {}
+    assert ledger.portfolio_defined_risk() == 0
+    assert client._get.call_count == 1
+    client._submit_once.assert_not_called()
+    client.emergency_flatten_positions.assert_not_called()
+
+
+def test_idle_worker_does_not_poll_broker_without_ended_orders(ledger):
+    from strategies.recovery import RecoveryCoordinator
+    with patch('dashboard.broker_client.get_broker_client') as get:
+        assert not RecoveryCoordinator(ledger=ledger).run_step()
+    get.assert_not_called()

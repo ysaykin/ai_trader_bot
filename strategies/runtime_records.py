@@ -795,6 +795,7 @@ def _raw_execution_matches(payload: dict[str, Any], leg: dict[str, Any]) -> bool
         return False
     return (candidates[0].get("parent_order_id") == parent_id
             or ("leg" in raw and provider_id(raw) == parent_id)
+            or ("leg" not in raw and provider_id(raw) == parent_id == leg.get("order_id"))
             or (provider_id(parent) == parent_id and len(parent_children) == 1))
 
 
@@ -1030,7 +1031,8 @@ def classify_trade(
             package=evidence.get("packages",{}).get(event.get("package_id"),{})
             if not links:
                 errors.add("MISSING_REALIZATION_LINKS")
-            if not package or package.get("trade_id")!=trade_id or package.get("position_id")!=event.get("position_id") or package.get("intent")!=_REALIZATIONS.get(kind):
+            partial_close = kind == 'ADJUSTMENT' and package.get('intent') == 'close'
+            if not package or package.get("trade_id")!=trade_id or package.get("position_id")!=event.get("position_id") or (package.get("intent")!=_REALIZATIONS.get(kind) and not partial_close):
                 errors.add("PACKAGE_OWNERSHIP_MISMATCH")
             if not isinstance(event_legs,list) or not event_legs:
                 errors.add("CONTRACTS_MISSING")
@@ -1100,6 +1102,10 @@ def classify_trade(
                 if contract and isinstance(quantity,int):
                     inventory[contract]+=quantity
             declared_quantity=event.get("quantity",event.get("added_quantity"))
+            if partial_close and (not inventory or not any(inventory.values())
+                    or isinstance(event.get('remaining_quantity'), bool)
+                    or event.get('remaining_quantity') != max(map(abs, inventory.values()), default=0)):
+                errors.add('PARTIAL_CLOSE_REMAINDER_MISMATCH')
             if declared_quantity is not None and event_legs and any(abs(l.get("signed_quantity",0))!=declared_quantity for l in event_legs):
                 errors.add("QUANTITY_MISMATCH")
         event_refs=event.get("evidence_refs")

@@ -1,6 +1,8 @@
 services:
   lumibot-bot:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: lumibot-lumibot-bot:latest
     container_name: lumibot-bot
     restart: unless-stopped
@@ -22,11 +24,19 @@ services:
       - ./logs:/app/logs
 
   lumibot-recovery:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: lumibot-lumibot-bot:latest
     container_name: lumibot-recovery
     restart: unless-stopped
     command: ["python", "-m", "strategies.recovery_worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "strategies.recovery_worker", "--check-readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     env_file: .env
     environment:
       - TZ=America/New_York

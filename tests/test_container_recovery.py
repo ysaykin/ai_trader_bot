@@ -18,6 +18,11 @@ from strategies.iron_condor import SPXIronCondor
 from strategies.position_ledger import LedgerLeg, PositionLedger, asset_key
 
 
+@pytest.fixture(autouse=True)
+def isolated_default_recovery_ledger(tmp_path, monkeypatch):
+    monkeypatch.setenv("POSITION_LEDGER_PATH", str(tmp_path / "recovery.sqlite3"))
+
+
 def test_built_image_imports_recovery_modules_offline() -> None:
     image = os.environ.get("LUMIBOT_TEST_IMAGE")
     if not image or not shutil.which("docker"):
@@ -154,10 +159,11 @@ def test_standalone_recovery_coordinator_lifecycle_and_worker_exclusion(tmp_path
         worker2 = RecoveryCoordinator(ledger=ledger, worker_id="worker_2", poll_interval=0.1)
 
         # 1. Readiness check
-        assert worker1.is_ready() is True
+        assert worker1.is_ready() is False
 
         # 2. Worker 1 acquires exclusion lease
         assert ledger.acquire_worker_exclusion("worker_1") is True
+        assert worker1.is_ready() is True
         # Worker 2 must be excluded while worker 1 has an active heartbeat
         assert ledger.acquire_worker_exclusion("worker_2") is False
 

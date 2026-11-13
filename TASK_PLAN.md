@@ -1,5 +1,83 @@
 # Implementation task plan
 
+## Finish runtime, reconciliation, entries and verification, 2026-11-12
+
+The user requested fixing all six remaining findings and pushing the result.
+Existing work is preserved in commit d253b4b on codex/fix-bot-runtime and in a
+separate source/ledger backup. The user confirmed ysaykin/ai_trader_bot as the
+destination. Its main branch has unrelated history, so publish the repair branch
+without replacing main. The user has no real-time market-data entitlement.
+
+1. Make the full offline suite runnable in an isolated Python 3.12 test image,
+   including the dashboard and mock backend. Repair obsolete settlement fixtures
+   without weakening the retained-evidence requirement.
+2. Implement durable position-scoped recovery, worker liveness/readiness and
+   deployment health checks. Verify normal holdings remain untouched when idle.
+3. Acquire and retain provider execution, fee and expiration evidence; reconcile
+   only attributable records. Rehearse on a consistent ledger copy before
+   activating any historical repair. Preserve unknowns if providers lack facts.
+4. Select wing-complete strikes and validate the same minimum credit before
+   submission as at the execution boundary. Record skipped proposals honestly.
+5. Support a separately authenticated real-time market-data source while keeping
+   paper execution. Verify provider timestamps and report missing entitlements.
+6. Run the full isolated suite, image checks and current-record audits, activate
+   verified services, inspect the complete diff and push the repair branch to
+   the user-confirmed remote. Do not invent settlement, fees, or live credentials.
+
+Implemented durable scoped close submissions, fill reconciliation, crash-safe
+recovery journal dispatch, heartbeat readiness, fair job retries, and an
+independent paper DAY-order reconciliation pass. Standalone recovery and global
+emergency submissions now use the configured on-disk ledger. Entry candidates
+require both wings and share the execution boundary's minimum credit floor.
+Separate market-data credentials preserve paper account and order routing.
+
+The Python 3.12 test image runs the execution, dashboard and backend suite with
+networking disabled and protected records excluded. Focused recovery and journal
+regressions cover lost acceptance responses, database reopen, shared contracts,
+short-before-long reductions, exact evidence quantities, replay deduplication,
+and cancellations acknowledged after the strategy's last market-hours cycle.
+
+Retained all 105 relevant broker order responses for historical reconstruction.
+The staged repair preserves 107 original events and all financial ledger facts,
+restoring 88 execution references. Forty-one trades have execution provenance
+but incomplete actual fees. The sandbox history endpoint returns no account
+activity; gain/loss records do not provide the missing settlement allocations or
+actual fees. Two expired owned positions remain awaiting provider evidence.
+
+Activated the reviewed historical repair after stopping all writers and backing
+up originals. Both execution services started on the repaired Python 3.12 image;
+the dashboard restarted and returned HTTP 200. Recovery released one ended DAY
+reservation, reducing reserved risk from $12,868 to $12,368 while all 30 broker
+contracts and every ledger fill row remained unchanged. Fresh 2026-11-13 audit
+shows zero orders needing review, zero unexpected contract mismatches and the
+same two positions awaiting settlement. There are no recovery jobs, no panic
+halt and no emergency submissions. The activated journal retains 107 events,
+with the same 41 fee-incomplete, five unresolved historical expiries and ten
+unattributed trades; none qualify for certified performance.
+
+The first activation exposed a concurrent cache-invalidation race at startup.
+An order refresh revoked an in-flight balance publisher; the next read recovered.
+Added a bounded retry within the original deadline that reacquires the resource
+and never publishes or returns the invalidated response. Its deterministic
+regression and all 48 broker snapshot/market-data tests pass. The final complete
+isolated suite passes 797 tests and 82 subtests, with two optional checks skipped
+and zero production-record mutations. Static checks of repaired modules pass,
+excluding two pre-existing unused-name warnings in the ledger and record loader.
+
+Final runtime image is
+`sha256:3a00e9641468a232da66716220f2e1be048ef4f98947775572d2f54ec4fd98e2`.
+Both execution services are healthy and the dashboard returns HTTP 200. No
+startup balance-publisher errors recur. Twelve deployed source hashes match the
+workspace. All 906 ledger fill rows, all 30 broker contracts, and all 24 existing
+broker order statuses match the baseline. The provider's current-day order list
+rolled over to empty; individual historical GETs confirmed all 24 statuses.
+Private configuration is unchanged. Final verification is retained in
+`logs/reconciliation/remaining-repairs-final-verification.json`, alongside the
+immutable provider captures, repair manifest and original-record backups.
+
+Publication target is `origin/codex/fix-bot-runtime` at the user-confirmed
+`ysaykin/ai_trader_bot` repository. Its existing main history is retained.
+
 ## Activate exit and runtime safeguards, 2026-11-12
 
 The user requested restart and live verification of the implemented safeguards.

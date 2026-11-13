@@ -23,6 +23,16 @@ from test_regressions import iron_condor, incubator
 
 
 class TradierOrderRoutingTests(unittest.TestCase):
+    def test_external_recovery_tag_is_not_ingested_by_strategy_polling(self) -> None:
+        self.broker._pull_broker_all_orders = Mock(return_value=[
+            {"id": 987654, "tag": "RC0123456789abcdef0123", "status": "filled"},
+        ])
+        self.broker._first_iteration = False
+        with patch.object(self.broker, "_parse_broker_order_dict", side_effect=AssertionError("Recovery belongs to its worker")) as parse:
+            self.broker.do_polling()
+        parse.assert_not_called()
+        self.assertEqual(self.events, [])
+
     def setUp(self) -> None:
         environment = patch.dict(os.environ, {"LUMIBOT_TELEMETRY": "0"}, clear=True)
         environment.start()

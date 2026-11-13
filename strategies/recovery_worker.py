@@ -5,9 +5,8 @@ import argparse
 import logging
 import signal
 import sys
-import time
 
-from strategies.position_ledger import PositionLedger
+from strategies.position_ledger import PositionLedger, resolve_ledger_path
 from strategies.recovery import RecoveryCoordinator
 
 logging.basicConfig(
@@ -24,11 +23,12 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=2.0, help="Polling interval in seconds")
     args = parser.parse_args()
 
-    ledger = PositionLedger()
+    ledger = PositionLedger(resolve_ledger_path(), read_only=args.check_readiness)
     coordinator = RecoveryCoordinator(ledger=ledger, poll_interval=args.interval)
 
     if args.check_readiness:
         ready = coordinator.is_ready()
+        ledger.close()
         logger.info("Recovery readiness: %s", "READY" if ready else "NOT READY")
         return 0 if ready else 1
 
@@ -45,6 +45,7 @@ def main() -> int:
         coordinator.run_loop(poll_interval=args.interval, once=args.once)
     finally:
         coordinator.stop()
+        ledger.close()
     return 0
 
 

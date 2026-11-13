@@ -240,7 +240,8 @@ class TradeJournalTests(unittest.TestCase):
                 },
             ]
             path.write_text("".join(json.dumps(row) + "\n" for row in records))
-            [trade] = trade_logger.load_all_trades(path)
+            [trade] = trade_logger.load_all_trades(path, partition="all")
+            self.assertFalse(trade["is_eligible"])
         self.assertEqual(trade["gross_pnl"], 70.0)
         self.assertEqual(trade["fees"], 6.4)
         self.assertEqual(trade["net_pnl"], 63.6)

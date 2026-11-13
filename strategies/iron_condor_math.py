@@ -58,8 +58,9 @@ def select_short_strikes(
     offset = min(max(offset, width), price * 0.05)
     target_put = price - offset
     target_call = price + offset
-    puts = (strike for strike in available if strike <= price)
-    calls = (strike for strike in available if strike >= price)
+    available_set = set(available)
+    puts = (strike for strike in available if strike <= price and strike - width in available_set)
+    calls = (strike for strike in available if strike >= price and strike + width in available_set)
     put = min(puts, key=lambda strike: abs(strike - target_put), default=None)
     call = min(calls, key=lambda strike: abs(strike - target_call), default=None)
     return put, call
@@ -234,10 +235,6 @@ def select_short_strikes_skew(
     available_set = set(available)
     puts = [s for s in available if s <= price and (s - width) in available_set]
     calls = [s for s in available if s >= price and (s + width) in available_set]
-    if not puts:
-        puts = [s for s in available if s <= price]
-    if not calls:
-        calls = [s for s in available if s >= price]
     if not puts or not calls:
         return None, None
 

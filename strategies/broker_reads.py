@@ -83,7 +83,23 @@ class BrokerReads:
         self.token, self.account, self.sandbox = token, account, sandbox
         self.base_url = "https://sandbox.tradier.com/v1" if sandbox else "https://api.tradier.com/v1"
         self.headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        market_token = str(settings.get("TRADIER_MARKET_DATA_TOKEN") or "").strip()
+        market_file = str(settings.get("TRADIER_MARKET_DATA_TOKEN_FILE") or "").strip()
+        if market_token and market_file:
+            raise ValueError("Configure a market-data token or token file, not both")
+        if market_file:
+            market_token = Path(market_file).expanduser().read_text().strip()
+            if not market_token:
+                raise ValueError("Market-data credential file is empty")
+        market_paper = str(settings.get("TRADIER_MARKET_DATA_PAPER") or "false").strip().lower()
+        if market_paper not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+            raise ValueError("TRADIER_MARKET_DATA_PAPER must be a boolean")
+        self.market_sandbox = market_paper in {"true", "1", "yes", "on"} if market_token else sandbox
+        self.market_base_url = "https://sandbox.tradier.com/v1" if self.market_sandbox else "https://api.tradier.com/v1"
+        self.market_headers = {"Authorization": f"Bearer {market_token or token}", "Accept": "application/json"}
         self.scope = hashlib.sha256(f"{sandbox}:{token}".encode()).hexdigest()
+        if market_token:
+            self.scope = hashlib.sha256(f"{self.scope}:market:{self.market_sandbox}:{market_token}".encode()).hexdigest()
         self.account_key = hashlib.sha256(f"{self.scope}:{account}".encode()).hexdigest()
         from strategies.runtime_records import (
             is_protected_runtime_path,
@@ -176,6 +192,8 @@ class BrokerReads:
         with self.db() as db:
             return {
                 "versions": versions,
+                "market_data_environment": "paper" if self.market_sandbox else "live",
+                "execution_environment": "paper" if self.sandbox else "live",
                 "counters": {r["name"]: r["value"] for r in db.execute("SELECT * FROM counters WHERE scope=?", (self.scope,))},
                 "attempts": [dict(r) for r in db.execute(
                     "SELECT at,category,endpoint,caller,status,latency,retry FROM attempts WHERE scope=? ORDER BY at", (self.scope,))],
@@ -224,7 +242,8 @@ class BrokerReads:
         now = self.clock()
         with self.db(True) as db:
             row = db.execute("SELECT * FROM quotas WHERE scope=? AND category=?", (self.scope, category)).fetchone()
-            allowed = 60 if self.sandbox or category == "trading" else 120
+            source_is_paper = self.market_sandbox if category == "market" else self.sandbox
+            allowed = 60 if source_is_paper or category == "trading" else 120
             if row is None or now >= row["expires"]:
                 db.execute("INSERT OR REPLACE INTO quotas VALUES (?,?,?,0,0,?,?)",
                            (self.scope, category, now + 60, row["allowed"] if row else allowed,
@@ -414,23 +433,31 @@ class BrokerReads:
                 return self.quotes(str(params.get("symbols", "")).split(","), fresh=fresh, caller=caller)
             key = self._key(endpoint, params)
             deadline = self.clock() + timeout
-            payload, lease = self._claim(key, deadline, _fresh.get() if fresh is None else fresh)
-            if lease is None:
-                self.count("cache_hits")
-                return payload
-            category = "market" if endpoint.startswith("/markets/") else "standard"
-            try:
-                previous = self.snapshot(key)["data"]
-                payload = self._fetch(endpoint, params, category, caller, deadline)
-                self._validate(payload, key)
-                self._publish(key, lease, payload)
-                if (key == "orders" or "/orders/" in key) and previous is not None and payload != previous:
-                    self.invalidate(inventory_only=True)
-                return payload
-            except Exception as error:
-                message = str(error) if isinstance(error, BrokerReadUnavailable) else "Broker transport failure"
-                self._publish(key, lease, error=message)
-                raise BrokerReadUnavailable(message) from None
+            for publication_attempt in range(2):
+                payload, lease = self._claim(key, deadline, _fresh.get() if fresh is None else fresh)
+                if lease is None:
+                    self.count("cache_hits")
+                    return payload
+                category = "market" if endpoint.startswith("/markets/") else "standard"
+                try:
+                    previous = self.snapshot(key)["data"]
+                    payload = self._fetch(endpoint, params, category, caller, deadline)
+                    self._validate(payload, key)
+                    self._publish(key, lease, payload)
+                    if (key == "orders" or "/orders/" in key) and previous is not None and payload != previous:
+                        self.invalidate(inventory_only=True)
+                    return payload
+                except Exception as error:
+                    message = str(error) if isinstance(error, BrokerReadUnavailable) else "Broker transport failure"
+                    try:
+                        self._publish(key, lease, error=message)
+                    except BrokerReadUnavailable:
+                        # A concurrent order change revokes in-flight inventory
+                        # reads. Reacquire once within the original deadline;
+                        # never return the response captured before invalidation.
+                        if publication_attempt == 0 and self.clock() < deadline:
+                            continue
+                    raise BrokerReadUnavailable(message) from None
         except sqlite3.Error as error:
             raise BrokerReadUnavailable(f"Broker storage failure: {error}") from None
 
@@ -443,8 +470,11 @@ class BrokerReads:
             started = self.clock()
             response = None
             try:
-                response = self.transport("GET", self.base_url + endpoint, params=params,
-                                          headers=self.headers, timeout=max(.1, deadline - started))
+                market = endpoint.startswith("/markets/")
+                base_url = self.market_base_url if market else self.base_url
+                headers = self.market_headers if market else self.headers
+                response = self.transport("GET", base_url + endpoint, params=params,
+                                          headers=headers, timeout=max(.1, deadline - started))
                 status = response.status_code
                 if status == 200:
                     try:
@@ -644,7 +674,9 @@ _clients_lock = threading.Lock()
 
 def get_broker_reads(token, account, sandbox=True):
     token, account = token.strip(), account.strip()
-    key = (token, account, sandbox, os.getenv("BROKER_SNAPSHOT_PATH", ""))
+    key = (token, account, sandbox, os.getenv("BROKER_SNAPSHOT_PATH", ""),
+           os.getenv("TRADIER_MARKET_DATA_TOKEN", ""), os.getenv("TRADIER_MARKET_DATA_TOKEN_FILE", ""),
+           os.getenv("TRADIER_MARKET_DATA_PAPER", ""))
     with _clients_lock:
         if key not in _clients:
             _clients[key] = BrokerReads(token, account, sandbox)

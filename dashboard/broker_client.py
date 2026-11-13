@@ -380,8 +380,8 @@ class TradierClient:
         # A prior dispatch without a broker ID cannot be safely matched after a
         # timeout. Keep it unresolved rather than risk placing a duplicate order.
         try:
-            from strategies.position_ledger import PositionLedger
-            with_ledger = PositionLedger()
+            from strategies.position_ledger import PositionLedger, resolve_ledger_path
+            with_ledger = PositionLedger(resolve_ledger_path())
             try:
                 prior = with_ledger.get_unresolved_emergency_submissions()
                 orders = {str(o.get("id")): o for o in self._fetch_all_orders()} if prior else {}
@@ -522,8 +522,8 @@ class TradierClient:
                 intent_id = f"emerg_{sym}_{int(time.time() * 1000)}"
                 ledger = None
                 try:
-                    from strategies.position_ledger import PositionLedger
-                    ledger = PositionLedger()
+                    from strategies.position_ledger import PositionLedger, resolve_ledger_path
+                    ledger = PositionLedger(resolve_ledger_path())
                     limit_p = float(data["price"]) if "price" in data else None
                     ledger.persist_emergency_intent(
                         intent_id, sym, side, abs_qty, price=limit_p, payload=data

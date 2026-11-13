@@ -8,13 +8,10 @@ from __future__ import annotations
 
 import logging
 import fcntl
-import os
-import signal
-import sys
 import threading
-import time
 import uuid
-from typing import Any
+import time
+from datetime import datetime, timezone
 
 from strategies.position_ledger import PositionLedger, resolve_ledger_path
 
@@ -30,19 +27,58 @@ class RecoveryCoordinator:
         worker_id: str | None = None,
         poll_interval: float = 1.0,
     ) -> None:
-        self.ledger = ledger or PositionLedger()
+        self.ledger = ledger or PositionLedger(resolve_ledger_path())
         self.worker_id = worker_id or f"worker_{uuid.uuid4().hex[:8]}"
         self.poll_interval = max(0.1, poll_interval)
         self._stop_event = threading.Event()
         self._worker_thread: threading.Thread | None = None
         self._running = False
         self._is_active_worker = False
+        self._last_day_reconciliation = float('-inf')
+
+    def reconcile_ended_day_orders(self) -> bool:
+        """Release stale reservations even while strategies sleep overnight."""
+        from strategies.day_orders import reconcile
+        from strategies.order_sessions import day_session_ended
+        now = datetime.now(timezone.utc)
+        pending = [b for b in self.ledger.open_baskets() if self.ledger.is_inflight(b)
+                   and (b.duration or '').lower() == 'day' and day_session_ended(b.created_at, now)]
+        if not pending or time.monotonic() - self._last_day_reconciliation < 60:
+            return False
+        self._last_day_reconciliation = time.monotonic()
+        from dashboard.broker_client import get_broker_client
+        client = get_broker_client()
+        if client is None or not client.sandbox or client.account != self.ledger.record_scope.account_id:
+            return False
+        with self.ledger.execution_gate():
+            orders = client._fetch_all_orders()
+            positions = client._fetch_all_positions()
+            ids = {str(row['id']) for row in orders}
+            for basket in pending:
+                if basket.broker_parent_id and basket.broker_parent_id not in ids:
+                    response = client._get(
+                        f'{client.base_url}/accounts/{client.account}/orders/{basket.broker_parent_id}',
+                        headers=client.headers, fresh=True)
+                    response.raise_for_status()
+                    raw = response.json().get('order')
+                    if not isinstance(raw, dict) or str(raw.get('id')) != basket.broker_parent_id:
+                        raise ValueError('Historical DAY order confirmation unavailable')
+                    orders.append(raw)
+            report = reconcile(self.ledger, orders=orders, positions=positions, now=now, apply=True)
+        changed = [row for row in report if row['result'] == 'canceled']
+        if changed:
+            logger.info('Released %d ended DAY reservations without changing fills.', len(changed))
+        return bool(changed)
 
     def is_ready(self) -> bool:
         """Readiness probe: verify ledger connectivity and worker state."""
         try:
-            self.ledger._connection.execute("SELECT 1").fetchone()
-            return True
+            rows = self.ledger._connection.execute(
+                "SELECT last_heartbeat FROM recovery_worker_heartbeat WHERE is_active=1"
+            ).fetchall()
+            now = datetime.now(timezone.utc)
+            return any(-5 <= (now - datetime.fromisoformat(row[0])).total_seconds() <= 15
+                       for row in rows)
         except Exception as exc:
             logger.warning("Recovery readiness probe failed: %s", exc)
             return False
@@ -80,6 +116,12 @@ class RecoveryCoordinator:
     def run_step(self) -> bool:
         """Process one pending recovery job or panic halt check. Returns True if work was done."""
         try:
+            self.ledger.flush_outbox()
+            passive_work = False
+            try:
+                passive_work = self.reconcile_ended_day_orders()
+            except Exception as exc:
+                logger.warning('DAY reconciliation retained reservations: %s', exc)
             # 1. If system is panic halted, ensure durable account recovery job exists
             if self.ledger.is_panic_halted():
                 self.ledger.enqueue_recovery_job(scope="account")
@@ -87,7 +129,7 @@ class RecoveryCoordinator:
             # 2. Claim next available job
             job = self.ledger.claim_next_recovery_job(self.worker_id)
             if not job:
-                return False
+                return passive_work
 
             job_id = job["job_id"]
             scope = job.get("scope", "account")
@@ -127,11 +169,16 @@ class RecoveryCoordinator:
                     )
                     return True
 
-                # Do not acknowledge a position until its owned fills have been
-                # reconciled. A broker-wide flatten would affect other owners.
-                self.ledger.update_recovery_job(
-                    job_id, status="pending", last_error="Scoped fill reconciliation is not implemented"
-                )
+                from strategies.scoped_recovery import recover_position
+                try:
+                    with self.ledger.execution_gate():
+                        complete, detail = recover_position(self.ledger, client, job)
+                    self.ledger.flush_outbox()
+                    self.ledger.update_recovery_job(
+                        job_id, status="completed" if complete else "pending", last_error=detail
+                    )
+                except Exception as exc:
+                    self.ledger.update_recovery_job(job_id, status="pending", last_error=str(exc))
                 return True
 
             return False
