@@ -1598,6 +1598,8 @@ class PositionLedger:
         now = datetime.now(timezone.utc)
         now_str = now.isoformat()
         with self._lock, self._connection:
+            if not self._connection.in_transaction:
+                self._connection.execute('BEGIN IMMEDIATE')
             rows = self._connection.execute(
                 "SELECT * FROM recovery_worker_heartbeat WHERE is_active = 1"
             ).fetchall()
@@ -1611,6 +1613,8 @@ class PositionLedger:
                             return False
                     except Exception:
                         pass
+            self._connection.execute(
+                'UPDATE recovery_worker_heartbeat SET is_active=0 WHERE worker_id!=?', (worker_id,))
             self._connection.execute(
                 """INSERT INTO recovery_worker_heartbeat (worker_id, pid, hostname, last_heartbeat, is_active)
                    VALUES (?, ?, ?, ?, 1)

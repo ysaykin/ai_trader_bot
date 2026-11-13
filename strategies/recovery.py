@@ -107,11 +107,10 @@ class RecoveryCoordinator:
         if not self._running:
             return
         self._stop_event.set()
-        if self._worker_thread and self._worker_thread.is_alive():
+        if (self._worker_thread and self._worker_thread.is_alive()
+                and self._worker_thread is not threading.current_thread()):
             self._worker_thread.join(timeout=timeout)
-        self._running = False
-        self._is_active_worker = False
-        logger.info("Recovery coordinator stopped (worker_id=%s).", self.worker_id)
+        logger.info("Recovery coordinator stop requested (worker_id=%s).", self.worker_id)
 
     def run_step(self) -> bool:
         """Process one pending recovery job or panic halt check. Returns True if work was done."""
@@ -191,19 +190,29 @@ class RecoveryCoordinator:
         # The OS lock remains held during slow broker calls, when a heartbeat
         # lease alone could expire and admit a second worker.
         lock_file = None
-        if self.ledger.path != ":memory:":
-            lock_file = open(self.ledger.path + ".recovery.lock", "a+")
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                lock_file.close()
-                return
         try:
+            if self.ledger.path != ":memory:":
+                lock_file = open(self.ledger.path + ".recovery.lock", "a+")
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    lock_file.close()
+                    lock_file = None
+                    return
+            self._running = True
             self._run_locked_loop(poll_interval, once)
         finally:
-            if lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                lock_file.close()
+            try:
+                if self._is_active_worker:
+                    self.ledger.release_worker(self.worker_id)
+            except Exception as exc:
+                logger.warning('Could not release recovery worker heartbeat: %s', exc)
+            finally:
+                self._running = False
+                self._is_active_worker = False
+                if lock_file:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                    lock_file.close()
 
     def _run_locked_loop(self, poll_interval: float, once: bool) -> None:
         while not self._stop_event.is_set():
@@ -224,12 +233,6 @@ class RecoveryCoordinator:
             if once:
                 break
             self._stop_event.wait(poll_interval)
-
-        # Release worker lease upon loop exit
-        try:
-            self.ledger.release_worker(self.worker_id)
-        except Exception:
-            pass
 
 
 def run_recovery_step(ledger: PositionLedger | None = None) -> bool:

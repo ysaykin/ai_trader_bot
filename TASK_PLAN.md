@@ -1,5 +1,41 @@
 # Implementation task plan
 
+## Audit worker shutdown and external reconciliation dependencies, 2026-11-13
+
+The previous goal turn deployed and pushed the main repairs. A current-state
+audit found inactive processes whose recovery heartbeat rows still say active.
+Reproduce foreground interruption, move lease release into unconditional loop
+cleanup, verify immediate restart and stale-row retirement, and publish the
+follow-up after offline tests and a worker-only lifecycle check. Broker fee and
+settlement completion still requires provider activity absent from the available
+sandbox exports. A request for a local statement/activity-export path is pending.
+
+The new interruption regressions reproduced stale active markers on SystemExit
+and RuntimeError, a false foreground running flag, and stale rows remaining
+active after replacement. The loop now releases its own claimed lease in finally,
+clears lifecycle flags on every exit and retains the OS lock through cleanup.
+An excluded worker cannot release the current owner's lease, including when a
+worker ID is reused. Acquiring a heartbeat lease retires stale active markers
+within one write transaction. The full isolated suite passes 802 tests and 82
+subtests, with two optional checks skipped and protected records unchanged.
+Static checks pass apart from the documented pre-existing unused ledger name.
+
+Deployed only the recovery worker on image
+`sha256:440dbe8da4c642700d90bcfbd429c222df0d14437e5626601526cf31b8065560`.
+A real SIGTERM released its heartbeat lease; the replacement acquired ownership
+in 0.393 seconds with exactly one active worker. The financial-record fingerprint
+is unchanged. Bot and dashboard start times are unchanged. Evidence is retained
+in `logs/reconciliation/worker-shutdown-verification.json`.
+
+A fresh 2026-11-13 provider read still returns HTTP 200 with null account history.
+All 105 captured order responses lack fee, commission and settlement fields.
+The gain/loss response contains 140 cost-basis lots, but no matching disposition
+for four of the eight expired owned contracts. The other four matching lots
+closed before expiry and do not establish the missing settlements. Cost basis
+and proceeds cannot supply the missing activity identities or actual fees.
+Provider contracts are documented in [account history](https://docs.tradier.com/account-details/get-account-history)
+and [gain/loss](https://docs.tradier.com/account-details/get-account-gain-loss).
+
 ## Finish runtime, reconciliation, entries and verification, 2026-11-12
 
 The user requested fixing all six remaining findings and pushing the result.

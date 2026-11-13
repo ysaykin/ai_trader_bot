@@ -23,6 +23,66 @@ def test_recovery_readiness_requires_a_live_worker(tmp_path):
     ledger.close()
 
 
+@pytest.mark.parametrize('interruption', [SystemExit, RuntimeError])
+def test_foreground_interruption_releases_lease_for_immediate_restart(tmp_path, interruption):
+    ledger = PositionLedger(tmp_path / 'ledger.sqlite3')
+    worker = RecoveryCoordinator(ledger=ledger, worker_id='old')
+    with patch.object(worker, 'run_step', side_effect=interruption('interrupted')):
+        with pytest.raises(interruption):
+            worker.run_loop(once=True)
+    active = ledger._connection.execute(
+        'SELECT is_active FROM recovery_worker_heartbeat WHERE worker_id=?', ('old',)).fetchone()[0]
+    assert active == 0
+    assert not worker._running and not worker._is_active_worker
+    replacement = RecoveryCoordinator(ledger=ledger, worker_id='new')
+    with patch.object(replacement, 'run_step') as step:
+        replacement.run_loop(once=True)
+    step.assert_called_once()
+    ledger.close()
+
+
+def test_foreground_running_state_clears_after_each_once_run(tmp_path):
+    ledger = PositionLedger(tmp_path / 'ledger.sqlite3')
+    worker = RecoveryCoordinator(ledger=ledger)
+    observed = []
+    with patch.object(worker, 'run_step', side_effect=lambda: observed.append(worker._running)):
+        worker.run_loop(once=True)
+        worker.run_loop(once=True)
+    assert observed == [True, True]
+    assert not worker._running and not worker._is_active_worker
+    ledger.close()
+
+
+def test_new_worker_retires_stale_active_markers(tmp_path):
+    ledger = PositionLedger(tmp_path / 'ledger.sqlite3')
+    assert ledger.acquire_worker_exclusion('stale')
+    old = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    ledger._connection.execute('UPDATE recovery_worker_heartbeat SET last_heartbeat=?', (old,))
+    ledger._connection.commit()
+    assert ledger.acquire_worker_exclusion('current')
+    active = [r[0] for r in ledger._connection.execute(
+        'SELECT worker_id FROM recovery_worker_heartbeat WHERE is_active=1')]
+    assert active == ['current']
+    ledger.close()
+
+
+def test_excluded_worker_cannot_release_the_existing_owner(tmp_path):
+    import fcntl
+    ledger = PositionLedger(tmp_path / 'ledger.sqlite3')
+    assert ledger.acquire_worker_exclusion('shared-id')
+    with open(ledger.path + '.recovery.lock', 'a+') as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        other = RecoveryCoordinator(ledger=ledger, worker_id='shared-id')
+        with patch.object(other, 'run_step') as step:
+            other.run_loop(once=True)
+        step.assert_not_called()
+        active = ledger._connection.execute(
+            'SELECT is_active FROM recovery_worker_heartbeat WHERE worker_id=?', ('shared-id',)).fetchone()[0]
+        assert active == 1
+    ledger.release_worker('shared-id')
+    ledger.close()
+
+
 @pytest.mark.parametrize("with_protection", [False, True])
 @pytest.mark.parametrize("shared_contracts", [False, True])
 @pytest.mark.parametrize("lost_response", [False, True])
